@@ -75,6 +75,7 @@ enum CPS_ACCESS_AREA
 #endif
 
 
+#include "crypto/dmr_aes_hook.h"
 static void handleCPSRequest(void);
 
 volatile int com_request = 0;
@@ -651,6 +652,14 @@ static void cpsHandleCommand(void)
 	int command = com_requestbuffer[1];
 	switch(command)
 	{
+#ifdef ENABLE_AES
+		case 0x80: // SUB set AES key: [2]=keyId, [3..34]=32-byte key
+			dmrAesStoreKey(com_requestbuffer[2], (uint8_t *)&com_requestbuffer[3]);
+			usbComSendBuf[0] = com_requestbuffer[0];
+			hasToReply = true;
+			replyLength = 1;
+			break;
+#endif
 		case 0:
 #if defined(HAS_GPS)
 			cpsStopGPSNMEA();

@@ -98,3 +98,14 @@ before running `flash.sh` / the loader.
 - **PI-header trigger + DMR voice octet mapping** for AES RX - confirm against an over-the-air capture (TODO).
 - **TX encryption** not yet wired (RX decrypt only).
 - **Physical flash** untested here (needs the radio + a valid donor).
+
+## Loading an AES key (host tool)
+AES builds add a CPS subcommand to store keys. With the radio connected over USB:
+```sh
+pip install -r MDUV380_firmware/tools/requirements.txt
+python3 MDUV380_firmware/tools/aes_key_tool.py --key <64-hex-chars> [--keyid 1]
+```
+The tool sends the key over the OpenGD77 CPS serial protocol; the firmware stores it safely in the
+codeplug custom-data region (CODEPLUG_CUSTOM_DATA_TYPE_AES_KEYS) via codeplugSetOpenGD77CustomData() and
+reloads it. Keys are read on first use during RX. (The exact CPS serial framing is taken from the firmware
+source - validate against a real radio. The on-radio key-entry menu is a planned alternative.)
