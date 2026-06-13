@@ -35,3 +35,26 @@ the AMBE burst is read (before the vocoder); the crypto lives in application/sou
 the 32-bit MI to 128-bit IV LFSR, all standalone, host-unit-tested). The exact PI-header trigger and the DMR
 voice octet mapping are marked TODO(OTA) pending an over-the-air capture against a stock TYT radio.
 Encrypted voice is for licensed commercial/PMR use only; not legal on amateur bands in most countries.
+
+## Flashing - the AMBE codec is merged at flash time (important)
+DMR uses the proprietary AMBE+2 vocoder (DVSI-licensed), which OpenGD77 cannot legally distribute. So neither
+the source nor ANY built .bin - ours OR the official OpenGD77 releases - contains the codec. The linker
+reserves an empty region (.codec_bin_section_1, ~117 KB at 0x08057F50..0x0807537C); this is verified 100%
+zero in both our CI build and the official OpenMDUV380_10W_PLUS.bin. The real codec is extracted from official
+TYT firmware and merged into that region at flash time.
+
+Therefore the CI artifact is NOT a directly-flashable DMR image on its own (it would be FM-only). It must be
+processed by the OpenGD77 firmware loader, exactly like any OpenGD77 source build. Steps
+(tools/opengd77_stm32_firmware_loader.py ships in this repo):
+
+1. Obtain an official TYT MD-UV390 firmware .bin (file header "OutSecurityBin") - the AMBE codec source.
+2. Put the radio into DFU / bootloader mode.
+3. Run:
+       python3 MDUV380_firmware/tools/opengd77_stm32_firmware_loader.py          -s <official_TYT_firmware.bin>          -f MDUV380_firmware/build/openuv380-10w.bin          -m <model>      # run with --help to list model tokens (pick the MD-UV390 10W one)
+   (-s/--source is remembered after the first run; -L <LANG>.gla adds a secondary language.)
+
+The loader patches the AMBE codec into the reserved region, merges language packs, then downloads via DFU.
+
+AES note: the ENABLE_AES decryption operates on the encrypted AMBE byte stream BEFORE the vocoder, so it is
+independent of the codec merge. On a codec-merged AES build the hook decrypts the bytes and the merged codec
+then decodes them to audio.
