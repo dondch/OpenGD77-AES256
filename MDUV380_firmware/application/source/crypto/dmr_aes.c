@@ -170,9 +170,12 @@ uint32_t dmr_aes_superframe(dmr_aes_ctx_t *c) {
 size_t dmr_aes_crypt_frame(dmr_aes_ctx_t *c, uint8_t *voice, size_t n, size_t octet_off) {
     if (!c->have_key) return octet_off;            /* passthrough = clear voice */
     /* Generate enough keystream to cover octet_off+n; OFB is deterministic from IV. */
-    uint8_t ks[16*20]; size_t need = octet_off + n; int nblk = (int)((need+15)/16);
-    if (nblk > 20) nblk = 20;                      /* one superframe fits comfortably */
+    /* AES-OFB discards the first keystream block; voice application starts after it.
+     * DMR_AES_KS_DISCARD is the octet base (16 = one AES block). Confirm exact DMR base at bench. */
+    #define DMR_AES_KS_DISCARD 16
+    uint8_t ks[16*24]; size_t need = DMR_AES_KS_DISCARD + octet_off + n; int nblk = (int)((need+15)/16);
+    if (nblk > 24) nblk = 24;
     aes256_ofb_keystream(c->iv, c->key, ks, nblk);
-    for (size_t i=0; i<n; ++i) voice[i] ^= ks[octet_off + i];
+    for (size_t i=0; i<n; ++i) voice[i] ^= ks[DMR_AES_KS_DISCARD + octet_off + i];
     return octet_off + n;
 }

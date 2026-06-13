@@ -1781,6 +1781,7 @@ void hrc6000TimeslotInterruptHandler(void)
 
 					if (hrc.hotspotDMRTxFrameBufferEmpty == false)
 					{
+						dmrAesTxVoice((uint8_t *)(deferredUpdateBuffer + LC_DATA_LENGTH), hrc.txSequence); // AES TX encrypt (no-op unless active)
 						SPI1WritePageRegByteArray(0x03, 0x00, (uint8_t*)(deferredUpdateBuffer + LC_DATA_LENGTH), AMBE_AUDIO_LENGTH); // send the audio bytes to the hardware
 						hrc.hotspotDMRTxFrameBufferEmpty = true; // we have finished with the current frame data from the hotspot
 					}
@@ -1803,6 +1804,7 @@ void hrc6000TimeslotInterruptHandler(void)
 
 					if (hrc.ambeBufferCount >= NUM_AMBE_BLOCK_PER_DMR_FRAME)
 					{
+						dmrAesTxVoice((uint8_t *)hrc.deferredUpdateBufferOutPtr, hrc.txSequence); // AES TX encrypt
 						SPI1WritePageRegByteArray(0x03, 0x00, (uint8_t*)hrc.deferredUpdateBufferOutPtr, AMBE_AUDIO_LENGTH);// send the audio bytes to the hardware
 						hrc.deferredUpdateBufferOutPtr += AMBE_AUDIO_LENGTH;
 
