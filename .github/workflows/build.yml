@@ -24,6 +24,14 @@ jobs:
       - name: Report size
         working-directory: MDUV380_firmware
         run: arm-none-eabi-size build/openuv380-10w.elf
+      - name: Assert codec-merge-capable size
+        working-directory: MDUV380_firmware
+        run: |
+          sz=$(stat -c%s build/openuv380-10w.bin)
+          echo "firmware .bin size: $sz bytes"
+          # must be >= codec write offset (0x6937C) + codec size (0x48BB0) = 728876
+          test "$sz" -ge 728876 || { echo "ERROR: .bin too small to receive the AMBE codec merge (FM-only)"; exit 1; }
+          echo "OK: reserved codec region present, ready for flash-time merge."
       - uses: actions/upload-artifact@v4
         with:
           name: openuv380-10w-aes${{ matrix.aes }}

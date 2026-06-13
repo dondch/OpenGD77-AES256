@@ -30,8 +30,17 @@ LDFLAGS = $(CPU) -T$(LDSCRIPT) --specs=nano.specs -Wl,--gc-sections -Wl,-Map=$(B
 
 C_SRCS   = $(shell find Core Drivers Middlewares USB_DEVICE application -name *.c ! -name languages_builder.c ! -name *_template.c)
 ASM_SRCS = Core/Startup/startup_stm32f405vgtx.s
-OBJS = $(addprefix $(BUILD)/,$(C_SRCS:.c=.o)) $(addprefix $(BUILD)/,$(ASM_SRCS:.s=.o))
+ASM_SRCS_S = $(shell find application -name *.S)
+OBJS = $(addprefix $(BUILD)/,$(C_SRCS:.c=.o)) $(addprefix $(BUILD)/,$(ASM_SRCS:.s=.o)) $(addprefix $(BUILD)/,$(ASM_SRCS_S:.S=.o))
 DEPS = $(OBJS:.o=.d)
+
+.DEFAULT_GOAL := all
+LINKERDATA_BIN = application/source/linkerdata/codec_bin_section_1.bin
+$(LINKERDATA_BIN):
+	@chmod +x tools/codec_cleaner.Linux
+	cd application/source/linkerdata && ../../../tools/codec_cleaner.Linux -C
+
+$(BUILD)/application/source/dmr_codec/codec_bin.o: $(LINKERDATA_BIN)
 
 all: $(BUILD)/$(TARGET).bin $(BUILD)/$(TARGET).hex
 
@@ -42,6 +51,10 @@ $(BUILD)/%.o: %.c
 $(BUILD)/%.o: %.s
 	@mkdir -p $(dir $@)
 	$(CC) $(CPU) -c $< -o $@
+
+$(BUILD)/%.o: %.S
+	@mkdir -p $(dir $@)
+	$(CC) $(CPU) -I. -Iapplication -c $< -o $@
 
 $(BUILD)/$(TARGET).elf: $(OBJS)
 	$(CC) $(OBJS) $(LDFLAGS) -o $@
