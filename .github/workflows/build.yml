@@ -1,0 +1,29 @@
+name: Build MD-UV390 10W firmware
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install ARM GNU toolchain
+        uses: carlosperate/arm-none-eabi-gcc-action@v1
+        with:
+          release: "14.2.Rel1"
+      - name: Build (MDUV380_10W_PLUS_FW)
+        working-directory: MDUV380_firmware
+        run: make -j$(nproc)
+      - name: Report size
+        working-directory: MDUV380_firmware
+        run: arm-none-eabi-size build/openuv380-10w.elf
+      - uses: actions/upload-artifact@v4
+        with:
+          name: openuv380-10w-firmware
+          path: |
+            MDUV380_firmware/build/*.bin
+            MDUV380_firmware/build/*.hex
+            MDUV380_firmware/build/*.elf
