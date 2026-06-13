@@ -311,6 +311,10 @@ volatile int dmrMonitorCapturedTS = -1;
 
 static bool hrc6000CallAcceptFilter(void);
 static void hrc6000SendPcOrTgLCHeader(void);
+#ifdef ENABLE_AES
+static uint32_t hrc6000AesRngSeed(void);
+static void hrc6000SendAesPIHeader(void);
+#endif
 #ifdef CPU_MK22FN512VLL12
 static inline void hrc6000SysInterruptHandler(void);
 static inline void hrc6000TimeslotInterruptHandler(void);
@@ -1720,6 +1724,15 @@ void hrc6000TimeslotInterruptHandler(void)
 		case DMR_STATE_TX_START_1: // Start TX (second step)
 			LedWrite(LED_RED, 1); // for repeater wakeup
 			hrc6000SendPcOrTgLCHeader();
+#ifdef ENABLE_AES
+			{
+				uint8_t aesTxKeyId = dmrAesTxKeyId();
+				if (aesTxKeyId != 0)
+				{
+					dmrAesTxStart(aesTxKeyId, hrc6000AesRngSeed()); // begin encrypted call (fresh MI)
+				}
+			}
+#endif
 			SPI0WritePageRegByte(0x04, 0x41, 0x80);    // Transmit during next Timeslot
 			SPI0WritePageRegByte(0x04, 0x50, 0x10);    // Set Data Type to 0001 (Voice LC Header), Data, LCSS=00
 			trxIsTransmitting = true;
@@ -1733,7 +1746,18 @@ void hrc6000TimeslotInterruptHandler(void)
 
 		case DMR_STATE_TX_START_3: // Start TX (fourth step)
 			SPI0WritePageRegByte(0x04, 0x41, 0x80);     // Transmit during Next Timeslot
+#ifdef ENABLE_AES
+			if (dmrAesTxActive())
+			{
+				hrc6000SendAesPIHeader();               // emit PI header in place of the redundant LC header
+			}
+			else
+			{
+				SPI0WritePageRegByte(0x04, 0x50, 0x10); // Set Data Type to 0001 (Voice LC Header), Data, LCSS=00
+			}
+#else
 			SPI0WritePageRegByte(0x04, 0x50, 0x10);     // Set Data Type to 0001 (Voice LC Header), Data, LCSS=00
+#endif
 			slotState = DMR_STATE_TX_START_4;
 			break;
 
@@ -1835,6 +1859,9 @@ void hrc6000TimeslotInterruptHandler(void)
 			break;
 
 		case DMR_STATE_TX_END_1: // Stop TX (first step)
+#ifdef ENABLE_AES
+			dmrAesTxEnd(); // end encrypted call (next key-up draws a fresh MI)
+#endif
 			if (getCurrentTATxFlag() != TA_TX_OFF)
 			{
 				hrc6000SendPcOrTgLCHeader();
@@ -2182,6 +2209,39 @@ static void hrc6000SendPcOrTgLCHeader(void)
 	spi_tx[11] = 0x00;
 	SPI0WritePageRegByteArray(0x02, 0x00, spi_tx, LC_DATA_LENGTH);
 }
+
+#ifdef ENABLE_AES
+// Seed the per-call Message Indicator from the STM32 on-chip TRNG (RNG @ 0x50060800).
+// Falls back to the millisecond tick if the RNG never produces a word, so TX can't hang.
+static uint32_t hrc6000AesRngSeed(void)
+{
+	RCC->AHB2ENR |= RCC_AHB2ENR_RNGEN;
+	RNG->CR |= RNG_CR_RNGEN;
+	for (int i = 0; i < 64; i++)
+	{
+		if (RNG->SR & RNG_SR_DRDY)
+		{
+			return RNG->DR;
+		}
+	}
+	return ticksGetMillis();
+}
+
+// Emit the DMRA Privacy Indicator (PI) header as its own SPI burst at call key-up,
+// alongside the Voice LC header. Data Type 0000 = PI Header (LCSS=00).
+// NOTE(bench): exact PI burst slot/timing vs a stock TYT receiver is confirmed on-air.
+static void hrc6000SendAesPIHeader(void)
+{
+	uint8_t spi_tx[LC_DATA_LENGTH] = { 0 };
+
+	if (dmrAesTxBuildPI(spi_tx) != 7)
+	{
+		return;
+	}
+	SPI0WritePageRegByteArray(0x02, 0x00, spi_tx, LC_DATA_LENGTH);
+	SPI0WritePageRegByte(0x04, 0x50, 0x00); // Data Type 0000 (PI Header), Data, LCSS=00
+}
+#endif
 
 static bool hrc6000CallAcceptFilter(void)
 {

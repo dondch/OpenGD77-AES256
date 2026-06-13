@@ -6,6 +6,9 @@
 #ifdef ENABLE_AES
 void dmrAesLoadKeys(void);
 int  dmrAesStoreKey(uint8_t keyId, const uint8_t *key32);
+/* TX key selection: 0 = encrypted TX disabled, otherwise the keyId to transmit with. */
+uint8_t dmrAesTxKeyId(void);
+int     dmrAesSetTxKeyId(uint8_t keyId);
 /* RX */
 void dmrAesRxPI(const uint8_t *pi, int len);
 void dmrAesRxVoice(uint8_t *ambe, int seq);
@@ -19,6 +22,8 @@ void dmrAesTxEnd(void);
 #else
 static inline void dmrAesLoadKeys(void){ }
 static inline int  dmrAesStoreKey(uint8_t k, const uint8_t *p){ (void)k; (void)p; return 0; }
+static inline uint8_t dmrAesTxKeyId(void){ return 0; }
+static inline int  dmrAesSetTxKeyId(uint8_t k){ (void)k; return 0; }
 static inline void dmrAesRxPI(const uint8_t *p, int n){ (void)p; (void)n; }
 static inline void dmrAesRxVoice(uint8_t *a, int s){ (void)a; (void)s; }
 static inline void dmrAesRxEnd(void){ }

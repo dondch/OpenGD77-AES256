@@ -659,6 +659,12 @@ static void cpsHandleCommand(void)
 			hasToReply = true;
 			replyLength = 1;
 			break;
+		case 0x81: // SUB select TX key: [2]=keyId (0 = encrypted TX off)
+			dmrAesSetTxKeyId(com_requestbuffer[2]);
+			usbComSendBuf[0] = com_requestbuffer[0];
+			hasToReply = true;
+			replyLength = 1;
+			break;
 #endif
 		case 0:
 #if defined(HAS_GPS)

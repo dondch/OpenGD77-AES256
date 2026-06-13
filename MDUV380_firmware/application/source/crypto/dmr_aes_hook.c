@@ -16,19 +16,42 @@
 static dmr_aes_ctx_t s_rx, s_tx;
 static size_t        s_rxOff, s_txOff;
 static int           s_rxActive, s_txActive, s_keysLoaded;
+static uint32_t      s_txPiMi;    /* MI to advertise in the PI header (pre-advance seed) */
+static uint8_t       s_txKeyId;   /* selected TX key (AESK header byte 5); 0 = enc TX off */
 
 void dmrAesLoadKeys(void)
 {
     static uint8_t blk[AESK_BLOCK_LEN];
     s_keysLoaded = 1;
     dmr_aes_clear_keys();
+    s_txKeyId = 0;
     if (!codeplugGetOpenGD77CustomData(CODEPLUG_CUSTOM_DATA_TYPE_AES_KEYS, blk)) { return; }
     if (memcmp(blk, "AESK", 4) != 0) { return; }
+    s_txKeyId = blk[5];   /* active TX key selector (0 = encrypted TX disabled) */
     for (int i = 0; i < AESK_SLOTS; i++)
     {
         uint8_t *e = blk + AESK_HDR_LEN + i * AESK_ENTRY_LEN;
         if (e[0] == 1) { dmr_aes_set_key(e[1], e + 4); }
     }
+}
+
+uint8_t dmrAesTxKeyId(void)
+{
+    if (!s_keysLoaded) { dmrAesLoadKeys(); }
+    return s_txKeyId;
+}
+
+int dmrAesSetTxKeyId(uint8_t keyId)
+{
+    static uint8_t blk[AESK_BLOCK_LEN];
+    if (!codeplugGetOpenGD77CustomData(CODEPLUG_CUSTOM_DATA_TYPE_AES_KEYS, blk) || memcmp(blk, "AESK", 4) != 0)
+    {
+        memset(blk, 0, sizeof(blk)); memcpy(blk, "AESK", 4); blk[4] = 1;
+    }
+    blk[5] = keyId;
+    int ok = codeplugSetOpenGD77CustomData(CODEPLUG_CUSTOM_DATA_TYPE_AES_KEYS, blk, AESK_BLOCK_LEN) ? 1 : 0;
+    dmrAesLoadKeys();
+    return ok;
 }
 
 int dmrAesStoreKey(uint8_t keyId, const uint8_t *key32)
@@ -81,12 +104,16 @@ void dmrAesTxStart(uint8_t keyId, uint32_t miSeed)
     if (!s_keysLoaded) { dmrAesLoadKeys(); }
     s_txActive = (dmr_aes_tx_init(&s_tx, DMR_ALG_AES256, keyId, miSeed) == 0);
     s_txOff = 0;
+    /* The PI header advertises the pre-advance MI: the receiver's rx_init seeds its
+     * MI from this value and then runs the same initial superframe() advance we do
+     * below, so our TX and the (on-air validated) RX path stay bit-for-bit aligned. */
+    s_txPiMi = miSeed;
     if (s_txActive) { dmr_aes_superframe(&s_tx); }
 }
 int dmrAesTxBuildPI(uint8_t *piOut7)   /* build PI header LC to emit at call start / late entry */
 {
     if (!s_txActive) { return 0; }
-    dmr_pi_build(DMR_ALG_AES256, s_tx.key_id, s_tx.mi, piOut7);
+    dmr_pi_build(DMR_ALG_AES256, s_tx.key_id, s_txPiMi, piOut7);
     return 7;
 }
 void dmrAesTxVoice(uint8_t *ambe, int seq)
