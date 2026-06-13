@@ -63,3 +63,38 @@ licensed commercial/PMR use only; not legal on amateur bands in most countries.
 ## Upstream / licence
 OpenGD77 by Roger Clark VK3KYY and contributors - see `MDUV380_firmware/tools/license.txt` and upstream headers
 (BSD-3-clause style, non-commercial use only). This fork preserves all upstream source and copyright headers.
+
+## USB access for flashing (per platform)
+
+The radio is flashed over USB DFU (STM32 bootloader, VID:PID `1fc9:0094`). USB access differs by host:
+
+- **Linux (native):** install the bundled udev rule so DFU is accessible without root:
+  ```sh
+  sudo cp MDUV380_firmware/tools/udev/99-gd77.rules /etc/udev/rules.d/
+  sudo udevadm control --reload-rules
+  ```
+- **Windows:** run the loader with Python + libusb, or use the OpenGD77 CPS. The DFU interface needs the
+  WinUSB/libusb driver (e.g. via Zadig) bound to `1fc9:0094` while the radio is in bootloader mode.
+- **WSL2:** USB is not passed through by default - attach the device with `usbipd-win`
+  (`usbipd bind`/`usbipd attach --wsl`) before running `flash.sh`, or just flash from Windows.
+
+Put the radio in DFU/bootloader mode (power on with the side buttons held - see the OpenGD77 install guide)
+before running `flash.sh` / the loader.
+
+## Status: verified vs open
+
+**Verified (this fork):**
+- Builds the official R20260131 source for the 10W target; output is structurally identical to the official
+  release `OpenMDUV380_10W_PLUS.bin` (codec slot, `.data`/`.ccmram` layout, language tables, size) - the only
+  byte differences are toolchain/optimization (code) and an 8-byte zero pad.
+- Codec-merge-capable (806 KB); the AMBE codec from the **MD-9600 V5 donor** merges into the reserved 0xFF slot
+  at `0x0807537C` without touching `.data`/`.ccmram` (validated offline).
+- AES-256 module host-unit-tested (FIPS-197 + LFSR128d + OFB); compiles into the firmware behind `ENABLE_AES`.
+
+**Open items (need work or hardware):**
+- **AES key loading.** The OpenGD77 codeplug has a per-channel `encrypt` byte but no AES key-value storage, and
+  the OpenGD77 CPS has no AES key entry (stock OpenGD77 has no encryption). Loading the 32-byte key into
+  `dmr_aes_set_key()` still needs an on-radio menu, a codeplug region, or a hardcoded test key.
+- **PI-header trigger + DMR voice octet mapping** for AES RX - confirm against an over-the-air capture (TODO).
+- **TX encryption** not yet wired (RX decrypt only).
+- **Physical flash** untested here (needs the radio + a valid donor).
