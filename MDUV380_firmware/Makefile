@@ -8,6 +8,7 @@ OBJCOPY  = $(CROSS)objcopy
 SIZE     = $(CROSS)size
 
 CPU   = -mcpu=cortex-m4 -mthumb -mfpu=fpv4-sp-d16 -mfloat-abi=hard
+ENABLE_AES ?= 0
 DEFS  = -DUSE_HAL_DRIVER -DSTM32F405xx -DPLATFORM_MDUV380 -DPLATFORM_VARIANT_UV380_PLUS_10W -DNDEBUG
 INCS  = -I. -ICore/Inc \
         -IDrivers/CMSIS/Device/ST/STM32F4xx/Include -IDrivers/CMSIS/Include \
@@ -18,6 +19,10 @@ INCS  = -I. -ICore/Inc \
         -IMiddlewares/Third_Party/FreeRTOS/Source/include \
         -IMiddlewares/Third_Party/FreeRTOS/Source/portable/GCC/ARM_CM4F \
         -IUSB_DEVICE/App -IUSB_DEVICE/Target -Iapplication/include
+
+ifeq ($(ENABLE_AES),1)
+DEFS += -DENABLE_AES
+endif
 
 CFLAGS  = $(CPU) $(DEFS) $(INCS) -Os -g3 -ffunction-sections -fdata-sections -Wall -MMD -MP
 LDSCRIPT = STM32F405VGTX_FLASH.ld

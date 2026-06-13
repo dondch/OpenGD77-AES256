@@ -8,21 +8,25 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        aes: ["0", "1"]
+    name: build (ENABLE_AES=${{ matrix.aes }})
     steps:
       - uses: actions/checkout@v4
       - name: Install ARM GNU toolchain
         uses: carlosperate/arm-none-eabi-gcc-action@v1
         with:
           release: "14.2.Rel1"
-      - name: Build (MDUV380_10W_PLUS_FW)
+      - name: Build
         working-directory: MDUV380_firmware
-        run: make -j$(nproc)
+        run: make -j$(nproc) ENABLE_AES=${{ matrix.aes }}
       - name: Report size
         working-directory: MDUV380_firmware
         run: arm-none-eabi-size build/openuv380-10w.elf
       - uses: actions/upload-artifact@v4
         with:
-          name: openuv380-10w-firmware
+          name: openuv380-10w-aes${{ matrix.aes }}
           path: |
             MDUV380_firmware/build/*.bin
             MDUV380_firmware/build/*.hex

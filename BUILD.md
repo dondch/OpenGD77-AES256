@@ -27,3 +27,11 @@ defines USE_HAL_DRIVER STM32F405xx PLATFORM_MDUV380 PLATFORM_VARIANT_UV380_PLUS_
 ## Upstream / licence
 OpenGD77 by Roger Clark VK3KYY and contributors - see license.txt (BSD-3-clause style, non-commercial use only).
 This fork preserves all upstream source and copyright headers.
+
+## AES build (experimental, RX)
+`make ENABLE_AES=1` compiles in DMRA (Motorola/Hytera-compatible) AES-256 voice **decryption**. The default
+build (ENABLE_AES=0) is byte-for-byte the stock firmware. The decrypt path is wired in HR-C6000.c right after
+the AMBE burst is read (before the vocoder); the crypto lives in application/source/crypto/ (AES-256-OFB +
+the 32-bit MI to 128-bit IV LFSR, all standalone, host-unit-tested). The exact PI-header trigger and the DMR
+voice octet mapping are marked TODO(OTA) pending an over-the-air capture against a stock TYT radio.
+Encrypted voice is for licensed commercial/PMR use only; not legal on amateur bands in most countries.

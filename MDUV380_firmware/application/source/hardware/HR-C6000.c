@@ -28,6 +28,7 @@
  */
 
 #include "hardware/HR-C6000.h"
+#include "crypto/dmr_aes_hook.h"
 #include "functions/settings.h"
 #if defined(USING_EXTERNAL_DEBUGGER)
 #include "SeggerRTT/RTT/SEGGER_RTT.h"
@@ -670,6 +671,7 @@ static void hrc6000HandleLCData(void)
 {
 	uint8_t LCBuf[LC_DATA_LENGTH];
 	bool lcResult = (SPI0ReadPageRegByteArray(0x02, 0x00, LCBuf, LC_DATA_LENGTH) == kStatus_Success); // read the LC from the C6000
+	dmrAesRxPI(LCBuf, LC_DATA_LENGTH); // AES: candidate PI header (no-op unless ENABLE_AES)
 
 	if (lcResult && hrc6000CrcIsValid() && hrc.ccHold && (hrc.tsAgreed > TS_STABLE_THRESHOLD))
 	{
@@ -967,6 +969,9 @@ static inline void hrc6000SysReceivedDataInt(void)
 	rxSyncClass = (reg_0x51 >> 0) & 0x03;//Received Sync Class  0=Sync Header 1=Voice 2=data 3=RC
 	hrc.rxCRCisValid = (((reg_0x51 >> 2) & 0x01) == 0);// CRC is OK if its 0
 	rxPrivacyIndicator = (reg_0x51 >> 3) & 0x01;
+	#ifdef ENABLE_AES
+	rxPrivacyIndicator = 0; // AES build: route encrypted voice to decrypt instead of dropping
+	#endif
 
 	if (SPI0ReadPageRegByte(0x04, 0x5f, &reg_0x5F) != kStatus_Success)
 	{
@@ -1016,6 +1021,7 @@ static inline void hrc6000SysReceivedDataInt(void)
 		if ((currentRadioDevice->trxDMRModeRx == DMR_MODE_DMO) && hrc6000CallAcceptFilter())
 		{
 			slotState = DMR_STATE_RX_END;
+			dmrAesRxEnd(); // AES: call ended (no-op unless ENABLE_AES)
 			trxIsTransmitting = false;
 
 			if (settingsUsbMode == USB_MODE_HOTSPOT)
@@ -1159,6 +1165,7 @@ static inline void hrc6000SysReceivedDataInt(void)
 				}
 
 				SPI1ReadPageRegByteArray(0x03, 0x00, DMR_frame_buffer + LC_DATA_LENGTH, AMBE_AUDIO_LENGTH);
+				dmrAesRxVoice((uint8_t *)(DMR_frame_buffer + LC_DATA_LENGTH), rxDataType & 0x07); // AES decrypt (no-op unless ENABLE_AES)
 
 				if (settingsUsbMode == USB_MODE_HOTSPOT)
 				{
