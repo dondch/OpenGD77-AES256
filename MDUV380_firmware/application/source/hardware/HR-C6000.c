@@ -675,7 +675,15 @@ static void hrc6000HandleLCData(void)
 {
 	uint8_t LCBuf[LC_DATA_LENGTH];
 	bool lcResult = (SPI0ReadPageRegByteArray(0x02, 0x00, LCBuf, LC_DATA_LENGTH) == kStatus_Success); // read the LC from the C6000
-	dmrAesRxPI(LCBuf, LC_DATA_LENGTH); // AES: candidate PI header (no-op unless ENABLE_AES)
+#ifdef ENABLE_AES
+	// Only a CRC-valid LC can be a real PI header. Parsing every (often garbage) LC read
+	// let voice/partial LCs with byte[1]==0x10 spuriously re-init the AES state mid-call,
+	// zeroing the IV for frames 2..6 of each superframe.
+	if (lcResult && hrc6000CrcIsValid())
+	{
+		dmrAesRxPI(LCBuf, LC_DATA_LENGTH);
+	}
+#endif
 
 	if (lcResult && hrc6000CrcIsValid() && hrc.ccHold && (hrc.tsAgreed > TS_STABLE_THRESHOLD))
 	{
@@ -1169,7 +1177,7 @@ static inline void hrc6000SysReceivedDataInt(void)
 				}
 
 				SPI1ReadPageRegByteArray(0x03, 0x00, DMR_frame_buffer + LC_DATA_LENGTH, AMBE_AUDIO_LENGTH);
-				dmrAesRxVoice((uint8_t *)(DMR_frame_buffer + LC_DATA_LENGTH), rxDataType & 0x07); // AES decrypt (no-op unless ENABLE_AES)
+				dmrAesRxBurst(rxDataType & 0x07); // AES: advance superframe/keystream offset (decrypt happens in codecDecode; no-op unless ENABLE_AES)
 
 				if (settingsUsbMode == USB_MODE_HOTSPOT)
 				{

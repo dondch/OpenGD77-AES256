@@ -184,3 +184,45 @@ size_t dmr_aes_crypt_frame(dmr_aes_ctx_t *c, uint8_t *voice, size_t n, size_t oc
     }
     return octet_off + n;
 }
+
+/* ===== bit-domain VOICE decrypt (49-bit AMBE params) ==================== */
+/* AMBE+2 default silence vector as a 56-bit value; bit i of the 49-bit decoded
+ * vector = (SILENCE56 >> (55-i)) & 1.  (mirror DSD-FME dsd_mbe.c ambe_silence) */
+#define DMR_AMBE_SILENCE56  0xF801A99F8CE080ULL
+
+int dmr_ambe_is_silence(const uint16_t *b) {
+    for (int i = 0; i < 49; ++i) {
+        if ((uint8_t)(b[i] & 1u) != (uint8_t)((DMR_AMBE_SILENCE56 >> (55 - i)) & 1u)) { return 0; }
+    }
+    return 1;
+}
+/* Comfort-noise / zeroed frame: bits 24..43 (20 bits) all zero. (DSD-FME zeroes+24) */
+int dmr_ambe_is_ccr(const uint16_t *b) {
+    for (int i = 24; i < 44; ++i) { if (b[i] & 1u) { return 0; } }
+    return 1;
+}
+
+size_t dmr_aes_voice_frame(dmr_aes_ctx_t *c, uint16_t *b49, size_t bitpos) {
+    if (!c->have_key) { return bitpos + 56; }                 /* passthrough = clear */
+    /* silence and comfort-noise frames are transmitted UNENCRYPTED: skip the XOR
+     * but still account for the 56 bits so the absolute offset stays aligned. */
+    if (dmr_ambe_is_silence(b49) || dmr_ambe_is_ccr(b49)) { return bitpos + 56; }
+
+    /* keystream = OFB(iv) with the first 16-byte block discarded, bits MSB-first.
+     * Need bits [bitpos .. bitpos+48] → octets up to 16 + (bitpos+48)/8. */
+    size_t lastoct = 16 + (bitpos + 48) / 8;
+    int nblk = (int)((lastoct + 16) / 16);                    /* ceil((lastoct+1)/16) */
+    uint8_t ks[16 * 18];
+    if (nblk > 18) { nblk = 18; }
+    aes256_ofb_keystream(c->iv, c->key, ks, nblk);
+
+    for (int i = 0; i < 49; ++i) {
+        size_t j   = bitpos + (size_t)i;
+        size_t oct = 16 + j / 8;                              /* skip 16-byte discard */
+        if (oct < sizeof(ks)) {
+            uint8_t bit = (uint8_t)((ks[oct] >> (7 - (j & 7))) & 1u);
+            b49[i] ^= bit;
+        }
+    }
+    return bitpos + 56;
+}

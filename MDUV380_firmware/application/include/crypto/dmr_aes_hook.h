@@ -9,9 +9,13 @@ int  dmrAesStoreKey(uint8_t keyId, const uint8_t *key32);
 /* TX key selection: 0 = encrypted TX disabled, otherwise the keyId to transmit with. */
 uint8_t dmrAesTxKeyId(void);
 int     dmrAesSetTxKeyId(uint8_t keyId);
-/* RX */
+/* RX. Decryption is applied in the codec at the 49-bit decoded-AMBE layer
+ * (dmrAesRxCodecFrame), NOT on the 27 raw FEC octets. The HR-C6000 ISR calls
+ * dmrAesRxBurst(seq) per voice burst to advance the superframe/keystream offset;
+ * codecDecode calls dmrAesRxCodecFrame per decoded AMBE frame. */
 void dmrAesRxPI(const uint8_t *pi, int len);
-void dmrAesRxVoice(uint8_t *ambe, int seq);
+void dmrAesRxBurst(int seq);                       /* per voice burst (seq 1..6) */
+void dmrAesRxCodecFrame(uint16_t *b49, int idxInBurst); /* per decoded AMBE frame (idx 0..2) */
 void dmrAesRxEnd(void);
 /* TX */
 void dmrAesTxStart(uint8_t keyId, uint32_t miSeed);
@@ -25,7 +29,8 @@ static inline int  dmrAesStoreKey(uint8_t k, const uint8_t *p){ (void)k; (void)p
 static inline uint8_t dmrAesTxKeyId(void){ return 0; }
 static inline int  dmrAesSetTxKeyId(uint8_t k){ (void)k; return 0; }
 static inline void dmrAesRxPI(const uint8_t *p, int n){ (void)p; (void)n; }
-static inline void dmrAesRxVoice(uint8_t *a, int s){ (void)a; (void)s; }
+static inline void dmrAesRxBurst(int s){ (void)s; }
+static inline void dmrAesRxCodecFrame(uint16_t *b, int i){ (void)b; (void)i; }
 static inline void dmrAesRxEnd(void){ }
 static inline void dmrAesTxStart(uint8_t k, uint32_t m){ (void)k; (void)m; }
 static inline int  dmrAesTxBuildPI(uint8_t *p){ (void)p; return 0; }

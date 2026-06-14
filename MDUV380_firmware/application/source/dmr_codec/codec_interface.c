@@ -28,6 +28,7 @@
 
 #include "dmr_codec/codec.h"
 #include "functions/voicePrompts.h"
+#include "crypto/dmr_aes_hook.h"
 #include <string.h>
 
 /* The codec call sites below hand arguments to the precompiled AMBE blob through
@@ -54,6 +55,10 @@ void codecDecode(uint8_t *indata_ptr, int numbBlocks)
     {
 		initFrame(indata_ptr, bitbuffer_decode);
 		indata_ptr += 9;
+
+		// AES: decrypt the 49 decoded AMBE voice bits in place (no-op unless ENABLE_AES
+		// and an active encrypted stream). This is the correct layer — validated vs DSD-FME.
+		dmrAesRxCodecFrame(bitbuffer_decode, idx);
 
 		soundSetupBuffer();// this just sets currentWaveBuffer but the compiler seems to optimise out the code if I try to do it in this file
 		r2 = (int)bitbuffer_decode;

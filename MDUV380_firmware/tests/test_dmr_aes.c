@@ -64,6 +64,33 @@ int main(void) {
            (pi.valid && pi.alg_id==DMR_ALG_AES256 && pi.key_id==3 && pi.mi==0x12345678u)
              ? "PASS" : (fails++,"FAIL"), pi.alg_id, pi.key_id, pi.mi);
 
+    /* 5) Bit-domain VOICE decrypt vs DSD-FME ground truth (real on-air capture,
+     *    reversed KEY1, IV 174E6042..., superframe frames vc=0,1,17). DSD-FME
+     *    (which decodes this scheme correctly) produced these enc->dec pairs;
+     *    dmr_aes_voice_frame must reproduce dec exactly. */
+    {
+        uint8_t k1[32];
+        hx("8AFB6A024607F07D1E6EDEC791ABCE09806DA31CBE26DD293F297CE88AA3F2E3", k1);
+        uint8_t gtiv[16];
+        hx("174E6042E509E273D8DB51AD47A7EB99", gtiv);
+        struct { int vc; const char *enc, *dec; } gv[] = {
+            {0,  "1101011010100001101001000001100101100000001110010", "1100010100101000001111101010110010000001001110111"},
+            {1,  "0000100011100010110111100101010001100001110100100", "1100001100101101100101110100001010100000100100011"},
+            {17, "1001100110011100110100001001000001110000111010010", "1000011100001100001100100100001110001111100000000"},
+        };
+        int vpass = 1;
+        for (size_t g = 0; g < sizeof(gv)/sizeof(gv[0]); g++) {
+            dmr_aes_ctx_t vctx; memset(&vctx, 0, sizeof vctx);
+            vctx.have_key = 1; memcpy(vctx.key, k1, 32); memcpy(vctx.iv, gtiv, 16);
+            uint16_t b[49];
+            for (int i = 0; i < 49; i++) { b[i] = (uint16_t)(gv[g].enc[i] - '0'); }
+            dmr_aes_voice_frame(&vctx, b, (size_t)gv[g].vc * 56);
+            for (int i = 0; i < 49; i++) { if ((b[i]&1) != (uint16_t)(gv[g].dec[i]-'0')) { vpass = 0; } }
+        }
+        printf("  %s VOICE decrypt vs DSD-FME (49-bit ambe_d, vc 0/1/17)\n",
+               vpass ? "PASS" : (fails++, "FAIL"));
+    }
+
     printf(fails? "\n%d FAILURE(S)\n" : "\nALL TESTS PASSED\n", fails);
     return fails ? 1 : 0;
 }
