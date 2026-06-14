@@ -13,15 +13,15 @@
 #define AESK_SLOTS     DMR_AES_MAX_KEYS
 #define AESK_BLOCK_LEN (AESK_HDR_LEN + AESK_SLOTS * AESK_ENTRY_LEN)
 
-static dmr_aes_ctx_t s_rx, s_tx;
-static size_t        s_rxOff, s_txOff;
-static int           s_rxActive, s_txActive, s_keysLoaded;
-static uint32_t      s_txPiMi;    /* MI to advertise in the PI header (pre-advance seed) */
-static uint8_t       s_txKeyId;   /* selected TX key (AESK header byte 5); 0 = enc TX off */
+static dmr_aes_ctx_t s_rx DMR_AES_CCM, s_tx DMR_AES_CCM;
+static size_t        s_rxOff DMR_AES_CCM, s_txOff DMR_AES_CCM;
+static int           s_rxActive DMR_AES_CCM, s_txActive DMR_AES_CCM, s_keysLoaded DMR_AES_CCM;
+static uint32_t      s_txPiMi DMR_AES_CCM;   /* MI to advertise in the PI header (pre-advance seed) */
+static uint8_t       s_txKeyId DMR_AES_CCM;  /* selected TX key (AESK header byte 5); 0 = enc TX off */
 
 void dmrAesLoadKeys(void)
 {
-    static uint8_t blk[AESK_BLOCK_LEN];
+    static uint8_t blk[AESK_BLOCK_LEN] DMR_AES_CCM;
     s_keysLoaded = 1;
     dmr_aes_clear_keys();
     s_txKeyId = 0;
@@ -43,7 +43,7 @@ uint8_t dmrAesTxKeyId(void)
 
 int dmrAesSetTxKeyId(uint8_t keyId)
 {
-    static uint8_t blk[AESK_BLOCK_LEN];
+    static uint8_t blk[AESK_BLOCK_LEN] DMR_AES_CCM;
     if (!codeplugGetOpenGD77CustomData(CODEPLUG_CUSTOM_DATA_TYPE_AES_KEYS, blk) || memcmp(blk, "AESK", 4) != 0)
     {
         memset(blk, 0, sizeof(blk)); memcpy(blk, "AESK", 4); blk[4] = 1;
@@ -56,7 +56,7 @@ int dmrAesSetTxKeyId(uint8_t keyId)
 
 int dmrAesStoreKey(uint8_t keyId, const uint8_t *key32)
 {
-    static uint8_t blk[AESK_BLOCK_LEN];
+    static uint8_t blk[AESK_BLOCK_LEN] DMR_AES_CCM;
     int slot = -1, freeSlot = -1;
     if (!codeplugGetOpenGD77CustomData(CODEPLUG_CUSTOM_DATA_TYPE_AES_KEYS, blk) || memcmp(blk, "AESK", 4) != 0)
     {
@@ -84,15 +84,18 @@ void dmrAesRxPI(const uint8_t *pi, int len)
     if (!s_keysLoaded) { dmrAesLoadKeys(); }
     if (dmr_pi_parse(pi, (size_t)len, &p) && p.valid)
     {
+        /* Just seed the MI from the PI; the IV is generated at each superframe start
+         * (frame A) below, so superframe 0 uses IV=f(PI.mi). */
         s_rxActive = (dmr_aes_rx_init(&s_rx, &p) == 0);
         s_rxOff = 0;
-        if (s_rxActive) { dmr_aes_superframe(&s_rx); }
     }
 }
 void dmrAesRxVoice(uint8_t *ambe, int seq)
 {
     if (!s_rxActive) { return; }
-    if (seq == 0) { dmr_aes_superframe(&s_rx); s_rxOff = 0; }
+    /* RX voice bursts are numbered 1..6 (frame A = 1 = superframe start), NOT 0..5.
+     * Regenerate the IV and reset the keystream offset on frame A. */
+    if (seq == 1) { dmr_aes_superframe(&s_rx); s_rxOff = 0; }
     s_rxOff = dmr_aes_crypt_frame(&s_rx, ambe, DMR_AMBE_BURST, s_rxOff);
 }
 void dmrAesRxEnd(void) { s_rxActive = 0; }

@@ -116,8 +116,8 @@ void dmr_lfsr128d(uint32_t mi, uint8_t iv_out[16], uint32_t *next_mi_out) {
 }
 
 /* ===== key store ======================================================== */
-static uint8_t  s_keys[DMR_AES_MAX_KEYS][DMR_AES_KEY_BYTES];
-static uint8_t  s_have[DMR_AES_MAX_KEYS];
+static uint8_t  s_keys[DMR_AES_MAX_KEYS][DMR_AES_KEY_BYTES] DMR_AES_CCM;
+static uint8_t  s_have[DMR_AES_MAX_KEYS] DMR_AES_CCM;
 
 int dmr_aes_set_key(uint8_t slot, const uint8_t key[DMR_AES_KEY_BYTES]) {
     if (slot >= DMR_AES_MAX_KEYS) return -1;
@@ -176,6 +176,11 @@ size_t dmr_aes_crypt_frame(dmr_aes_ctx_t *c, uint8_t *voice, size_t n, size_t oc
     uint8_t ks[16*24]; size_t need = DMR_AES_KS_DISCARD + octet_off + n; int nblk = (int)((need+15)/16);
     if (nblk > 24) nblk = 24;
     aes256_ofb_keystream(c->iv, c->key, ks, nblk);
-    for (size_t i=0; i<n; ++i) voice[i] ^= ks[DMR_AES_KS_DISCARD + octet_off + i];
+    /* Hard bound: never read past ks[] even if octet_off is unexpectedly large
+     * (e.g. a missed superframe reset) — a wrong assumption must not corrupt the stack. */
+    for (size_t i=0; i<n; ++i) {
+        size_t idx = DMR_AES_KS_DISCARD + octet_off + i;
+        if (idx < sizeof(ks)) { voice[i] ^= ks[idx]; }
+    }
     return octet_off + n;
 }

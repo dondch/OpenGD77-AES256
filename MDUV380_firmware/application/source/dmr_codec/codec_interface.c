@@ -30,6 +30,15 @@
 #include "functions/voicePrompts.h"
 #include <string.h>
 
+/* The codec call sites below hand arguments to the precompiled AMBE blob through
+ * `register int rN asm("rN")` variables that the inline asm uses BY NAME but never
+ * declares as asm operands. Under -Os our toolchain treats those `rN = (int)buf`
+ * assignments as dead stores and ELIDES them, so the codec is entered with garbage
+ * pointers in r0/r1/r2 -> hard fault on every DMR voice frame (the official build's
+ * toolchain/flags happen to keep them). Build this file unoptimized so the register
+ * setup is preserved exactly as written. */
+#pragma GCC optimize ("O0")
+
 static uint16_t bitbuffer_encode[72];
 
 void codecDecode(uint8_t *indata_ptr, int numbBlocks)
