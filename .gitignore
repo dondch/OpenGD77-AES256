@@ -7,3 +7,4 @@ MDUV380_firmware/build/
 *.hex
 arm-tc/
 *.tar.xz
+__pycache__/

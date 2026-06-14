@@ -665,6 +665,22 @@ static void cpsHandleCommand(void)
 			hasToReply = true;
 			replyLength = 1;
 			break;
+		case 0x84: // SUB read AES RX diagnostics: reply [0]=echo, [1..]=diag block
+			usbComSendBuf[0] = com_requestbuffer[0];
+			replyLength = 1 + dmrAesGetDiag((uint8_t *)&usbComSendBuf[1]);
+			hasToReply = true;
+			return; // bypass the trailing generic '-' reply so the diag bytes are sent
+		case 0x85: // SUB read captured LC ring: reply [0]=echo, [1]=count, then count*12 LC bytes
+			usbComSendBuf[0] = com_requestbuffer[0];
+			replyLength = 1 + dmrAesGetLcRing((uint8_t *)&usbComSendBuf[1]);
+			hasToReply = true;
+			return;
+		case 0x86: // SUB load AES key into RAM only (bench): [2]=keyId, [3..34]=32-byte key
+			dmrAesSetKeyRam(com_requestbuffer[2], (uint8_t *)&com_requestbuffer[3]);
+			usbComSendBuf[0] = com_requestbuffer[0];
+			hasToReply = true;
+			replyLength = 1;
+			break;
 #endif
 		case 0:
 #if defined(HAS_GPS)

@@ -125,12 +125,24 @@ int dmr_aes_set_key(uint8_t slot, const uint8_t key[DMR_AES_KEY_BYTES]) {
 }
 void dmr_aes_clear_keys(void) { memset(s_keys,0,sizeof s_keys); memset(s_have,0,sizeof s_have); }
 
+/* debug: which slots hold keys (bit i), and a peek at a slot's first bytes */
+uint32_t dmr_aes_have_mask(void) {
+    uint32_t m=0; for (int i=0;i<DMR_AES_MAX_KEYS;i++) if (s_have[i]) m|=(1u<<i); return m;
+}
+void dmr_aes_peek_key(uint8_t slot, uint8_t out4[4]) {
+    if (slot<DMR_AES_MAX_KEYS) { memcpy(out4, s_keys[slot], 4); } else { memset(out4,0,4); }
+}
+
 /* ===== PI header ======================================================== */
 int dmr_pi_parse(const uint8_t *p, size_t len, dmr_pi_t *o) {
     if (len < 7) { o->valid=0; return 0; }
     o->alg_id=p[0]; o->mfid=p[1]; o->key_id=p[2];
     o->mi = ((uint32_t)p[3]<<24)|((uint32_t)p[4]<<16)|((uint32_t)p[5]<<8)|((uint32_t)p[6]);
-    o->valid = (o->mfid==DMR_MFID_DMRA && o->alg_id < 0x26) ? 1 : 0;
+    /* Require an actual AES alg id. dmrAesRxPI is fed EVERY CRC-valid LC, and ordinary
+     * group-voice LCs (FLCO byte[0]=0x00) also carry MFID 0x10 — accepting alg<0x26 made
+     * those parse as bogus PIs. Only 0x24 (AES-128) / 0x25 (AES-256) are real here. */
+    o->valid = (o->mfid==DMR_MFID_DMRA &&
+                (o->alg_id==DMR_ALG_AES128 || o->alg_id==DMR_ALG_AES256)) ? 1 : 0;
     return o->valid;
 }
 void dmr_pi_build(uint8_t alg_id, uint8_t key_id, uint32_t mi, uint8_t *o) {
