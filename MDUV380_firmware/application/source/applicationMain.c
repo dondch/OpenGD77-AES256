@@ -34,6 +34,7 @@
 #include <stdio.h>
 
 #include "interfaces/adc.h"
+#include "crypto/dmr_aes_hook.h"
 #include "interfaces/batteryRAM.h"
 #include "hardware/SPI_Flash.h"
 #include "interfaces/adc.h"
@@ -437,6 +438,8 @@ void applicationMainTask(void)
 	calibrationInit();
 
 	HRC6000Init();
+
+	dmrAesInit(); // AES state lives in .ccmram which the startup does not init; zero it (no-op unless ENABLE_AES)
 
 	radioPostinit();
 
