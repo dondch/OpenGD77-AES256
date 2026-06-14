@@ -16,6 +16,8 @@
 static dmr_aes_ctx_t s_rx DMR_AES_CCM, s_tx DMR_AES_CCM;
 static size_t        s_rxOff DMR_AES_CCM, s_txOff DMR_AES_CCM;
 static int           s_rxActive DMR_AES_CCM, s_txActive DMR_AES_CCM, s_keysLoaded DMR_AES_CCM;
+static size_t        s_rxBurstBase DMR_AES_CCM;  /* absolute keystream bit offset of the current burst's frame 0 */
+static int           s_rxBurstEnc DMR_AES_CCM;   /* 1 if the current burst is an active encrypted stream */
 static uint32_t      s_txPiMi DMR_AES_CCM;   /* MI to advertise in the PI header (pre-advance seed) */
 static uint8_t       s_txKeyId DMR_AES_CCM;  /* selected TX key (AESK header byte 5); 0 = enc TX off */
 
@@ -77,28 +79,43 @@ int dmrAesStoreKey(uint8_t keyId, const uint8_t *key32)
     return ok;
 }
 
-/* ---- RX (validated on-air: DSD-FME decrypts the same scheme) ---- */
+/* ---- RX --------------------------------------------------------------------
+ * Validated against DSD-FME (ground truth) on 690 captured frames: the OFB
+ * keystream is applied to the 49 DECODED AMBE voice bits (in codecDecode), not
+ * the 27 raw FEC octets. dmrAesRxPI seeds the MI once at call start; the IV is
+ * regenerated and the MI advanced at each superframe (burst A, seq==1) via the
+ * self-sustaining LFSR chain — same as DSD-FME's per-PI LFSR128d advance, so we
+ * stay aligned with the over-the-air MI without depending on PI re-parse timing. */
 void dmrAesRxPI(const uint8_t *pi, int len)
 {
     dmr_pi_t p;
     if (!s_keysLoaded) { dmrAesLoadKeys(); }
-    if (dmr_pi_parse(pi, (size_t)len, &p) && p.valid)
+    /* Seed only at call start. The embedded PI may be re-parsed every voice frame;
+     * re-seeding mid-call would reset the MI chain and desync the keystream. */
+    if (!s_rxActive && dmr_pi_parse(pi, (size_t)len, &p) && p.valid)
     {
-        /* Just seed the MI from the PI; the IV is generated at each superframe start
-         * (frame A) below, so superframe 0 uses IV=f(PI.mi). */
         s_rxActive = (dmr_aes_rx_init(&s_rx, &p) == 0);
-        s_rxOff = 0;
+        s_rxBurstBase = 0;
+        s_rxBurstEnc = 0;
     }
 }
-void dmrAesRxVoice(uint8_t *ambe, int seq)
+/* Called per voice burst from the HR-C6000 ISR. seq is the 1..6 burst sequence
+ * (A..F); each burst carries 3 AMBE frames, 6 bursts = one 18-frame superframe. */
+void dmrAesRxBurst(int seq)
 {
-    if (!s_rxActive) { return; }
-    /* RX voice bursts are numbered 1..6 (frame A = 1 = superframe start), NOT 0..5.
-     * Regenerate the IV and reset the keystream offset on frame A. */
-    if (seq == 1) { dmr_aes_superframe(&s_rx); s_rxOff = 0; }
-    s_rxOff = dmr_aes_crypt_frame(&s_rx, ambe, DMR_AMBE_BURST, s_rxOff);
+    if (!s_rxActive) { s_rxBurstEnc = 0; return; }
+    s_rxBurstEnc = 1;
+    if (seq == 1) { dmr_aes_superframe(&s_rx); }   /* new superframe: IV=f(MI), MI advances */
+    s_rxBurstBase = (size_t)((seq >= 1 ? seq - 1 : 0)) * (3 * 56);  /* frame 0 of this burst */
 }
-void dmrAesRxEnd(void) { s_rxActive = 0; }
+/* Called per decoded AMBE frame from codecDecode (idxInBurst 0..2). Applies the
+ * OFB keystream to the 49-bit decoded voice vector in place. */
+void dmrAesRxCodecFrame(uint16_t *b49, int idxInBurst)
+{
+    if (!s_rxActive || !s_rxBurstEnc) { return; }
+    dmr_aes_voice_frame(&s_rx, b49, s_rxBurstBase + (size_t)idxInBurst * 56);
+}
+void dmrAesRxEnd(void) { s_rxActive = 0; s_rxBurstEnc = 0; }
 
 /* ---- TX (symmetric: OFB crypt is identical to RX) ----
  * NOTE(flash): exact PI-header burst scheduling + keystream octet base are confirmed at bench. */

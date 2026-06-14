@@ -81,6 +81,24 @@ uint32_t dmr_aes_superframe(dmr_aes_ctx_t *c);
  * Returns the updated octet_off. No-op (passthrough) if no key loaded. */
 size_t dmr_aes_crypt_frame(dmr_aes_ctx_t *c, uint8_t *voice, size_t n, size_t octet_off);
 
+/* ---- bit-domain VOICE decrypt (the correct layer) ----------------------- *
+ * DMRA AES-256 VOICE applies the OFB keystream to the 49 DECODED AMBE voice
+ * bits (one bit per array entry; only bit 0 used), NOT the 27 raw FEC octets.
+ * This is validated byte-exact vs DSD-FME (ground truth) on 690 captured frames:
+ *   - keystream = AES-256-OFB(iv, key), discard the first 16-byte block,
+ *     bits taken MSB-first;
+ *   - each voice frame consumes 56 keystream bits (49 applied + 7 skipped),
+ *     continuously across the superframe (bit offset is absolute);
+ *   - silence / comfort-noise (CCR) frames are sent in the clear: skip the XOR
+ *     but the absolute bit offset still accounts for them.
+ * `iv` must already be set (dmr_lfsr128d of this superframe's MI). `bitpos` is the
+ * ABSOLUTE keystream bit offset for this frame = (vc * 56), vc = frame index in
+ * the 18-frame superframe. Operates on b49[0..48] in place. Returns bitpos + 56. */
+size_t dmr_aes_voice_frame(dmr_aes_ctx_t *c, uint16_t *b49, size_t bitpos);
+/* AMBE silence / comfort-noise detectors on the 49-bit decoded vector. */
+int dmr_ambe_is_silence(const uint16_t *b49);
+int dmr_ambe_is_ccr(const uint16_t *b49);
+
 /* ---- low-level (exposed for unit tests) --------------------------------- */
 void dmr_lfsr128d(uint32_t mi, uint8_t iv_out[16], uint32_t *next_mi_out);
 void aes256_ofb_keystream(const uint8_t iv[16], const uint8_t key[32],
