@@ -18,37 +18,14 @@ static size_t        s_rxOff DMR_AES_CCM, s_txOff DMR_AES_CCM;
 static int           s_rxActive DMR_AES_CCM, s_txActive DMR_AES_CCM, s_keysLoaded DMR_AES_CCM;
 static size_t        s_rxBurstBase DMR_AES_CCM;  /* absolute keystream bit offset of the current burst's frame 0 */
 static int           s_rxBurstEnc DMR_AES_CCM;   /* 1 if the current burst is an active encrypted stream */
+static int           s_rxIvReady DMR_AES_CCM;    /* 0 = (re)generate IV from s_rx.mi on the next burst */
+static int           s_rxLastSeq DMR_AES_CCM;    /* previous burst's seq, to detect superframe wrap */
+static uint32_t      s_rxNextMi DMR_AES_CCM;     /* LFSR-advanced MI for the next superframe */
+static uint32_t      s_rxInitMi DMR_AES_CCM;     /* the current call's CONSTANT initial MI (from its PI) */
 
-/* Shared scratch for the (non-reentrant, foreground-only) key-store helpers.
- * One buffer instead of three per-function statics — keeps CCM usage down so
- * adding the diag below does not push _eccmram into the codec's CCM scratch. */
+/* Shared scratch for the (non-reentrant, foreground-only) key-store helpers. One
+ * buffer instead of three per-function statics keeps CCM usage down. */
 static uint8_t       s_aesBlk[AESK_BLOCK_LEN] DMR_AES_CCM;
-
-/* RX diagnostics, read over USB (CPS cmd 0x84) to debug on-air alignment without
- * guess-and-flash: are PIs parsed? what MI? are the voice hooks firing? */
-static struct {
-    uint32_t lcCrcOk;     /* CRC-valid LCs offered to dmrAesRxPI */
-    uint32_t piValid;     /* PIs that parsed as valid DMRA (MFID 0x10, alg<0x26) */
-    uint32_t rxInit;      /* successful rx_init (key found, stream armed) */
-    uint32_t lastMi;      /* last valid PI's 32-bit MI */
-    uint32_t burstCnt;    /* dmrAesRxBurst calls */
-    uint32_t codecCnt;    /* dmrAesRxCodecFrame calls */
-    uint8_t  lastLc[8];   /* first 8 bytes of the last CRC-valid LC offered */
-    uint8_t  rxActive;    /* current s_rxActive */
-    uint8_t  lastAlg;     /* last PI alg id byte */
-    uint8_t  lastKeyId;   /* last PI key id byte */
-    uint8_t  keysLoaded;  /* s_keysLoaded flag */
-    uint16_t haveMask;    /* loaded-key slot bitmask (bit i = slot i) */
-    uint8_t  key1[4];     /* first 4 bytes of slot-1 key (verify load) */
-    uint8_t  pad;
-} s_diag DMR_AES_CCM;
-
-/* Ring of distinct (deduped) non-zero LCs offered to dmrAesRxPI during reception —
- * lets us SEE the real DMRA PI header's byte layout (read via CPS cmd 0x85). */
-#define LCRING_N 8
-#define LCRING_W 12
-static uint8_t  s_lcRing[LCRING_N][LCRING_W] DMR_AES_CCM;
-static uint8_t  s_lcRingCnt DMR_AES_CCM;
 static uint32_t      s_txPiMi DMR_AES_CCM;   /* MI to advertise in the PI header (pre-advance seed) */
 static uint8_t       s_txKeyId DMR_AES_CCM;  /* selected TX key (AESK header byte 5); 0 = enc TX off */
 
@@ -65,24 +42,25 @@ void dmrAesInit(void)
     s_rxActive = s_txActive = s_keysLoaded = 0;
     s_rxBurstBase = 0;
     s_rxBurstEnc = 0;
+    s_rxIvReady = 0;
+    s_rxLastSeq = -1;
+    s_rxNextMi = 0;
+    s_rxInitMi = 0;
     s_txPiMi = 0;
     s_txKeyId = 0;
-    memset(&s_diag, 0, sizeof s_diag);
-    memset(s_lcRing, 0, sizeof s_lcRing);
-    s_lcRingCnt = 0;
     dmr_aes_clear_keys();   /* zeroes the s_keys/s_have store in dmr_aes.c */
 }
 
-/* Load a key straight into RAM (bypasses the flash custom-data store, which needs
- * an initialized "OpenGD77" region that may be absent). Marks keys as loaded so the
- * lazy flash-load in dmrAesRxPI won't clear it. For bench testing / when the store
- * is unavailable. */
+/* Load a key straight into RAM (bypasses the flash custom-data store). Marks keys
+ * as loaded so the lazy flash-load in dmrAesRxPI won't clear it. For bench use. */
 void dmrAesSetKeyRam(uint8_t keyId, const uint8_t *key32)
 {
     dmr_aes_set_key(keyId, key32);
     s_keysLoaded = 1;
 }
 
+/* Load keys from the OpenGD77 custom-data AES_KEYS block (written by the CPS / the
+ * aes_key_store tool). Lazy: called on first PI when keys aren't loaded yet. */
 void dmrAesLoadKeys(void)
 {
     uint8_t *blk = s_aesBlk;
@@ -142,82 +120,65 @@ int dmrAesStoreKey(uint8_t keyId, const uint8_t *key32)
 }
 
 /* ---- RX --------------------------------------------------------------------
- * Validated against DSD-FME (ground truth) on 690 captured frames: the OFB
- * keystream is applied to the 49 DECODED AMBE voice bits (in codecDecode), not
- * the 27 raw FEC octets. dmrAesRxPI seeds the MI once at call start; the IV is
- * regenerated and the MI advanced at each superframe (burst A, seq==1) via the
- * self-sustaining LFSR chain — same as DSD-FME's per-PI LFSR128d advance, so we
- * stay aligned with the over-the-air MI without depending on PI re-parse timing. */
+ * The OFB keystream is applied to the 49 DECODED AMBE voice bits (in codecDecode),
+ * not the 27 raw FEC octets — validated against DSD-FME (ground truth) on 690 frames.
+ * The PI carries the call's CONSTANT initial 32-bit MI; the receiver advances it per
+ * superframe via the LFSR. So we seed the MI when it changes (a new call) and advance
+ * it on each superframe wrap; the per-frame keystream offset is absolute (seq-based). */
 void dmrAesRxPI(const uint8_t *pi, int len)
 {
     dmr_pi_t p;
     if (!s_keysLoaded) { dmrAesLoadKeys(); }
-    s_diag.lcCrcOk++;
-    for (int i = 0; i < 8 && i < len; i++) { s_diag.lastLc[i] = pi[i]; }
-    /* capture distinct non-zero LCs (PI candidates) for offline inspection */
-    if (len >= LCRING_W)
-    {
-        int nz = 0; for (int i = 0; i < LCRING_W; i++) { if (pi[i]) { nz = 1; break; } }
-        if (nz)
-        {
-            int dup = 0;
-            for (int r = 0; r < s_lcRingCnt; r++) { if (memcmp(s_lcRing[r], pi, LCRING_W) == 0) { dup = 1; break; } }
-            if (!dup && s_lcRingCnt < LCRING_N) { memcpy(s_lcRing[s_lcRingCnt++], pi, LCRING_W); }
-        }
-    }
     if (dmr_pi_parse(pi, (size_t)len, &p) && p.valid)
     {
-        s_diag.piValid++;
-        s_diag.lastMi = p.mi; s_diag.lastAlg = p.alg_id; s_diag.lastKeyId = p.key_id;
-        /* Seed only at call start. The embedded PI may be re-parsed every voice frame;
-         * re-seeding mid-call would reset the MI chain and desync the keystream. */
-        if (!s_rxActive)
+        /* (Re)seed ONLY when the MI changes — i.e. a genuinely new call (whose RX_END
+         * we may have missed). A same-MI re-sent PI (late entry) must be ignored: the
+         * MI is constant for the whole call, so re-seeding mid-call would reset the
+         * advance back to the initial value and garble the rest of the call. */
+        if (!s_rxActive || (p.mi != s_rxInitMi))
         {
-            s_rxActive = (dmr_aes_rx_init(&s_rx, &p) == 0);
-            if (s_rxActive) { s_diag.rxInit++; }
-            s_rxBurstBase = 0;
-            s_rxBurstEnc = 0;
+            s_rxActive = (dmr_aes_rx_init(&s_rx, &p) == 0);  /* load key for keyId + seed MI */
+            if (s_rxActive)
+            {
+                s_rxInitMi = p.mi;
+                s_rxIvReady = 0;     /* generate IV from the seeded MI on the next burst */
+                s_rxLastSeq = -1;
+            }
         }
     }
-    s_diag.rxActive = (uint8_t)s_rxActive;
 }
 /* Called per voice burst from the HR-C6000 ISR. seq is the 1..6 burst sequence
  * (A..F); each burst carries 3 AMBE frames, 6 bursts = one 18-frame superframe. */
 void dmrAesRxBurst(int seq)
 {
-    s_diag.burstCnt++;
     if (!s_rxActive) { s_rxBurstEnc = 0; return; }
     s_rxBurstEnc = 1;
-    if (seq == 1) { dmr_aes_superframe(&s_rx); }   /* new superframe: IV=f(MI), MI advances */
+    if (!s_rxIvReady)
+    {
+        /* First burst after a (re)seed: generate the IV for the CURRENT superframe from
+         * s_rx.mi. Works whether we joined at burst A or mid-superframe (the absolute
+         * seq-based offset below covers the partial superframe). */
+        dmr_lfsr128d(s_rx.mi, s_rx.iv, &s_rxNextMi);
+        s_rxIvReady = 1;
+    }
+    else if (s_rxLastSeq >= 0 && seq < s_rxLastSeq)
+    {
+        /* seq wrapped (e.g. 6->1) = crossed into a new superframe: advance the MI via the
+         * LFSR. Using seq<lastSeq (not seq==1) stays correct even if burst A is dropped. */
+        s_rx.mi = s_rxNextMi;
+        dmr_lfsr128d(s_rx.mi, s_rx.iv, &s_rxNextMi);
+    }
+    s_rxLastSeq = seq;
     s_rxBurstBase = (size_t)((seq >= 1 ? seq - 1 : 0)) * (3 * 56);  /* frame 0 of this burst */
 }
 /* Called per decoded AMBE frame from codecDecode (idxInBurst 0..2). Applies the
  * OFB keystream to the 49-bit decoded voice vector in place. */
 void dmrAesRxCodecFrame(uint16_t *b49, int idxInBurst)
 {
-    s_diag.codecCnt++;
     if (!s_rxActive || !s_rxBurstEnc) { return; }
     dmr_aes_voice_frame(&s_rx, b49, s_rxBurstBase + (size_t)idxInBurst * 56);
 }
-void dmrAesRxEnd(void) { s_rxActive = 0; s_rxBurstEnc = 0; s_diag.rxActive = 0; }
-
-/* Copy the RX diag block out for the USB CPS read (cmd 0x84). Returns byte count. */
-int dmrAesGetDiag(uint8_t *out)
-{
-    s_diag.keysLoaded = (uint8_t)s_keysLoaded;
-    s_diag.haveMask = (uint16_t)dmr_aes_have_mask();
-    dmr_aes_peek_key(1, s_diag.key1);
-    memcpy(out, &s_diag, sizeof(s_diag));
-    return (int)sizeof(s_diag);
-}
-
-/* Copy the captured LC ring (cmd 0x85): [0]=count, then count*12 raw LC bytes. */
-int dmrAesGetLcRing(uint8_t *out)
-{
-    out[0] = s_lcRingCnt;
-    memcpy(out + 1, s_lcRing, (size_t)s_lcRingCnt * LCRING_W);
-    return 1 + (int)s_lcRingCnt * LCRING_W;
-}
+void dmrAesRxEnd(void) { s_rxActive = 0; s_rxBurstEnc = 0; }
 
 /* ---- TX (symmetric: OFB crypt is identical to RX) ----
  * NOTE(flash): exact PI-header burst scheduling + keystream octet base are confirmed at bench. */
@@ -226,9 +187,6 @@ void dmrAesTxStart(uint8_t keyId, uint32_t miSeed)
     if (!s_keysLoaded) { dmrAesLoadKeys(); }
     s_txActive = (dmr_aes_tx_init(&s_tx, DMR_ALG_AES256, keyId, miSeed) == 0);
     s_txOff = 0;
-    /* The PI header advertises the pre-advance MI: the receiver's rx_init seeds its
-     * MI from this value and then runs the same initial superframe() advance we do
-     * below, so our TX and the (on-air validated) RX path stay bit-for-bit aligned. */
     s_txPiMi = miSeed;
     if (s_txActive) { dmr_aes_superframe(&s_tx); }
 }

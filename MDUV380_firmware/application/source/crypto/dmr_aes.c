@@ -125,14 +125,6 @@ int dmr_aes_set_key(uint8_t slot, const uint8_t key[DMR_AES_KEY_BYTES]) {
 }
 void dmr_aes_clear_keys(void) { memset(s_keys,0,sizeof s_keys); memset(s_have,0,sizeof s_have); }
 
-/* debug: which slots hold keys (bit i), and a peek at a slot's first bytes */
-uint32_t dmr_aes_have_mask(void) {
-    uint32_t m=0; for (int i=0;i<DMR_AES_MAX_KEYS;i++) if (s_have[i]) m|=(1u<<i); return m;
-}
-void dmr_aes_peek_key(uint8_t slot, uint8_t out4[4]) {
-    if (slot<DMR_AES_MAX_KEYS) { memcpy(out4, s_keys[slot], 4); } else { memset(out4,0,4); }
-}
-
 /* ===== PI header ======================================================== */
 int dmr_pi_parse(const uint8_t *p, size_t len, dmr_pi_t *o) {
     if (len < 7) { o->valid=0; return 0; }

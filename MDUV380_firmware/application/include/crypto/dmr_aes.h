@@ -104,8 +104,6 @@ void dmr_lfsr128d(uint32_t mi, uint8_t iv_out[16], uint32_t *next_mi_out);
 void aes256_ofb_keystream(const uint8_t iv[16], const uint8_t key[32],
                           uint8_t *out, int nblocks);
 void aes256_ecb_encrypt(const uint8_t key[32], uint8_t block[16]); /* test vectors */
-uint32_t dmr_aes_have_mask(void);                  /* debug: loaded-key slot bitmask */
-void     dmr_aes_peek_key(uint8_t slot, uint8_t out4[4]); /* debug: first 4 key bytes */
 
 #ifdef __cplusplus
 }
