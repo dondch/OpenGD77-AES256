@@ -313,7 +313,6 @@ static bool hrc6000CallAcceptFilter(void);
 static void hrc6000SendPcOrTgLCHeader(void);
 #ifdef ENABLE_AES
 static uint32_t hrc6000AesRngSeed(void);
-static void hrc6000SendAesPIHeader(void);
 #endif
 #ifdef CPU_MK22FN512VLL12
 static inline void hrc6000SysInterruptHandler(void);
@@ -1731,7 +1730,6 @@ void hrc6000TimeslotInterruptHandler(void)
 
 		case DMR_STATE_TX_START_1: // Start TX (second step)
 			LedWrite(LED_RED, 1); // for repeater wakeup
-			hrc6000SendPcOrTgLCHeader();
 #ifdef ENABLE_AES
 			{
 				uint8_t aesTxKeyId = dmrAesTxKeyId();
@@ -1741,6 +1739,7 @@ void hrc6000TimeslotInterruptHandler(void)
 				}
 			}
 #endif
+			hrc6000SendPcOrTgLCHeader(); // after dmrAesTxStart so the LC carries the encryption SO/FID
 			SPI0WritePageRegByte(0x04, 0x41, 0x80);    // Transmit during next Timeslot
 			SPI0WritePageRegByte(0x04, 0x50, 0x10);    // Set Data Type to 0001 (Voice LC Header), Data, LCSS=00
 			trxIsTransmitting = true;
@@ -1754,18 +1753,7 @@ void hrc6000TimeslotInterruptHandler(void)
 
 		case DMR_STATE_TX_START_3: // Start TX (fourth step)
 			SPI0WritePageRegByte(0x04, 0x41, 0x80);     // Transmit during Next Timeslot
-#ifdef ENABLE_AES
-			if (dmrAesTxActive())
-			{
-				hrc6000SendAesPIHeader();               // emit PI header in place of the redundant LC header
-			}
-			else
-			{
-				SPI0WritePageRegByte(0x04, 0x50, 0x10); // Set Data Type to 0001 (Voice LC Header), Data, LCSS=00
-			}
-#else
 			SPI0WritePageRegByte(0x04, 0x50, 0x10);     // Set Data Type to 0001 (Voice LC Header), Data, LCSS=00
-#endif
 			slotState = DMR_STATE_TX_START_4;
 			break;
 
@@ -2206,6 +2194,16 @@ static void hrc6000SendPcOrTgLCHeader(void)
 	spi_tx[0] = (trxTalkGroupOrPcId >> 24) & 0xFF;
 	spi_tx[1] = 0x00;
 	spi_tx[2] = 0x00;
+#ifdef ENABLE_AES
+	// Encrypted call: announce it in the Voice LC header exactly like a stock TYT —
+	// FID = 0x10 (DMRA/Motorola feature set), Service Options bit 0x40 (encryption).
+	// A stock TYT RX (and DSD-FME) needs this to engage decryption with its key.
+	if (dmrAesTxActive())
+	{
+		spi_tx[1] = 0x10;            // FID: DMRA / Motorola feature set
+		spi_tx[2] = 0x40;            // SO: encryption
+	}
+#endif
 	spi_tx[3] = (trxTalkGroupOrPcId >> 16) & 0xFF;
 	spi_tx[4] = (trxTalkGroupOrPcId >> 8) & 0xFF;
 	spi_tx[5] = (trxTalkGroupOrPcId >> 0) & 0xFF;
@@ -2235,20 +2233,6 @@ static uint32_t hrc6000AesRngSeed(void)
 	return ticksGetMillis();
 }
 
-// Emit the DMRA Privacy Indicator (PI) header as its own SPI burst at call key-up,
-// alongside the Voice LC header. Data Type 0000 = PI Header (LCSS=00).
-// NOTE(bench): exact PI burst slot/timing vs a stock TYT receiver is confirmed on-air.
-static void hrc6000SendAesPIHeader(void)
-{
-	uint8_t spi_tx[LC_DATA_LENGTH] = { 0 };
-
-	if (dmrAesTxBuildPI(spi_tx) != 7)
-	{
-		return;
-	}
-	SPI0WritePageRegByteArray(0x02, 0x00, spi_tx, LC_DATA_LENGTH);
-	SPI0WritePageRegByte(0x04, 0x50, 0x00); // Data Type 0000 (PI Header), Data, LCSS=00
-}
 #endif
 
 static bool hrc6000CallAcceptFilter(void)

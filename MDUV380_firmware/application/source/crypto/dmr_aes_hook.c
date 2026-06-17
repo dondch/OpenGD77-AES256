@@ -26,8 +26,12 @@ static uint32_t      s_rxInitMi DMR_AES_CCM;     /* the current call's CONSTANT 
 /* Shared scratch for the (non-reentrant, foreground-only) key-store helpers. One
  * buffer instead of three per-function statics keeps CCM usage down. */
 static uint8_t       s_aesBlk[AESK_BLOCK_LEN] DMR_AES_CCM;
-static uint32_t      s_txPiMi DMR_AES_CCM;   /* MI to advertise in the PI header (pre-advance seed) */
+static uint32_t      s_txPiMi DMR_AES_CCM;   /* MI to advertise in the PI header (the call's initial MI) */
 static uint8_t       s_txKeyId DMR_AES_CCM;  /* selected TX key (AESK header byte 5); 0 = enc TX off */
+static uint32_t      s_txFrameCnt DMR_AES_CCM; /* free-running encoded voice frame index (encode==transmit order) */
+static int           s_txIvReady DMR_AES_CCM;  /* 0 = generate IV from s_tx.mi on the next encoded frame */
+static uint32_t      s_txNextMi DMR_AES_CCM;   /* LFSR-advanced MI for the next TX superframe */
+static uint8_t       s_txFrag[7][3] DMR_AES_CCM; /* Late-Entry MI fragment nibbles for the call (vc 1..6, cw 0..2) */
 
 /* Zero the AES state at boot. REQUIRED: this state lives in .ccmram, which the
  * startup code does NOT initialize (it only copies .data and zeroes .bss), so at
@@ -48,6 +52,10 @@ void dmrAesInit(void)
     s_rxInitMi = 0;
     s_txPiMi = 0;
     s_txKeyId = 0;
+    s_txFrameCnt = 0;
+    s_txIvReady = 0;
+    s_txNextMi = 0;
+    memset(s_txFrag, 0, sizeof s_txFrag);
     dmr_aes_clear_keys();   /* zeroes the s_keys/s_have store in dmr_aes.c */
 }
 
@@ -180,15 +188,16 @@ void dmrAesRxCodecFrame(uint16_t *b49, int idxInBurst)
 }
 void dmrAesRxEnd(void) { s_rxActive = 0; s_rxBurstEnc = 0; }
 
-/* ---- TX (symmetric: OFB crypt is identical to RX) ----
- * NOTE(flash): exact PI-header burst scheduling + keystream octet base are confirmed at bench. */
+/* ---- TX (mirror of RX: encrypt the 49 AMBE params at the codec layer) ---- */
 void dmrAesTxStart(uint8_t keyId, uint32_t miSeed)
 {
     if (!s_keysLoaded) { dmrAesLoadKeys(); }
-    s_txActive = (dmr_aes_tx_init(&s_tx, DMR_ALG_AES256, keyId, miSeed) == 0);
+    s_txActive = (dmr_aes_tx_init(&s_tx, DMR_ALG_AES256, keyId, miSeed) == 0); /* sets s_tx.mi = miSeed */
     s_txOff = 0;
-    s_txPiMi = miSeed;
-    if (s_txActive) { dmr_aes_superframe(&s_tx); }
+    s_txPiMi = miSeed;     /* the call's CONSTANT initial MI: advertised for late entry, advanced by RX */
+    s_txFrameCnt = 0;
+    s_txIvReady = 0;
+    memset(s_txFrag, 0, sizeof s_txFrag);  /* built per-superframe in dmrAesTxCodecFrame (conveys the NEXT MI) */
 }
 int dmrAesTxBuildPI(uint8_t *piOut7)   /* build PI header LC to emit at call start / late entry */
 {
@@ -196,12 +205,57 @@ int dmrAesTxBuildPI(uint8_t *piOut7)   /* build PI header LC to emit at call sta
     dmr_pi_build(DMR_ALG_AES256, s_tx.key_id, s_txPiMi, piOut7);
     return 7;
 }
-void dmrAesTxVoice(uint8_t *ambe, int seq)
+/* Encrypt one encoded voice frame's 49 AMBE params in place, during codecEncodeBlock
+ * (after AMBE_ENCODE, before AMBE_ENCODE_ECC). The encode order equals the transmit
+ * order, so a free-running frame counter gives the superframe position: IV=lfsr(MI),
+ * MI advances each 18-frame superframe, offset=(frame%18)*56, silence frames skipped —
+ * exactly what the receiver (a stock TYT, or our own RX) expects. */
+void dmrAesTxCodecFrame(uint16_t *b49)
 {
     if (!s_txActive) { return; }
-    if (seq == 0) { dmr_aes_superframe(&s_tx); s_txOff = 0; }
-    s_txOff = dmr_aes_crypt_frame(&s_tx, ambe, DMR_AMBE_BURST, s_txOff);
+    if (!s_txIvReady)
+    {
+        dmr_lfsr128d(s_tx.mi, s_tx.iv, &s_txNextMi);
+        /* LOOK-AHEAD conveyance: the receiver assembles the late-entry MI over a whole
+         * superframe and applies it (as the IV) to the NEXT superframe — DSD-FME dmr_le.c
+         * assembles at vc==6, then LFSR128d packs aes_iv and that drives the next superframe;
+         * the HR-C6000 chip path mirrors this. So we encrypt THIS superframe with LFSR(s_tx.mi)
+         * but must convey s_txNextMi (the NEXT superframe's MI), so the receiver's IV for the
+         * next superframe == our encryption IV for the next superframe. (Conveying s_tx.mi here
+         * decodes one superframe early -> garble; confirmed on-air via the constant-plaintext
+         * diagnostic = encryption ran one LFSR step ahead of the conveyed MI.) */
+        dmr_le_mi_build(s_txNextMi, s_txFrag);
+        s_txIvReady = 1;
+    }
+    else if ((s_txFrameCnt % 18) == 0)
+    {
+        s_tx.mi = s_txNextMi;
+        dmr_lfsr128d(s_tx.mi, s_tx.iv, &s_txNextMi);
+        dmr_le_mi_build(s_txNextMi, s_txFrag);   /* convey the NEXT superframe's MI (look-ahead, see above) */
+    }
+    dmr_aes_voice_frame(&s_tx, b49, (size_t)(s_txFrameCnt % 18) * 56);
+    s_txFrameCnt++;
 }
+/* Stuff the DMRA "Late Entry MI" into the post-ECC AMBE codeword. Called in
+ * codecEncodeBlock AFTER AMBE_ENCODE_ECC (bitbuffer_encode now holds the 72-bit
+ * codeword) and BEFORE the byte packing. The 4 MI bits overwrite ambe_fr[3][0..3]
+ * = OTA bits 71/67/63/59 — plaintext signalling, on top of the encrypted voice —
+ * which a stock TYT (and DSD-FME) read to bootstrap the keystream. Uses the same
+ * free-running counter dmrAesTxCodecFrame just advanced: f = s_txFrameCnt-1. */
+void dmrAesTxStuffMI(uint16_t *b72)
+{
+    if (!s_txActive) { return; }
+    uint32_t f = s_txFrameCnt - 1;          /* the codeword dmrAesTxCodecFrame just processed */
+    int cw = (int)(f % 3);                   /* codeword index within the burst (0..2) */
+    int vc = (int)((f / 3) % 6) + 1;         /* voice frame within the superframe (1..6) */
+    uint8_t nib = s_txFrag[vc][cw];
+    b72[71] = (nib >> 3) & 1u;               /* ambe_fr[3][0] */
+    b72[67] = (nib >> 2) & 1u;               /* ambe_fr[3][1] */
+    b72[63] = (nib >> 1) & 1u;               /* ambe_fr[3][2] */
+    b72[59] = (nib >> 0) & 1u;               /* ambe_fr[3][3] */
+}
+/* The old 27-byte FEC-octet TX crypt is gone — encryption is at the codec layer above. */
+void dmrAesTxVoice(uint8_t *ambe, int seq) { (void)ambe; (void)seq; }
 int  dmrAesTxActive(void) { return s_txActive; }
 void dmrAesTxEnd(void)    { s_txActive = 0; }
 #endif

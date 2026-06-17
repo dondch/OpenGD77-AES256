@@ -230,3 +230,75 @@ size_t dmr_aes_voice_frame(dmr_aes_ctx_t *c, uint16_t *b49, size_t bitpos) {
     }
     return bitpos + 56;
 }
+
+/* ---- DMRA "Late Entry MI" conveyance ------------------------------------ *
+ * The stock TYT carries the 32-bit MI by stuffing a Golay(24,12)+CRC4 encoding
+ * of it into ambe_fr[3][0..3] (4 bits) of EACH of the 3 AMBE codewords, across
+ * voice frames vc=1..6. The receiver reads it as "Late Entry MI" and bootstraps
+ * the keystream, then self-advances the MI by LFSR each superframe. This mirrors
+ * dsd-fme dmr_le.c (decode) byte-exact — validated offline on 200k+ vectors. */
+
+/* Golay(24,12) generator (systematic; first 12 cols = identity) — from dsd-fme fec.c. */
+static const uint8_t LE_G[24*12] = {
+  1,0,0,0,0,0,0,0,0,0,0,0, 1,1,0,0,0,1,1,1,0,1,0,1,
+  0,1,0,0,0,0,0,0,0,0,0,0, 0,1,1,0,0,0,1,1,1,0,1,1,
+  0,0,1,0,0,0,0,0,0,0,0,0, 1,1,1,1,0,1,1,0,1,0,0,0,
+  0,0,0,1,0,0,0,0,0,0,0,0, 0,1,1,1,1,0,1,1,0,1,0,0,
+  0,0,0,0,1,0,0,0,0,0,0,0, 0,0,1,1,1,1,0,1,1,0,1,0,
+  0,0,0,0,0,1,0,0,0,0,0,0, 1,1,0,1,1,0,0,1,1,0,0,1,
+  0,0,0,0,0,0,1,0,0,0,0,0, 0,1,1,0,1,1,0,0,1,1,0,1,
+  0,0,0,0,0,0,0,1,0,0,0,0, 0,0,1,1,0,1,1,0,0,1,1,1,
+  0,0,0,0,0,0,0,0,1,0,0,0, 1,1,0,1,1,1,0,0,0,1,1,0,
+  0,0,0,0,0,0,0,0,0,1,0,0, 1,0,1,0,1,0,0,1,0,1,1,1,
+  0,0,0,0,0,0,0,0,0,0,1,0, 1,0,0,1,0,0,1,1,1,1,1,0,
+  0,0,0,0,0,0,0,0,0,0,0,1, 1,0,0,0,1,1,1,0,1,0,1,1,
+};
+
+static void le_golay24_encode(const uint8_t in12[12], uint8_t out24[24]) {
+    for (int j = 0; j < 24; ++j) {
+        uint8_t s = 0;
+        for (int i = 0; i < 12; ++i) { s = (uint8_t)(s + in12[i] * LE_G[24*i + j]); }
+        out24[j] = (uint8_t)(s & 1u);
+    }
+}
+
+/* CRC4 (x^4+x+1, inverted) — bit-exact with dsd-fme dmr_le.c crc4(). */
+static uint8_t le_crc4(const uint8_t *bits, int len) {
+    uint8_t buf[40]; const uint8_t poly[5] = {1,0,0,1,1}; uint8_t crc = 0;
+    if (len + 4 > (int)sizeof(buf)) { return 0; }
+    memset(buf, 0, sizeof buf);
+    for (int i = 0; i < len; ++i) { buf[i] = bits[i]; }
+    for (int i = 0; i < len; ++i) {
+        if (buf[i]) { for (int j = 0; j < 5; ++j) { buf[i+j] ^= poly[j]; } }
+    }
+    for (int i = 0; i < 4; ++i) { crc = (uint8_t)((crc << 1) + buf[len + i]); }
+    return (uint8_t)(crc ^ 0xF);
+}
+
+void dmr_le_mi_build(uint32_t mi, uint8_t frag[7][3]) {
+    uint8_t mi_bits[36];
+    for (int i = 0; i < 32; ++i) { mi_bits[i] = (uint8_t)((mi >> (31 - i)) & 1u); }
+    uint8_t crc = le_crc4(mi_bits, 32);
+    for (int b = 0; b < 4; ++b) { mi_bits[32 + b] = (uint8_t)((crc >> (3 - b)) & 1u); }
+
+    /* Three Golay(24,12) codewords: info bits → mi_test, parity bits → go_test,
+     * placed at bit (35-(i+j*12)) of each 36-bit word (inverse of the decode). */
+    uint64_t mi_test = 0, go_test = 0;
+    for (int j = 0; j < 3; ++j) {
+        uint8_t enc[24];
+        le_golay24_encode(&mi_bits[j*12], enc);
+        for (int i = 0; i < 12; ++i) {
+            int pos = 35 - (i + j*12);
+            mi_test |= (uint64_t)(enc[i]    & 1u) << pos;
+            go_test |= (uint64_t)(enc[i+12] & 1u) << pos;
+        }
+    }
+    /* Distribute the two 36-bit words into 4-bit fragment nibbles per (vc, codeword),
+     * the exact inverse of dmr_le.c's mi_test/go_test assembly. frag[vc][cw], vc 1..6. */
+    frag[1][0]=(uint8_t)((mi_test>>32)&0xF); frag[2][0]=(uint8_t)((mi_test>>28)&0xF); frag[3][0]=(uint8_t)((mi_test>>24)&0xF);
+    frag[1][1]=(uint8_t)((mi_test>>20)&0xF); frag[2][1]=(uint8_t)((mi_test>>16)&0xF); frag[3][1]=(uint8_t)((mi_test>>12)&0xF);
+    frag[1][2]=(uint8_t)((mi_test>>8 )&0xF); frag[2][2]=(uint8_t)((mi_test>>4 )&0xF); frag[3][2]=(uint8_t)((mi_test>>0 )&0xF);
+    frag[4][0]=(uint8_t)((go_test>>32)&0xF); frag[5][0]=(uint8_t)((go_test>>28)&0xF); frag[6][0]=(uint8_t)((go_test>>24)&0xF);
+    frag[4][1]=(uint8_t)((go_test>>20)&0xF); frag[5][1]=(uint8_t)((go_test>>16)&0xF); frag[6][1]=(uint8_t)((go_test>>12)&0xF);
+    frag[4][2]=(uint8_t)((go_test>>8 )&0xF); frag[5][2]=(uint8_t)((go_test>>4 )&0xF); frag[6][2]=(uint8_t)((go_test>>0 )&0xF);
+}

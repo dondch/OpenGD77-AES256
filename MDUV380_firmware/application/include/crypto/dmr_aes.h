@@ -99,6 +99,13 @@ size_t dmr_aes_voice_frame(dmr_aes_ctx_t *c, uint16_t *b49, size_t bitpos);
 int dmr_ambe_is_silence(const uint16_t *b49);
 int dmr_ambe_is_ccr(const uint16_t *b49);
 
+/* ---- DMRA "Late Entry MI" conveyance (TX) ------------------------------- *
+ * Build the Golay(24,12)+CRC4 fragment nibbles that carry the 32-bit MI in the
+ * AMBE voice codewords (how the stock TYT conveys it; validated vs dsd-fme).
+ * frag[vc][cw] (vc 1..6, cw 0..2) = 4-bit value for ambe_fr[3][0..3] of codeword
+ * cw in voice frame vc. Those 4 bits map to post-ECC bitbuffer_encode[71,67,63,59]. */
+void dmr_le_mi_build(uint32_t mi, uint8_t frag[7][3]);
+
 /* ---- low-level (exposed for unit tests) --------------------------------- */
 void dmr_lfsr128d(uint32_t mi, uint8_t iv_out[16], uint32_t *next_mi_out);
 void aes256_ofb_keystream(const uint8_t iv[16], const uint8_t key[32],
