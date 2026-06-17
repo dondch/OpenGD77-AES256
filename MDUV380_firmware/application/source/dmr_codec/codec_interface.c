@@ -162,6 +162,10 @@ void codecEncodeBlock(uint8_t *outdata_ptr)
 		"POP {R4-R11}"
 	);
 
+	// AES: encrypt the 49 decoded AMBE voice params before the FEC encode (mirror of the
+	// RX decrypt in codecDecode). No-op unless ENABLE_AES and an active encrypted TX.
+	dmrAesTxCodecFrame(bitbuffer_encode);
+
 	r0 = (int)bitbuffer_encode;
 	r1 = (int)ambebuffer_encode_ecc;
 
@@ -175,6 +179,10 @@ void codecEncodeBlock(uint8_t *outdata_ptr)
 		"ADD SP, SP, #0x14\n"
 		"POP {R4-R11}"
 	);
+
+	// AES: stuff the DMRA Late-Entry MI into the post-ECC codeword (bitbuffer_encode now
+	// holds the 72-bit FEC frame). No-op unless ENABLE_AES and an active encrypted TX.
+	dmrAesTxStuffMI(bitbuffer_encode);
 
 	for (int i = 0; i < 72; i++)
 	{
