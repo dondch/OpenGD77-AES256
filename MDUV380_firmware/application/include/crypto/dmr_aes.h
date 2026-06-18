@@ -106,6 +106,11 @@ int dmr_ambe_is_ccr(const uint16_t *b49);
  * cw in voice frame vc. Those 4 bits map to post-ECC bitbuffer_encode[71,67,63,59]. */
 void dmr_le_mi_build(uint32_t mi, uint8_t frag[7][3]);
 
+/* ---- DMRA "Late Entry Single Block" (alg/key announcement, TX) ----------- *
+ * BPTC(16x2) single-burst codeword for the burst-F EMB. 11-bit payload =
+ * key_id<<3 | alg (alg 5 = AES256, 4 = AES128). out4 = page-0x02 regs 0x29..0x2C. */
+void dmr_emb_sb_build(uint8_t key_id, uint8_t alg, uint8_t out4[4]);
+
 /* ---- low-level (exposed for unit tests) --------------------------------- */
 void dmr_lfsr128d(uint32_t mi, uint8_t iv_out[16], uint32_t *next_mi_out);
 void aes256_ofb_keystream(const uint8_t iv[16], const uint8_t key[32],

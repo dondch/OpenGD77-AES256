@@ -263,18 +263,12 @@ void dmrAesTxEnd(void)    { s_txActive = 0; }
  * which a stock TYT (and our own RX via the chip's reconstructed PI-LC) reads to auto-engage
  * decryption — without it, only DSD-FME with a forced alg (-M 25) can decode our TX. The chip
  * does NOT BPTC-encode its 0x29/0x2A enc registers in this mode (it emits page-0x02 0x29..0x2C
- * RAW into the burst-F EMB data), so we supply the 4 already-BPTC(16x2)-encoded octets to write
- * to 0x29..0x2C. Payload = (KeyID<<3 | ALG): ALG 5 = AES256 (DSD prints 5+0x20=0x25). The encode
- * (Hamming(16,11,4) systematic + even-parity duplicate + RC interleave) is verified offline vs
- * dsd-fme BPTC_16x2_Extract_Data. Currently KEY ID 1 only (payload 0x00D); 0 if no enc TX. */
+ * RAW into the burst-F EMB data), so we supply the 4 already-BPTC(16x2)-encoded octets via
+ * dmr_emb_sb_build (key_id 1 / AES256 -> 44 42 88 81). Returns 0 if no encrypted TX is active. */
 int dmrAesTxEmbSb(uint8_t out4[4])
 {
     if (!s_txActive) { return 0; }
-    static const uint8_t le_sb_keyid1_aes256[4] = { 0x44, 0x42, 0x88, 0x81 }; /* BPTC of 0x00D */
-    out4[0] = le_sb_keyid1_aes256[0];
-    out4[1] = le_sb_keyid1_aes256[1];
-    out4[2] = le_sb_keyid1_aes256[2];
-    out4[3] = le_sb_keyid1_aes256[3];
+    dmr_emb_sb_build(s_tx.key_id, (uint8_t)(s_tx.alg_id & 0x07), out4);
     return 1;
 }
 #endif
