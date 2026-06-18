@@ -302,3 +302,36 @@ void dmr_le_mi_build(uint32_t mi, uint8_t frag[7][3]) {
     frag[4][1]=(uint8_t)((go_test>>20)&0xF); frag[5][1]=(uint8_t)((go_test>>16)&0xF); frag[6][1]=(uint8_t)((go_test>>12)&0xF);
     frag[4][2]=(uint8_t)((go_test>>8 )&0xF); frag[5][2]=(uint8_t)((go_test>>4 )&0xF); frag[6][2]=(uint8_t)((go_test>>0 )&0xF);
 }
+
+/* ---- DMRA "Late Entry Single Block" (alg/key announcement) --------------- *
+ * Builds the 4-octet BPTC(16x2) single-burst codeword for the burst-F EMB. The
+ * HR-C6000 emits its page-0x02 enc registers 0x29..0x2C RAW in this mode (it does
+ * not BPTC-encode them), so we supply the already-encoded octets to write there.
+ * 11-bit payload = key_id(8)<<3 | alg(3); alg 5 = AES256, 4 = AES128. Encoding =
+ * Hamming(16,11,4) systematic + even-parity duplicate (single burst) + RC interleave.
+ * The receiver (dsd-fme dmr_sbrc / a stock TYT) BPTC-decodes it to ALG ID + KEY ID.
+ * Verified vs dsd-fme BPTC_16x2_Extract_Data (key_id 1 / AES256 -> 44 42 88 81). */
+void dmr_emb_sb_build(uint8_t key_id, uint8_t alg, uint8_t out4[4]) {
+    /* Hamming(16,11,4) generator, systematic (cols 0..10 = identity) — dsd-fme fec.c. */
+    static const uint8_t G[16*11] = {
+      1,0,0,0,0,0,0,0,0,0,0, 1,0,0,1,1,  0,1,0,0,0,0,0,0,0,0,0, 1,1,0,1,0,
+      0,0,1,0,0,0,0,0,0,0,0, 1,1,1,1,1,  0,0,0,1,0,0,0,0,0,0,0, 1,1,1,0,0,
+      0,0,0,0,1,0,0,0,0,0,0, 0,1,1,1,0,  0,0,0,0,0,1,0,0,0,0,0, 1,0,1,0,1,
+      0,0,0,0,0,0,1,0,0,0,0, 0,1,0,1,1,  0,0,0,0,0,0,0,1,0,0,0, 1,0,1,1,0,
+      0,0,0,0,0,0,0,0,1,0,0, 1,1,0,0,1,  0,0,0,0,0,0,0,0,0,1,0, 0,1,1,0,1,
+      0,0,0,0,0,0,0,0,0,0,1, 0,0,1,1,1,
+    };
+    /* Reverse-channel BPTC deinterleave tables — dsd-fme bptc.c. */
+    static const uint8_t BPTC[32]  = { 0,17, 2,19, 4,21, 6,23, 8,25,10,27,12,29,14,31,
+                                      16, 1,18, 3,20, 5,22, 7,24, 9,26,11,28,13,30,15};
+    static const uint8_t PLACE[32] = { 0,16, 1,17, 2,18, 3,19, 4,20, 5,21, 6,22, 7,23,
+                                       8,24, 9,25,10,26,11,27,12,28,13,29,14,30,15,31};
+    uint16_t payload = (uint16_t)(((uint16_t)key_id << 3) | (alg & 0x07u)); /* 11-bit */
+    uint8_t d[11], line[16], dm[32], in[32];
+    int i, j;
+    for (i = 0; i < 11; i++) { d[i] = (uint8_t)((payload >> (10 - i)) & 1u); }
+    for (j = 0; j < 16; j++) { uint8_t s = 0; for (i = 0; i < 11; i++) { s = (uint8_t)(s + d[i] * G[16*i + j]); } line[j] = (uint8_t)(s & 1u); }
+    for (i = 0; i < 16; i++) { dm[i] = line[i]; dm[i + 16] = line[i]; }       /* even-parity duplicate */
+    for (i = 0; i < 32; i++) { in[i] = (uint8_t)(dm[PLACE[BPTC[i]]] & 1u); }  /* RC interleave */
+    for (i = 0; i < 4; i++) { uint8_t b = 0; for (j = 0; j < 8; j++) { b = (uint8_t)((b << 1) | in[i*8 + j]); } out4[i] = b; }
+}
