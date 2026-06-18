@@ -1781,14 +1781,15 @@ void hrc6000TimeslotInterruptHandler(void)
 		case DMR_STATE_TX_START_5: // Start TX (sixth step)
 			SPI0WritePageRegByte(0x04, 0x41, 0x80);     // Transmit during next Timeslot
 #ifdef ENABLE_AES
-			// Restore the group Voice LC (page 0x02) that the START_3 PI Header overwrote, so
-			// the in-voice embedded LC carries the correct group call info (not the PI LC).
-			if (dmrAesTxActive())
-			{
-				hrc6000SendPcOrTgLCHeader();
-			}
+			// Second PI Header burst, on this stable preamble slot (the first burst is the weak
+			// PTT ramp). Two PI bursts greatly improve the odds the receiver locks the MI before
+			// voice -> no startup garble even if one PI is lost. The group Voice LC is re-written
+			// at voice start (DMR_STATE_TX_2, txSequence==0) for the in-voice embedded LC.
+			if (!(dmrAesTxActive() && hrc6000SendAesPIHeader()))
 #endif
-			SPI0WritePageRegByte(0x04, 0x50, 0x10);     // Set Data Type to 0001 (Voice LC Header), Data, LCSS=00
+			{
+				SPI0WritePageRegByte(0x04, 0x50, 0x10);     // Set Data Type to 0001 (Voice LC Header), Data, LCSS=00
+			}
 			hrc.TAPhase = 0;
 			slotState = DMR_STATE_TX_1;
 			break;
@@ -1833,6 +1834,16 @@ void hrc6000TimeslotInterruptHandler(void)
 				}
 				else
 				{
+#ifdef ENABLE_AES
+					// After the PI-Header preamble bursts, page 0x02 holds the PI LC. Re-assert
+					// the group Voice LC at the start of each superframe (burst A) so the in-voice
+					// embedded LC (bursts B-E) carries the group call, not the PI. (TA, when on,
+					// writes its own LC, so skip then.)
+					if (dmrAesTxActive() && (hrc.txSequence == 0) && (getCurrentTATxFlag() == TA_TX_OFF))
+					{
+						hrc6000SendPcOrTgLCHeader();
+					}
+#endif
 					if((hrc.txSequence == 0) && (getCurrentTATxFlag() != TA_TX_OFF))
 					{
 						hrc6000TransmitTalkerAlias();
