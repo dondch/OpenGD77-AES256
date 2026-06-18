@@ -27,6 +27,7 @@ void dmrAesTxCodecFrame(uint16_t *b49);            /* encrypt 49 AMBE params dur
 void dmrAesTxStuffMI(uint16_t *b72);               /* stuff Late-Entry MI into post-ECC codeword */
 int  dmrAesTxActive(void);
 void dmrAesTxEnd(void);
+int  dmrAesTxEmbSb(uint8_t out4[4]);               /* burst-F EMB Late-Entry Single Block (alg/key) */
 #else
 static inline void dmrAesInit(void){ }
 static inline void dmrAesSetKeyRam(uint8_t k, const uint8_t *p){ (void)k; (void)p; }
@@ -45,5 +46,6 @@ static inline void dmrAesTxCodecFrame(uint16_t *b){ (void)b; }
 static inline void dmrAesTxStuffMI(uint16_t *b){ (void)b; }
 static inline int  dmrAesTxActive(void){ return 0; }
 static inline void dmrAesTxEnd(void){ }
+static inline int  dmrAesTxEmbSb(uint8_t *o){ (void)o; return 0; }
 #endif
 #endif

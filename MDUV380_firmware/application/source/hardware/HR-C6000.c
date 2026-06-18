@@ -313,6 +313,7 @@ static bool hrc6000CallAcceptFilter(void);
 static void hrc6000SendPcOrTgLCHeader(void);
 #ifdef ENABLE_AES
 static uint32_t hrc6000AesRngSeed(void);
+static bool hrc6000SendAesPIHeader(void);
 #endif
 #ifdef CPU_MK22FN512VLL12
 static inline void hrc6000SysInterruptHandler(void);
@@ -1753,7 +1754,14 @@ void hrc6000TimeslotInterruptHandler(void)
 
 		case DMR_STATE_TX_START_3: // Start TX (fourth step)
 			SPI0WritePageRegByte(0x04, 0x41, 0x80);     // Transmit during Next Timeslot
-			SPI0WritePageRegByte(0x04, 0x50, 0x10);     // Set Data Type to 0001 (Voice LC Header), Data, LCSS=00
+#ifdef ENABLE_AES
+			// For an encrypted call, send the PI Header here (delivers the MI before voice so
+			// the receiver decrypts from frame A). START_5 restores the group Voice LC.
+			if (!(dmrAesTxActive() && hrc6000SendAesPIHeader()))
+#endif
+			{
+				SPI0WritePageRegByte(0x04, 0x50, 0x10); // Set Data Type to 0001 (Voice LC Header), Data, LCSS=00
+			}
 			slotState = DMR_STATE_TX_START_4;
 			break;
 
@@ -1772,6 +1780,14 @@ void hrc6000TimeslotInterruptHandler(void)
 
 		case DMR_STATE_TX_START_5: // Start TX (sixth step)
 			SPI0WritePageRegByte(0x04, 0x41, 0x80);     // Transmit during next Timeslot
+#ifdef ENABLE_AES
+			// Restore the group Voice LC (page 0x02) that the START_3 PI Header overwrote, so
+			// the in-voice embedded LC carries the correct group call info (not the PI LC).
+			if (dmrAesTxActive())
+			{
+				hrc6000SendPcOrTgLCHeader();
+			}
+#endif
 			SPI0WritePageRegByte(0x04, 0x50, 0x10);     // Set Data Type to 0001 (Voice LC Header), Data, LCSS=00
 			hrc.TAPhase = 0;
 			slotState = DMR_STATE_TX_1;
@@ -1846,6 +1862,18 @@ void hrc6000TimeslotInterruptHandler(void)
 			}
 
 			//write_SPI_page_reg_bytearray_SPI1(0x03, 0x00, (uint8_t*)(DMR_frame_buffer + LC_DATA_LENGTH), AMBE_AUDIO_LENGTH);// send the audio bytes to the hardware
+#ifdef ENABLE_AES
+			// Voice F-frame (burst F, seq 5) EMB: announce the DMRA encryption alg + key
+			// (Late-Entry Single Block) so a stock TYT / our own RX engages decryption. The
+			// 4 BPTC(16x2)-encoded octets land raw in the burst-F EMB data (0x29..0x2C).
+			{
+				uint8_t embSb[4];
+				if ((hrc.txSequence == 5) && dmrAesTxEmbSb(embSb))
+				{
+					SPI0WritePageRegByteArray(0x02, 0x29, embSb, 4); // F-frame EMB: LE Single Block
+				}
+			}
+#endif
 			SPI0WritePageRegByte(0x04, 0x41, 0x80);                      // Transmit during next Timeslot
 			SPI0WritePageRegByte(0x04, 0x50, 0x08 + (hrc.txSequence << 4)); // Data Type= sequence number 0 - 5 (Voice Frame A) , Voice, LCSS = 0
 
@@ -2231,6 +2259,25 @@ static uint32_t hrc6000AesRngSeed(void)
 		}
 	}
 	return ticksGetMillis();
+}
+
+// Emit the DMRA Privacy Indicator (PI) Header as a Data Type 0000 burst at call key-up,
+// carrying ALG/KEY/MI. This delivers the initial MI to the receiver BEFORE the voice, so it
+// decrypts from voice frame A instead of waiting a full superframe for the in-AMBE late entry
+// (which leaves the first ~360 ms garbled). The caller re-writes the group Voice LC (page 0x02)
+// afterwards so the in-voice embedded LC stays correct. Returns false (no burst) when encrypted
+// TX isn't active. Mirrors the stock TYT, which sends this PI burst at call start.
+static bool hrc6000SendAesPIHeader(void)
+{
+	uint8_t spi_tx[LC_DATA_LENGTH] = { 0 };
+
+	if (dmrAesTxBuildPI(spi_tx) != 7)
+	{
+		return false;
+	}
+	SPI0WritePageRegByteArray(0x02, 0x00, spi_tx, LC_DATA_LENGTH); // PI LC: 25 10 01 <MI4>
+	SPI0WritePageRegByte(0x04, 0x50, 0x00); // Data Type 0000 (PI Header), Data, LCSS=00
+	return true;
 }
 
 #endif
