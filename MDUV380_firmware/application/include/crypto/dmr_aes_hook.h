@@ -37,6 +37,7 @@ int  dmrAesDiagConstPattern(uint16_t *b49);        /* DIAGNOSTIC: constant known
 #endif
 #ifdef DMR_AES_DIAG_RX
 void dmrAesDiagRxMark(uint8_t type);               /* DIAGNOSTIC: log an RX event (3=LCRESET 4=RXEND) */
+void dmrAesDiagLateEntry(uint8_t slotState, uint8_t gatePassed); /* DIAGNOSTIC: chip late-entry int (reg0x82 b4) fired */
 void dmrAesResetRxDiag(void);                      /* DIAGNOSTIC: clear the RX event ring */
 int  dmrAesGetRxDiag(uint8_t *out, int max);       /* DIAGNOSTIC: snapshot the RX event ring */
 void dmrAesDiagCapArm(void);                       /* DIAGNOSTIC: arm one-superframe raw-burst capture */

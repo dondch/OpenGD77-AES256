@@ -919,6 +919,12 @@ static inline void hrc6000SysPostAccessInt(void)
 
 			In MSK mode, this interrupt has no substatus registers.
 	 */
+#ifdef DMR_AES_DIAG_RX
+	// AES diag: record EVERY chip Late-Entry interrupt (reg 0x82 bit4) firing + the slotState
+	// it fired in, so we can see whether the IDLE gate below drops it on rapid re-PTT.
+	dmrAesDiagLateEntry((uint8_t)slotState,
+		((slotState == DMR_STATE_IDLE) && hrc.ccHold && hrc6000CheckColourCodeFilter()) ? 1 : 0);
+#endif
 	// Late entry into ongoing RX
 	if ((slotState == DMR_STATE_IDLE) && hrc.ccHold && hrc6000CheckColourCodeFilter())
 	{

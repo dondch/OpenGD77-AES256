@@ -9,6 +9,8 @@ Firmware records, in the HR-C6000 ISR, a small CCM ring of decrypt events:
   WRAP    superframe wrap: late-entry-decode MI (le=ok/fail) vs LFSR self-advance fallback
   LCRESET Voice-LC-Header new-call reset (dmrAesRxEnd)
   RXEND   CRC-valid Terminator (dmrAesRxEnd)
+  LATENT  chip Late-Entry interrupt (reg 0x82 bit4) fired: slotState it fired in + whether
+          OpenGD77's IDLE gate let it act (gate) and whether stale AES was still active (act)
 
 Usage (Windows, the CDC enumerates as COM4):
   python rxdiag.py --reset            # clear the ring before a test run
@@ -23,7 +25,9 @@ except ImportError:
     sys.exit("pyserial required: pip install pyserial")
 
 AES_VID, AES_PID = 0x1FC9, 0x0094
-TYPE = {1: "PI    ", 2: "WRAP  ", 3: "LCRSET", 4: "RXEND ", 5: "IVGEN ", 6: "BOOT  ", 7: "RESEED"}
+TYPE = {1: "PI    ", 2: "WRAP  ", 3: "LCRSET", 4: "RXEND ", 5: "IVGEN ", 6: "BOOT  ", 7: "RESEED", 8: "LATENT"}
+SLOTSTATE = {0: "IDLE", 1: "RX_1", 2: "RX_2", 3: "RX_END",
+             4: "TXS1", 5: "TXS2", 6: "TXS3", 7: "TXS4", 8: "TXS5"}
 
 
 def find_port():
@@ -65,11 +69,12 @@ def main():
     cnt = struct.unpack_from("<7H", data, 6)   # PI WRAP LCRESET RXEND IVGEN BOOTSTRAP RESEED
     leOk, leFail = struct.unpack_from("<2H", data, 20)
     lcReads, piValid, burstCalls = struct.unpack_from("<3H", data, 24)
+    leInt = struct.unpack_from("<H", data, 30)[0] if len(data) >= 32 else 0
     body = data[32:32 + ring * rec]
 
     print(f"port {port}  ring={ring} rec={rec} writeIdx={w}")
     print(f"counts: PI={cnt[0]} WRAP={cnt[1]} LCRESET={cnt[2]} RXEND={cnt[3]} IVGEN={cnt[4]} "
-          f"BOOTSTRAP={cnt[5]} RESEED={cnt[6]}   late-entry: ok={leOk} fail={leFail}")
+          f"BOOTSTRAP={cnt[5]} RESEED={cnt[6]} LATEENTRY-int={leInt}   late-entry-decode: ok={leOk} fail={leFail}")
     print(f"        LC-reads={lcReads}  valid-PI={piValid}  RxBurst-calls={burstCalls}  "
           f"(non-PI LCs = {lcReads-piValid})")
     print("-" * 90)
@@ -106,6 +111,9 @@ def main():
             fs = "SWITCHED-TRACK" + (" confirmed" if (fl & 8) else "")
         elif t in (3, 4):
             fs = "wasActive" if (fl & 1) else "wasIdle"
+        elif t == 8:   # LATEENTRY: chip late-entry interrupt fired. seq = slotState it fired in.
+            st = SLOTSTATE.get(seq, f"st{seq}")
+            fs = f"slot={st} " + ("GATE-OK(acted)" if (fl & 1) else "GATE-DROPPED") + (" stale-AES-active" if (fl & 2) else "")
         else:
             fs = ""
         print(f"{i:2d} | {ts:5d} {dt:>5} | {name} | {seq:3d} {ls:4d} | {mi:08X}  {aux:08X} | {fs}")

@@ -86,7 +86,7 @@ int dmrAesDiagConstPattern(uint16_t *b49)
 #include "functions/ticks.h"
 #define RXD_RING 24
 typedef struct {            /* 16 bytes */
-    uint8_t  type;          /* 1=PI 2=WRAP 3=LCRESET 4=RXEND 5=IVGEN 6=BOOTSTRAP 7=RESEED */
+    uint8_t  type;          /* 1=PI 2=WRAP 3=LCRESET 4=RXEND 5=IVGEN 6=BOOTSTRAP 7=RESEED 8=LATEENTRY */
     uint8_t  flags;         /* see the recording sites */
     uint8_t  seq;           /* burst seq (rxDataType & 7) for WRAP/IVGEN/BOOTSTRAP/RESEED */
     int8_t   lastSeq;       /* s_rxLastSeq before the wrap update */
@@ -97,7 +97,7 @@ typedef struct {            /* 16 bytes */
 } rxd_evt_t;
 static rxd_evt_t s_rxd[RXD_RING] DMR_AES_CCM;
 static uint16_t  s_rxdW DMR_AES_CCM;        /* ring write index (free-running) */
-static uint16_t  s_rxdCnt[8] DMR_AES_CCM;   /* per-type aggregate counters (survive ring wrap) */
+static uint16_t  s_rxdCnt[9] DMR_AES_CCM;   /* per-type aggregate counters (survive ring wrap); [8]=LATEENTRY */
 static uint16_t  s_rxdLe[2] DMR_AES_CCM;    /* [0]=late-entry decode OK, [1]=fail */
 static uint16_t  s_rxdMisc[3] DMR_AES_CCM;  /* [0]=LC reads, [1]=valid PI parses, [2]=RxBurst calls */
 static uint32_t  s_rxdLastPiMi DMR_AES_CCM; /* PI dedup: last logged PI MI */
@@ -118,10 +118,20 @@ static void rxd_log(uint8_t type, uint8_t flags, int seq, int lastSeq, uint32_t 
     e->ts = (uint16_t)(ticksGetMillis() & 0xFFFF); e->pad = 0;
     e->mi = mi; e->aux = aux;
     s_rxdW++;
-    if (type < 8) { s_rxdCnt[type]++; }
+    if (type < 9) { s_rxdCnt[type]++; }
 }
 /* Called from HR-C6000.c at the two dmrAesRxEnd sites (LCRESET=3, RXEND=4). */
 void dmrAesDiagRxMark(uint8_t type) { rxd_log(type, (uint8_t)(s_rxActive ? 1 : 0), 0, s_rxLastSeq, s_rx.mi, s_rxInitMi); }
+/* Called from HR-C6000.c hrc6000SysPostAccessInt: the chip's native Late-Entry interrupt
+ * (reg 0x82 bit4 / SYS_INT_POST_ACCESS) fired. seq = slotState at the moment it fired;
+ * flags bit0 = gatePassed (OpenGD77's IDLE gate let the handler act), bit1 = s_rxActive
+ * (a stale AES decrypt from the previous call was still running). Decides whether the
+ * late-entry interrupt is a usable rapid-RX new-call trigger (esp. when slotState != IDLE). */
+void dmrAesDiagLateEntry(uint8_t slotState, uint8_t gatePassed)
+{
+    rxd_log(8 /*LATEENTRY*/, (uint8_t)((gatePassed ? 1 : 0) | (s_rxActive ? 2 : 0)),
+            (int)slotState, s_rxLastSeq, s_rx.mi, s_rxInitMi);
+}
 void dmrAesResetRxDiag(void)
 {
     memset(s_rxd, 0, sizeof s_rxd);
@@ -134,8 +144,8 @@ void dmrAesResetRxDiag(void)
 /* Copy a self-describing snapshot into out (<= max). Header (32 bytes, LE):
  *  [0]=0xA5 magic, [1]=ring size, [2]=record size, [3]=0, [4..5]=write index,
  *  [6..19]=cnt[1..7] (u16 each), [20..21]=leOk, [22..23]=leFail, [24..25]=LC reads,
- *  [26..27]=valid PI parses, [28..29]=RxBurst calls, then the raw ring (RXD_RING * 16
- *  bytes, ring order; the host reorders chronologically). */
+ *  [26..27]=valid PI parses, [28..29]=RxBurst calls, [30..31]=LATEENTRY count, then the
+ *  raw ring (RXD_RING * 16 bytes, ring order; the host reorders chronologically). */
 int dmrAesGetRxDiag(uint8_t *out, int max)
 {
     int hdr = 32, body = (int)sizeof s_rxd, n = hdr + body;
@@ -147,6 +157,7 @@ int dmrAesGetRxDiag(uint8_t *out, int max)
     out[20] = (uint8_t)(s_rxdLe[0] & 0xFF); out[21] = (uint8_t)((s_rxdLe[0] >> 8) & 0xFF);
     out[22] = (uint8_t)(s_rxdLe[1] & 0xFF); out[23] = (uint8_t)((s_rxdLe[1] >> 8) & 0xFF);
     for (int i = 0; i < 3; i++) { out[24 + i * 2] = (uint8_t)(s_rxdMisc[i] & 0xFF); out[25 + i * 2] = (uint8_t)((s_rxdMisc[i] >> 8) & 0xFF); }
+    out[30] = (uint8_t)(s_rxdCnt[8] & 0xFF); out[31] = (uint8_t)((s_rxdCnt[8] >> 8) & 0xFF); /* LATEENTRY count */
     memcpy(out + hdr, s_rxd, body);
     return n;
 }
