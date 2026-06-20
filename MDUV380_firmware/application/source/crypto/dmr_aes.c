@@ -335,3 +335,89 @@ void dmr_emb_sb_build(uint8_t key_id, uint8_t alg, uint8_t out4[4]) {
     for (i = 0; i < 32; i++) { in[i] = (uint8_t)(dm[PLACE[BPTC[i]]] & 1u); }  /* RC interleave */
     for (i = 0; i < 4; i++) { uint8_t b = 0; for (j = 0; j < 8; j++) { b = (uint8_t)((b << 1) | in[i*8 + j]); } out4[i] = b; }
 }
+
+/* ---- DMRA "Late Entry MI" DECODE (RX) ----------------------------------- *
+ * Inverse of dmr_le_mi_build: recover the 32-bit MI from the Golay(24,12)+CRC4
+ * fragment nibbles the transmitter stuffed into ambe_fr[3][0..3] across the 6
+ * voice frames of a superframe. Lets the RX read the MI straight from the AMBE
+ * bits (mirror dsd-fme dmr_le.c) instead of the HR-C6000 reformatted PI-LC, which
+ * lags by a frame at a new call. Returns 1 + *mi_out only when all 3 Golay words
+ * are syndrome-clean AND the CRC4 checks (conservative no-correction decode: a bad
+ * read is rejected and the caller falls back to the chip PI-LC). frag[vc][cw]. */
+static const uint8_t LE_H[24*12] = {
+  1,0,1,0,0,1,0,0,1,1,1,1, 1,0,0,0,0,0,0,0,0,0,0,0,
+  1,1,1,1,0,1,1,0,1,0,0,0, 0,1,0,0,0,0,0,0,0,0,0,0,
+  0,1,1,1,1,0,1,1,0,1,0,0, 0,0,1,0,0,0,0,0,0,0,0,0,
+  0,0,1,1,1,1,0,1,1,0,1,0, 0,0,0,1,0,0,0,0,0,0,0,0,
+  0,0,0,1,1,1,1,0,1,1,0,1, 0,0,0,0,1,0,0,0,0,0,0,0,
+  1,0,1,0,1,0,1,1,1,0,0,1, 0,0,0,0,0,1,0,0,0,0,0,0,
+  1,1,1,1,0,0,0,1,0,0,1,1, 0,0,0,0,0,0,1,0,0,0,0,0,
+  1,1,0,1,1,1,0,0,0,1,1,0, 0,0,0,0,0,0,0,1,0,0,0,0,
+  0,1,1,0,1,1,1,0,0,0,1,1, 0,0,0,0,0,0,0,0,1,0,0,0,
+  1,0,0,1,0,0,1,1,1,1,1,0, 0,0,0,0,0,0,0,0,0,1,0,0,
+  0,1,0,0,1,0,0,1,1,1,1,1, 0,0,0,0,0,0,0,0,0,0,1,0,
+  1,1,0,0,0,1,1,1,0,1,0,1, 0,0,0,0,0,0,0,0,0,0,0,1,
+};
+
+/* Table-free Golay(24,12,8) decode-with-correction of one 24-bit codeword in place.
+ * Returns the number of corrected errors (0..3), or -1 if uncorrectable (>3 errors).
+ * The early no-correction version REJECTED any nonzero syndrome, so on real RF the
+ * unprotected late-entry nibbles (which carry a few channel bit errors) NEVER decoded
+ * — the whole direct-late-entry path was inert. d=8 ⇒ every weight-<=3 error pattern has
+ * a UNIQUE coset leader, so a min-weight syndrome search is deterministic and matches
+ * dsd-fme's table-based Golay_24_12_decode exactly (verified offline over all <=3-bit
+ * patterns), without its 12 KB syndrome table. */
+static int golay24_correct(uint8_t cw[24]) {
+    unsigned col[24], s = 0;
+    int j, a, b, c, r;
+    for (j = 0; j < 24; j++) {                    /* column j = single-error-at-j syndrome */
+        unsigned cj = 0;
+        for (r = 0; r < 12; r++) { cj |= (unsigned)(LE_H[24*r + j] & 1) << (11 - r); }
+        col[j] = cj;
+    }
+    for (r = 0; r < 12; r++) {                    /* syndrome of the received word */
+        int acc = 0;
+        for (j = 0; j < 24; j++) { acc += cw[j] * LE_H[24*r + j]; }
+        s |= (unsigned)(acc & 1) << (11 - r);
+    }
+    if (s == 0) { return 0; }
+    for (a = 0; a < 24; a++) { if (col[a] == s) { cw[a] ^= 1; return 1; } }
+    for (a = 0; a < 24; a++) { for (b = a+1; b < 24; b++) { if ((col[a]^col[b]) == s) { cw[a]^=1; cw[b]^=1; return 2; } } }
+    for (a = 0; a < 24; a++) { for (b = a+1; b < 24; b++) { for (c = b+1; c < 24; c++) {
+        if ((col[a]^col[b]^col[c]) == s) { cw[a]^=1; cw[b]^=1; cw[c]^=1; return 3; } } } }
+    return -1;
+}
+
+int dmr_le_mi_decode(const uint8_t frag[7][3], uint32_t *mi_out) {
+    uint64_t mi_test = ((uint64_t)frag[1][0]<<32)|((uint64_t)frag[2][0]<<28)|((uint64_t)frag[3][0]<<24)|
+                       ((uint64_t)frag[1][1]<<20)|((uint64_t)frag[2][1]<<16)|((uint64_t)frag[3][1]<<12)|
+                       ((uint64_t)frag[1][2]<<8 )|((uint64_t)frag[2][2]<<4 )|((uint64_t)frag[3][2]<<0);
+    uint64_t go_test = ((uint64_t)frag[4][0]<<32)|((uint64_t)frag[5][0]<<28)|((uint64_t)frag[6][0]<<24)|
+                       ((uint64_t)frag[4][1]<<20)|((uint64_t)frag[5][1]<<16)|((uint64_t)frag[6][1]<<12)|
+                       ((uint64_t)frag[4][2]<<8 )|((uint64_t)frag[5][2]<<4 )|((uint64_t)frag[6][2]<<0);
+    uint8_t mi_bits[36];
+    int good = 1, i, j;
+    for (j = 0; j < 3; j++) {
+        uint8_t cw[24];
+        for (i = 0; i < 12; i++) {
+            cw[i]    = (uint8_t)(((mi_test << (i + j*12)) & 0x800000000ULL) >> 35);
+            cw[i+12] = (uint8_t)(((go_test << (i + j*12)) & 0x800000000ULL) >> 35);
+        }
+        if (golay24_correct(cw) < 0) { good = 0; }     /* correct up to 3 errors, else reject */
+        for (i = 0; i < 12; i++) { mi_bits[i + j*12] = cw[i]; }
+    }
+    uint32_t mi_final = 0;
+    for (i = 0; i < 32; i++) { mi_final = (mi_final << 1) | mi_bits[i]; }
+    uint8_t crc_ext = 0;
+    for (i = 0; i < 4; i++) { crc_ext = (uint8_t)((crc_ext << 1) | mi_bits[32 + i]); }
+    *mi_out = mi_final;
+    return (good && (crc_ext == le_crc4(mi_bits, 32))) ? 1 : 0;
+}
+
+/* Lowest key slot that holds a loaded key, or -1 if none. Used as a fallback keyId
+ * when bootstrapping a rapid call from the late-entry MI (which carries no key id). */
+int dmr_aes_first_keyid(void) {
+    int i;
+    for (i = 0; i < DMR_AES_MAX_KEYS; i++) { if (s_have[i]) { return i; } }
+    return -1;
+}

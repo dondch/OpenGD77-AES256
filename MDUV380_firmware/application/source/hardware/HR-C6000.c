@@ -1026,6 +1026,20 @@ static inline void hrc6000SysReceivedDataInt(void)
 		}
 	}
 
+#ifdef ENABLE_AES
+	// Reset the AES RX state on a Voice LC Header (a data-sync burst, rxDataType 1 — sent only
+	// in the preamble, distinct from voice burst A which is SYNC_CLASS_VOICE). This marks a call
+	// START. Needed for rapid back-to-back calls: when the previous call's CRC-valid Terminator
+	// is missed (fast PTT release) the decrypt state stays stuck, and the HR-C6000 hands back the
+	// previous call's LC on the first iteration of the new one, so without this the new call's
+	// first frames decrypt with the old (advancing) MI = garble. Clearing here lets the new
+	// call's PI header reseed the MI cleanly.
+	if (hrc6000CrcIsValid() && (rxSyncClass == SYNC_CLASS_DATA) && (rxDataType == 1))        // Voice LC Header
+	{
+		dmrAesRxEnd();
+	}
+#endif
+
 	// Note only detect terminator frames in Active mode, because in passive we can see our own terminators echoed back which can be a problem
 
 	if (hrc6000CrcIsValid() && (rxSyncClass == SYNC_CLASS_DATA) && (rxDataType == 2))        //Terminator with LC
@@ -1178,6 +1192,7 @@ static inline void hrc6000SysReceivedDataInt(void)
 
 				SPI1ReadPageRegByteArray(0x03, 0x00, DMR_frame_buffer + LC_DATA_LENGTH, AMBE_AUDIO_LENGTH);
 				dmrAesRxBurst(rxDataType & 0x07); // AES: advance superframe/keystream offset (decrypt happens in codecDecode; no-op unless ENABLE_AES)
+				dmrAesRxLateEntry(rxDataType & 0x07, (const uint8_t *)(DMR_frame_buffer + LC_DATA_LENGTH)); // AES: read Late-Entry MI direct from AMBE bits (fast new-call lock)
 
 				if (settingsUsbMode == USB_MODE_HOTSPOT)
 				{
