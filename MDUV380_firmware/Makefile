@@ -25,6 +25,18 @@ ifeq ($(ENABLE_AES),1)
 DEFS += -DENABLE_AES
 endif
 
+ifeq ($(DMR_AES_DIAG_PATTERN),1)
+DEFS += -DDMR_AES_DIAG_PATTERN
+endif
+
+ifeq ($(DMR_AES_DIAG_ENCPAT),1)
+DEFS += -DDMR_AES_DIAG_ENCPAT
+endif
+
+ifeq ($(DMR_AES_DIAG_RX),1)
+DEFS += -DDMR_AES_DIAG_RX
+endif
+
 CFLAGS  = $(CPU) $(DEFS) $(INCS) -Os -g3 -ffunction-sections -fdata-sections -Wall -MMD -MP
 LDSCRIPT = STM32F405VGTX_FLASH.ld
 LDFLAGS = $(CPU) -T$(LDSCRIPT) --specs=nano.specs -Wl,--gc-sections -Wl,-Map=$(BUILD)/$(TARGET).map -lc -lm -lnosys

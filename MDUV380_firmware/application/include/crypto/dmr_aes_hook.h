@@ -29,6 +29,19 @@ void dmrAesTxStuffMI(uint16_t *b72);               /* stuff Late-Entry MI into p
 int  dmrAesTxActive(void);
 void dmrAesTxEnd(void);
 int  dmrAesTxEmbSb(uint8_t out4[4]);               /* burst-F EMB Late-Entry Single Block (alg/key) */
+#ifdef DMR_AES_DIAG_PATTERN
+int  dmrAesDiagPattern(uint16_t *b49);             /* DIAGNOSTIC: inject known params, returns 1 */
+#endif
+#ifdef DMR_AES_DIAG_ENCPAT
+int  dmrAesDiagConstPattern(uint16_t *b49);        /* DIAGNOSTIC: constant known plaintext (then encrypted) */
+#endif
+#ifdef DMR_AES_DIAG_RX
+void dmrAesDiagRxMark(uint8_t type);               /* DIAGNOSTIC: log an RX event (3=LCRESET 4=RXEND) */
+void dmrAesResetRxDiag(void);                      /* DIAGNOSTIC: clear the RX event ring */
+int  dmrAesGetRxDiag(uint8_t *out, int max);       /* DIAGNOSTIC: snapshot the RX event ring */
+void dmrAesDiagCapArm(void);                       /* DIAGNOSTIC: arm one-superframe raw-burst capture */
+int  dmrAesGetCapData(uint8_t *out, int max);      /* DIAGNOSTIC: dump the captured raw bursts */
+#endif
 #else
 static inline void dmrAesInit(void){ }
 static inline void dmrAesSetKeyRam(uint8_t k, const uint8_t *p){ (void)k; (void)p; }
