@@ -57,6 +57,8 @@ typedef struct {
 /* Load a 32-byte key into a slot (0..DMR_AES_MAX_KEYS-1). Returns 0 on success. */
 int  dmr_aes_set_key(uint8_t slot, const uint8_t key[DMR_AES_KEY_BYTES]);
 void dmr_aes_clear_keys(void);
+/* Lowest loaded key slot, or -1 if none (late-entry bootstrap key fallback). */
+int  dmr_aes_first_keyid(void);
 
 /* ---- PI header ---------------------------------------------------------- */
 /* Parse a 12-byte (or longer) post-FEC PI byte buffer. Returns 1 if usable. */
@@ -105,6 +107,10 @@ int dmr_ambe_is_ccr(const uint16_t *b49);
  * frag[vc][cw] (vc 1..6, cw 0..2) = 4-bit value for ambe_fr[3][0..3] of codeword
  * cw in voice frame vc. Those 4 bits map to post-ECC bitbuffer_encode[71,67,63,59]. */
 void dmr_le_mi_build(uint32_t mi, uint8_t frag[7][3]);
+
+/* RX: recover the 32-bit MI from the assembled Late-Entry fragment nibbles (inverse of
+ * dmr_le_mi_build). Returns 1 + *mi_out when the Golay(24,12) words + CRC4 all check. */
+int  dmr_le_mi_decode(const uint8_t frag[7][3], uint32_t *mi_out);
 
 /* ---- DMRA "Late Entry Single Block" (alg/key announcement, TX) ----------- *
  * BPTC(16x2) single-burst codeword for the burst-F EMB. 11-bit payload =

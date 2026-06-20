@@ -22,6 +22,11 @@ static int           s_rxIvReady DMR_AES_CCM;    /* 0 = (re)generate IV from s_r
 static int           s_rxLastSeq DMR_AES_CCM;    /* previous burst's seq, to detect superframe wrap */
 static uint32_t      s_rxNextMi DMR_AES_CCM;     /* LFSR-advanced MI for the next superframe */
 static uint32_t      s_rxInitMi DMR_AES_CCM;     /* the current call's CONSTANT initial MI (from its PI) */
+static uint8_t       s_rxFrag[7][3] DMR_AES_CCM; /* Late-Entry MI fragment nibbles read from the AMBE bits */
+static uint8_t       s_rxKeyId DMR_AES_CCM;      /* keyId of the last successful seed (late-entry bootstrap fallback) */
+static int           s_rxPiSeeded DMR_AES_CCM;   /* 1 = call seeded from the chip PI-LC (use pure self-advance,
+                                                  * stable & RF-independent); 0 = late-entry-bootstrapped rapid call
+                                                  * (adopt diverging late entries so a wrong bootstrap self-corrects) */
 
 /* Shared scratch for the (non-reentrant, foreground-only) key-store helpers. One
  * buffer instead of three per-function statics keeps CCM usage down. */
@@ -50,6 +55,9 @@ void dmrAesInit(void)
     s_rxLastSeq = -1;
     s_rxNextMi = 0;
     s_rxInitMi = 0;
+    memset(s_rxFrag, 0, sizeof s_rxFrag);
+    s_rxKeyId = 0;
+    s_rxPiSeeded = 0;
     s_txPiMi = 0;
     s_txKeyId = 0;
     s_txFrameCnt = 0;
@@ -139,16 +147,20 @@ void dmrAesRxPI(const uint8_t *pi, int len)
     if (!s_keysLoaded) { dmrAesLoadKeys(); }
     if (dmr_pi_parse(pi, (size_t)len, &p) && p.valid)
     {
-        /* (Re)seed ONLY when the MI changes — i.e. a genuinely new call (whose RX_END
-         * we may have missed). A same-MI re-sent PI (late entry) must be ignored: the
-         * MI is constant for the whole call, so re-seeding mid-call would reset the
-         * advance back to the initial value and garble the rest of the call. */
-        if (!s_rxActive || (p.mi != s_rxInitMi))
+        /* Seed only when NOT already active. The per-superframe MI is now driven by the
+         * Late-Entry MI read directly from the AMBE bits (dmrAesRxBurst), which tracks the
+         * transmitter and jumps immediately on a new call. We must NOT reseed on a chip-LC
+         * MI change mid-call: that resets s_rxLastSeq and kills the late-entry wrap-resync,
+         * and on a rapid call the HR-C6000 re-feeds the previous call's (laggy) LC. A new
+         * call is re-detected via the Voice LC Header reset (dmrAesRxEnd) + the late entry. */
+        if (!s_rxActive)
         {
             s_rxActive = (dmr_aes_rx_init(&s_rx, &p) == 0);  /* load key for keyId + seed MI */
             if (s_rxActive)
             {
                 s_rxInitMi = p.mi;
+                s_rxKeyId = p.key_id;  /* remember for late-entry bootstrap of a later rapid call */
+                s_rxPiSeeded = 1;      /* chip PI-LC seed: a normal call -> pure self-advance, stable */
                 s_rxIvReady = 0;     /* generate IV from the seeded MI on the next burst */
                 s_rxLastSeq = -1;
             }
@@ -159,25 +171,89 @@ void dmrAesRxPI(const uint8_t *pi, int len)
  * (A..F); each burst carries 3 AMBE frames, 6 bursts = one 18-frame superframe. */
 void dmrAesRxBurst(int seq)
 {
-    if (!s_rxActive) { s_rxBurstEnc = 0; return; }
-    s_rxBurstEnc = 1;
-    if (!s_rxIvReady)
+    int wrapped = (s_rxLastSeq >= 0 && seq < s_rxLastSeq);
+
+    if (s_rxActive && !s_rxIvReady)
     {
-        /* First burst after a (re)seed: generate the IV for the CURRENT superframe from
+        /* First burst after a PI (re)seed: generate the IV for the CURRENT superframe from
          * s_rx.mi. Works whether we joined at burst A or mid-superframe (the absolute
          * seq-based offset below covers the partial superframe). */
         dmr_lfsr128d(s_rx.mi, s_rx.iv, &s_rxNextMi);
         s_rxIvReady = 1;
     }
-    else if (s_rxLastSeq >= 0 && seq < s_rxLastSeq)
+    else if (wrapped)
     {
-        /* seq wrapped (e.g. 6->1) = crossed into a new superframe: advance the MI via the
-         * LFSR. Using seq<lastSeq (not seq==1) stays correct even if burst A is dropped. */
-        s_rx.mi = s_rxNextMi;
-        dmr_lfsr128d(s_rx.mi, s_rx.iv, &s_rxNextMi);
+        /* Superframe boundary. Decode the Late-Entry MI assembled from the AMBE bits of the
+         * just-completed superframe (Golay(24,12)+CRC4 over ambe_fr[3][0..3], like dsd-fme).
+         * It conveys the NEXT superframe's MI (look-ahead) == the MI we are entering now, and
+         * == the LFSR self-advance prediction (s_rxNextMi) on a continuing call. ADOPT a
+         * crc-valid late entry that DIVERGES from the prediction IMMEDIATELY (single-trust,
+         * like dsd-fme / a stock TYT): that is a genuinely new MI stream — a rapid re-PTT call
+         * the chip never surfaced a PI-LC for, or a mid-call resync. A wrong adopt (rare crc4
+         * fluke) self-corrects on the very next crc-valid late entry, so there is NO multi-
+         * superframe "confirm" wait (the previous design's wait is what stalled rapid calls,
+         * and it chained the OLD call's stale late entry into a wrong bootstrap). When the late
+         * entry agrees with the prediction or fails to decode, keep the proven self-advance —
+         * so PI-seeded normal calls are unaffected. The prediction advances every superframe
+         * even while idle, so a new call's MI stands out the instant its late entry decodes. */
+        uint32_t leMi;
+        int leok = dmr_le_mi_decode(s_rxFrag, &leMi);
+        int diverge = (leok && (leMi != s_rxNextMi));
+        uint32_t mi = diverge ? leMi : s_rxNextMi;
+        if (!s_rxActive)
+        {
+            /* BOOTSTRAP a rapid call: only a DIVERGING late entry marks a genuinely new call,
+             * not the previous call's residual stream the chip may still be feeding. Reuse the
+             * last call's keyId (rapid calls share the channel/key); fall back to any loaded key. */
+            int act = 0;
+            if (diverge)
+            {
+                dmr_pi_t p;
+                p.alg_id = DMR_ALG_AES256; p.mfid = DMR_MFID_DMRA;
+                p.key_id = s_rxKeyId; p.mi = leMi; p.valid = 1;
+                act = (dmr_aes_rx_init(&s_rx, &p) == 0);   /* sets s_rx.mi = leMi + loads key */
+                if (!act) { int fk = dmr_aes_first_keyid(); if (fk >= 0) { p.key_id = (uint8_t)fk; act = (dmr_aes_rx_init(&s_rx, &p) == 0); } }
+                if (act) { s_rxActive = 1; s_rxInitMi = leMi; s_rxKeyId = s_rx.key_id; s_rxPiSeeded = 0; }
+            }
+            if (!act) { s_rx.mi = mi; }   /* rx_init already set s_rx.mi = leMi when act; else keep predicting */
+            dmr_lfsr128d(s_rx.mi, s_rx.iv, &s_rxNextMi);  /* IV for the entering superframe (used once active) */
+            s_rxIvReady = 1;
+        }
+        else
+        {
+            /* PI-seeded normal calls use the PROVEN, RF-independent self-advance and IGNORE the
+             * late entry entirely (its FEC-unprotected bits are noisy; a rare crc4 false-accept
+             * must never corrupt a clean call). Only a late-entry-BOOTSTRAPPED rapid call adopts a
+             * diverging late entry, so a wrong bootstrap self-corrects on the next valid one. */
+            int adopt = (diverge && !s_rxPiSeeded);
+            if (adopt) { s_rxInitMi = leMi; }
+            s_rx.mi = adopt ? leMi : s_rxNextMi;
+            dmr_lfsr128d(s_rx.mi, s_rx.iv, &s_rxNextMi);
+        }
     }
+
+    if (wrapped || s_rxLastSeq < 0) { memset(s_rxFrag, 0, sizeof s_rxFrag); } /* new superframe */
     s_rxLastSeq = seq;
+    s_rxBurstEnc = s_rxActive ? 1 : 0;
     s_rxBurstBase = (size_t)((seq >= 1 ? seq - 1 : 0)) * (3 * 56);  /* frame 0 of this burst */
+}
+/* Read the Late-Entry MI nibbles from one received voice burst's 3 AMBE codewords and
+ * store them for the superframe MI decode. Called per burst (seq 1..6) from the ISR with
+ * the 27-byte AMBE (3 x 9-byte OTA codewords). The 4 MI bits are OTA bits 71/67/63/59 of
+ * each codeword (= ambe_fr[3][0..3]) — the same bits dmrAesTxStuffMI writes on TX. Collected
+ * for EVERY burst (not gated on an active decrypt) so a rapid new call can be bootstrapped. */
+void dmrAesRxLateEntry(int seq, const uint8_t *ambe27)
+{
+    if (seq < 1 || seq > 6) { return; }
+    for (int cw = 0; cw < 3; cw++)
+    {
+        const uint8_t *c = ambe27 + cw * 9;        /* one 9-byte (72-bit) codeword */
+        uint8_t nib = (uint8_t)(((c[8] & 0x01) << 3) |   /* OTA bit 71 */
+                                ((c[8] & 0x10) ? 0x04 : 0) |  /* OTA bit 67 */
+                                ((c[7] & 0x01) << 1) |        /* OTA bit 63 */
+                                ((c[7] & 0x10) ? 0x01 : 0));  /* OTA bit 59 */
+        s_rxFrag[seq][cw] = nib;
+    }
 }
 /* Called per decoded AMBE frame from codecDecode (idxInBurst 0..2). Applies the
  * OFB keystream to the 49-bit decoded voice vector in place. */
