@@ -1036,6 +1036,9 @@ static inline void hrc6000SysReceivedDataInt(void)
 	// call's PI header reseed the MI cleanly.
 	if (hrc6000CrcIsValid() && (rxSyncClass == SYNC_CLASS_DATA) && (rxDataType == 1))        // Voice LC Header
 	{
+#ifdef DMR_AES_DIAG_RX
+		dmrAesDiagRxMark(3); // LCRESET: Voice LC Header new-call reset
+#endif
 		dmrAesRxEnd();
 	}
 #endif
@@ -1047,6 +1050,9 @@ static inline void hrc6000SysReceivedDataInt(void)
 		if ((currentRadioDevice->trxDMRModeRx == DMR_MODE_DMO) && hrc6000CallAcceptFilter())
 		{
 			slotState = DMR_STATE_RX_END;
+#ifdef DMR_AES_DIAG_RX
+			dmrAesDiagRxMark(4); // RXEND: CRC-valid Terminator
+#endif
 			dmrAesRxEnd(); // AES: call ended (no-op unless ENABLE_AES)
 			trxIsTransmitting = false;
 

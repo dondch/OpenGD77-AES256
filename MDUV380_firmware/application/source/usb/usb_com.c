@@ -671,6 +671,40 @@ static void cpsHandleCommand(void)
 			hasToReply = true;
 			replyLength = 1;
 			break;
+#ifdef DMR_AES_DIAG_RX
+		case 0x84: // DIAGNOSTIC: dump the AES-RX event ring -> [cmd, len_hi, len_lo, data...]
+			{
+				int n = dmrAesGetRxDiag((uint8_t *)&usbComSendBuf[3], COM_BUFFER_SIZE - 3);
+				usbComSendBuf[0] = com_requestbuffer[0];
+				usbComSendBuf[1] = (n >> 8) & 0xFF;
+				usbComSendBuf[2] = n & 0xFF;
+				hasToReply = true;
+				replyLength = n + 3;
+				return; // bypass the trailing generic '-' reply (it overwrites usbComSendBuf)
+			}
+		case 0x85: // DIAGNOSTIC: clear/arm the AES-RX event ring
+			dmrAesResetRxDiag();
+			usbComSendBuf[0] = com_requestbuffer[0];
+			hasToReply = true;
+			replyLength = 1;
+			return;
+		case 0x88: // DIAGNOSTIC: arm a one-superframe raw-burst capture
+			dmrAesDiagCapArm();
+			usbComSendBuf[0] = com_requestbuffer[0];
+			hasToReply = true;
+			replyLength = 1;
+			return;
+		case 0x89: // DIAGNOSTIC: dump the captured raw bursts -> [cmd, len_hi, len_lo, data...]
+			{
+				int n = dmrAesGetCapData((uint8_t *)&usbComSendBuf[3], COM_BUFFER_SIZE - 3);
+				usbComSendBuf[0] = com_requestbuffer[0];
+				usbComSendBuf[1] = (n >> 8) & 0xFF;
+				usbComSendBuf[2] = n & 0xFF;
+				hasToReply = true;
+				replyLength = n + 3;
+				return;
+			}
+#endif
 #endif
 		case 0:
 #if defined(HAS_GPS)
