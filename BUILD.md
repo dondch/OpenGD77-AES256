@@ -54,11 +54,15 @@ It prints **"Patching for DMR"** on success (vs **"Flashing FM Only firmware"** 
 ```
 CI (`.github/workflows/build.yml`) runs the same for `ENABLE_AES` 0 and 1 and asserts the merge-capable size.
 
-## AES build (experimental, RX)
-`ENABLE_AES=1` compiles in DMRA (Motorola/Hytera-compatible) AES-256 voice **decryption**. The default build is
-unchanged. Crypto lives in `application/source/crypto/` (host-unit-tested); RX hooks are in `HR-C6000.c`. The PI
-trigger and DMR voice octet mapping are marked TODO pending an over-the-air capture. Encrypted voice is for
-licensed commercial/PMR use only; not legal on amateur bands in most countries.
+## AES build
+`ENABLE_AES=1` compiles in DMRA (Motorola/Hytera-compatible) AES-256 encrypted voice — both **transmit and
+receive**, interoperable with a stock TYT MD-UV390 ("Universal" AES256). The default build is byte-for-byte
+stock OpenGD77 (no AES symbols). Crypto lives in `application/source/crypto/` (host-unit-tested: FIPS-197 AES,
+LFSR128d, OFB keystream, Golay(24,12) late-entry MI, EMB BPTC single block); the HR-C6000 and codec hooks are
+in `HR-C6000.c` and `dmr_codec/codec_interface.c`. Optional, off-by-default diagnostics are gated behind
+`DMR_AES_DIAG_RX` / `DMR_AES_DIAG_PATTERN` / `DMR_AES_DIAG_ENCPAT` (e.g. `make ENABLE_AES=1 DMR_AES_DIAG_RX=1`,
+read with `tools/rxdiag.py` / `tools/fragcap.py`). Encrypted voice is for licensed commercial/PMR use only; it
+is not legal on amateur bands in most countries.
 
 ## Upstream / licence
 OpenGD77 by Roger Clark VK3KYY and contributors - see `MDUV380_firmware/tools/license.txt` and upstream headers
@@ -81,31 +85,29 @@ The radio is flashed over USB DFU (STM32 bootloader, VID:PID `1fc9:0094`). USB a
 Put the radio in DFU/bootloader mode (power on with the side buttons held - see the OpenGD77 install guide)
 before running `flash.sh` / the loader.
 
-## Status: verified vs open
+## Status
 
-**Verified (this fork):**
+**Verified on hardware (MD-UV390 10W Plus):**
 - Builds the official R20260131 source for the 10W target; output is structurally identical to the official
   release `OpenMDUV380_10W_PLUS.bin` (codec slot, `.data`/`.ccmram` layout, language tables, size) - the only
-  byte differences are toolchain/optimization (code) and an 8-byte zero pad.
+  byte differences are toolchain/optimization and an embedded firmware build-date string.
 - Codec-merge-capable (806 KB); the AMBE codec from the **MD-9600 V5 donor** merges into the reserved 0xFF slot
-  at `0x0807537C` without touching `.data`/`.ccmram` (validated offline).
-- AES-256 module host-unit-tested (FIPS-197 + LFSR128d + OFB); compiles into the firmware behind `ENABLE_AES`.
-
-**Open items (need work or hardware):**
-- **AES key loading.** The OpenGD77 codeplug has a per-channel `encrypt` byte but no AES key-value storage, and
-  the OpenGD77 CPS has no AES key entry (stock OpenGD77 has no encryption). Loading the 32-byte key into
-  `dmr_aes_set_key()` still needs an on-radio menu, a codeplug region, or a hardcoded test key.
-- **PI-header trigger + DMR voice octet mapping** for AES RX - confirm against an over-the-air capture (TODO).
-- **TX encryption** not yet wired (RX decrypt only).
-- **Physical flash** untested here (needs the radio + a valid donor).
+  at `0x0807537C` without touching `.data`/`.ccmram`.
+- **AES-256 TX and RX interoperate with a stock TYT MD-UV390** ("Universal" AES256): a stock radio decodes this
+  firmware's encrypted transmissions to clear voice, and this firmware decrypts a stock radio's encrypted voice
+  - including rapid back-to-back calls (the receiver locks the new call's MI from the in-band Late-Entry).
+  Cross-checked with HackRF captures + DSD-FME.
+- AES key/value storage persists in the SPI-flash custom-data region (survives reboot and firmware flash);
+  loaded via the host tool below.
 
 ## Loading an AES key (host tool)
-AES builds add a CPS subcommand to store keys. With the radio connected over USB:
+With the radio connected over USB (it enumerates as an OpenGD77 CPS serial port, VID:PID `1fc9:0094`):
 ```sh
 pip install -r MDUV380_firmware/tools/requirements.txt
-python3 MDUV380_firmware/tools/aes_key_tool.py --key <64-hex-chars> [--keyid 1]
+python3 MDUV380_firmware/tools/aes_key_store.py --key <64-hex-chars> --keyid 1 [--tx-key 1] [--port COM4]
 ```
-The tool sends the key over the OpenGD77 CPS serial protocol; the firmware stores it safely in the
-codeplug custom-data region (CODEPLUG_CUSTOM_DATA_TYPE_AES_KEYS) via codeplugSetOpenGD77CustomData() and
-reloads it. Keys are read on first use during RX. (The exact CPS serial framing is taken from the firmware
-source - validate against a real radio. The on-radio key-entry menu is a planned alternative.)
+`aes_key_store.py` writes the key into the OpenGD77 custom-data region (`CODEPLUG_CUSTOM_DATA_TYPE_AES_KEYS`)
+using the same CPS flash protocol the CPS uses, so it persists across reboots and firmware flashes. The
+firmware reads it lazily on the first encrypted call. `--tx-key N` selects which key id to transmit with
+(`0` = encrypted TX off); `--show` dumps the stored block. The on-radio key-entry menu is a planned
+alternative.

@@ -1,100 +1,80 @@
-# OpenGD77
-Firmware for DMR transceivers using the STM32F405VGT MCU, AT1846S RF chip and HR-C6000 DMR chipset.  
-Including the Radioddiy TYT MD-380UV / Retevis RT-3S and Baofeng DM-1701 / Retevis RT-84
+# OpenGD77-AES256 (TYT MD-UV390 Plus, 10W)
 
-# Project status
+An experimental fork of [OpenGD77](https://opengd77.com) for the **TYT MD-UV390 Plus (10W)** that adds
+**TYT-compatible DMRA AES-256 encrypted voice** — interoperable with the stock TYT "Universal" AES256
+firmware. Stock OpenGD77 has no encryption; this is a reverse-engineering / interop project, not an
+upstream feature.
 
-The firmware is relatively stable and provides DMR and FM audio transmission and reception, as well as a DMR hotspot mode.  
-However it does not support some core functionality that the official firmware supports, including sending and receiving of text / SMS messages
+It is built on the official OpenGD77 source release **R20260131**, target `MDUV380_10W_PLUS_FW`
+(`PLATFORM_MDUV380` + `PLATFORM_VARIANT_UV380_PLUS_10W`). All the normal OpenGD77 functionality
+(DMR/FM transmit + receive, hotspot, etc.) is unchanged — the AES code is compiled in behind
+`ENABLE_AES`, and the default `make` build is byte-for-byte stock OpenGD77.
 
-The firmware source code does not contain a AMBE codec required for DMR operation.  
-This functionality is provided by the official firmware which is merged with the OpenGD77 by the OpenGD77CPS or firmware loader
+## ⚠️ Legal
 
+AES-256 encrypted voice is **illegal on amateur radio bands in most countries**; it is only valid on
+licensed commercial / PMR allocations. Use this only where you are licensed to transmit encrypted
+voice. The source and binaries are also **non-commercial use only** — see [`license.txt`](license.txt).
 
-# User guide
+## What it adds
 
-See https://github.com/LibreDMR/OpenGD77_UserGuide
+Implements the standardized **DMR Association AES-256** scheme (Motorola/Hytera-compatible, ETSI TS
+102 361) that the MD-UV390 Plus "Universal" mode uses, so this firmware and a stock TYT radio can
+encrypt/decrypt each other:
 
+- **AES-256 in OFB mode**, the keystream XORed onto the decoded 49-bit AMBE voice parameters.
+- A 32-bit **Message Indicator (MI)** carried in the PI header, expanded to a 128-bit IV by an LFSR
+  (`dmr_lfsr128d`) and advanced one step per superframe.
+- The MI also conveyed **in-band in the AMBE codeword bits** (Late-Entry MI, Golay(24,12)+CRC4), with
+  the call announced over the air via the encrypted-call LC (FID `0x10` / SO `0x40`) and the burst-F
+  EMB **Late-Entry Single Block** (alg/key).
 
-# Credits
-Originally conceived by Kai DG4KLU.  
-Further development by Roger VK3KYY, latterly assisted by Daniel F1RMB, Alex DL4LEX, Colin G4EML and others.
+### Status — working on hardware
 
-Current lead developer and source code gatekeeper is Roger VK3KYY
+Validated on real MD-UV390 10W Plus radios, cross-checked with HackRF captures + DSD-FME.
 
+- **TX:** a bone-stock TYT MD-UV390 decodes this firmware's encrypted transmissions to clear voice —
+  full interoperable signalling (keystream + Late-Entry MI + encrypted-call LC + EMB Single Block +
+  PI-Header preamble).
+- **RX:** decrypts a stock TYT's AES-256 voice to clear audio, including **rapid back-to-back calls**
+  (the receiver locks the new call's MI directly from the in-band Late-Entry, like a stock receiver).
+- **Keys:** stored persistently in the SPI-flash custom-data region (survive reboots and firmware
+  flashes), loaded via a host tool over the OpenGD77 CPS USB protocol.
 
-# Copyright
+## Build & flash
 
- The firmware is copyright of the OpenGD77 developers. See individual source files for copyright information.
+See **[BUILD.md](BUILD.md)** for the full toolchain, the required AMBE codec donor (MD-9600 V5), and
+DFU flashing. In short:
 
-## MCU SDK and API code:   
-   See license files in sub-folders
-	
-## FreeRTOS
-   Copyright (C) 2020 Amazon.com, Inc. or its affiliates.  
-   All Rights Reserved.
+```sh
+cd MDUV380_firmware
+make ENABLE_AES=1 -j$(nproc)        # or plain `make` for a stock (no-AES) build
+python3 tools/opengd77_stm32_firmware_loader.py -s <MD9600-V5-donor.bin> \
+        -f build/openuv380-10w.bin -m MD-UV380
+```
 
+DMR needs the proprietary AMBE+2 vocoder, which is **not** present in this (or any OpenGD77)
+source/binary; the loader merges it from an **MD-9600 V5** donor at flash time (see BUILD.md).
+**Do not flash a 5W build to a 10W radio.**
 
-# License
+### Optional diagnostics
 
-Redistribution and use in source and binary forms, with or without modification, are permitted provided that the following conditions
-are met:
+AES decrypt/keystream diagnostics are compiled in behind off-by-default flags (`DMR_AES_DIAG_RX` /
+`DMR_AES_DIAG_PATTERN` / `DMR_AES_DIAG_ENCPAT`) — they add nothing to the default build. Build e.g.
+`make ENABLE_AES=1 DMR_AES_DIAG_RX=1` and read over USB with `tools/rxdiag.py` / `tools/fragcap.py`.
 
-1. Redistributions of source code must retain the above copyright notice, this list of conditions and the following disclaimer.
+## License
 
-2. Redistributions in binary form must reproduce the above copyright notice, this list of conditions and the following disclaimer
-   in the documentation and/or other materials provided with the distribution.
+This fork inherits the OpenGD77 license — **BSD-3-clause style with a non-commercial clause**. The full
+text is in [`license.txt`](license.txt); commercial use of the source or binaries is forbidden. All
+upstream source files and copyright headers are preserved.
 
-3. Neither the name of the copyright holder nor the names of its contributors may be used to endorse or promote products derived
-   from this software without specific prior written permission.
+## Credits
 
-4. Use of this source code or binary releases for commercial purposes is strictly forbidden. This includes, without limitation,
-   incorporation in a commercial product or incorporation into a product or project which allows commercial use.
+OpenGD77 was conceived by Kai DG4KLU and developed by Roger Clark VK3KYY, latterly assisted by Daniel
+F1RMB, Alex DL4LEX, Colin G4EML and many others (lead developer / source gatekeeper: Roger VK3KYY) —
+see the upstream project for the full contributor list. This fork only adds the DMRA AES-256 layer on
+top of their work. The DMRA AES scheme reference implementation is
+[DSD-FME](https://github.com/lwvmobile/dsd-fme) by lwvmobile.
 
-THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
-LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
-HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
-LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
-ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
-USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-
-
-# Special thanks
-
-Thanks to those who have assisted the project including :
-
-BD4VOW
-CT1HSN
-CT4TX 
-DG3GSP
-DG4KLU
-DJ0HF
-DL4LEX
-EA3BIL
-EA3IGM
-EA5SW
-EB3AM
-EW1ADG
-F1CXG
-F1RMB
-G4ELM
-IK0NWG
-IU4LEG
-IZ2EIB
-JE4SMQ
-JG1UAA
-OH1E
-OK2HAD
-ON1HK
-ON7LDS
-OZ1MAX
-PU4RON
-SQ6SFO
-SQ7PTE
-TA5AYX
-VK3KYY
-VK4JWT
-VK7JS
-VK7ZCR
-VK7ZJA
-ZL1XE
+User guide (general OpenGD77 operation): https://github.com/LibreDMR/OpenGD77_UserGuide
