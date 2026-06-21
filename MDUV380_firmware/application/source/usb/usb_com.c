@@ -677,9 +677,16 @@ static void cpsHandleCommand(void)
 				if ((chIdx >= 1) && (chIdx <= CODEPLUG_CHANNELS_MAX))
 				{
 					CodeplugChannel_t ch;
+					// handleCPSRequest() runs inside TASK_LOCK_WRITE() (taskENTER_CRITICAL,
+					// interrupts off); the codeplug EEPROM/flash access needs interrupts ON
+					// (I2C/SPI timing), so bracket it like every other write in this file.
+					// Omitting this corrupts the EEPROM page (a single channel write took out
+					// channels 1..8 because EEPROM_Write ran with interrupts disabled).
+					TASK_UNLOCK_WRITE();
 					codeplugChannelGetDataForIndex(chIdx, &ch);
 					ch.encrypt = com_requestbuffer[4];
 					codeplugChannelSaveDataForIndex(chIdx, &ch);
+					TASK_LOCK_WRITE();
 				}
 				usbComSendBuf[0] = com_requestbuffer[0];
 				hasToReply = true;
@@ -693,7 +700,9 @@ static void cpsHandleCommand(void)
 				if ((chIdx >= 1) && (chIdx <= CODEPLUG_CHANNELS_MAX))
 				{
 					CodeplugChannel_t ch;
+					TASK_UNLOCK_WRITE();   // codeplug read needs interrupts ON (see 0x82)
 					codeplugChannelGetDataForIndex(chIdx, &ch);
+					TASK_LOCK_WRITE();
 					enc = ch.encrypt;
 					fl = (codeplugChannelGetFlag(&ch, CHANNEL_FLAG_OPTIONAL_DMRID) != 0) ? 0x01 : 0x00;
 				}
