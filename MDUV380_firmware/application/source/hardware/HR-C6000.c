@@ -29,6 +29,7 @@
 
 #include "hardware/HR-C6000.h"
 #include "crypto/dmr_aes_hook.h"
+#include "crypto/dmr_aes.h"   // DMR_AES_MAX_KEYS (per-channel key-slot range check)
 #include "functions/settings.h"
 #if defined(USING_EXTERNAL_DEBUGGER)
 #include "SeggerRTT/RTT/SEGGER_RTT.h"
@@ -314,6 +315,7 @@ static void hrc6000SendPcOrTgLCHeader(void);
 #ifdef ENABLE_AES
 static uint32_t hrc6000AesRngSeed(void);
 static bool hrc6000SendAesPIHeader(void);
+static uint8_t hrc6000ResolveAesTxKeyId(void);
 #endif
 #ifdef CPU_MK22FN512VLL12
 static inline void hrc6000SysInterruptHandler(void);
@@ -1760,7 +1762,7 @@ void hrc6000TimeslotInterruptHandler(void)
 			LedWrite(LED_RED, 1); // for repeater wakeup
 #ifdef ENABLE_AES
 			{
-				uint8_t aesTxKeyId = dmrAesTxKeyId();
+				uint8_t aesTxKeyId = hrc6000ResolveAesTxKeyId(); // per-channel key, falling back to the global selector
 				if (aesTxKeyId != 0)
 				{
 					dmrAesTxStart(aesTxKeyId, hrc6000AesRngSeed()); // begin encrypted call (fresh MI)
@@ -2283,6 +2285,38 @@ static void hrc6000SendPcOrTgLCHeader(void)
 }
 
 #ifdef ENABLE_AES
+// Resolve the AES TX key id for the channel being keyed up. The codeplug channel "encrypt"
+// byte (CodeplugChannel_t.encrypt) selects per-channel encryption:
+//   0      = inherit the global TX key selector (dmrAesTxKeyId(), the AESK block default)
+//   1..15  = encrypt TX on this channel with that AES key slot
+//   0xFF   = force CLEAR (unencrypted) TX on this channel, overriding the global selector
+// Honoured only when the channel is NOT using the optional-DMRID feature, which repurposes
+// the encrypt byte (+ rxSignaling/artsInterval) to hold the per-channel DMR ID. If the
+// selected key slot has no key loaded, dmrAesTxStart() falls back to clear TX (no garble).
+// Backward compatible: a channel with encrypt == 0 behaves exactly as the global selector.
+static uint8_t hrc6000ResolveAesTxKeyId(void)
+{
+	uint8_t keyId = dmrAesTxKeyId(); // global default
+
+	if ((currentChannelData != NULL) &&
+		(codeplugChannelGetFlag(currentChannelData, CHANNEL_FLAG_OPTIONAL_DMRID) == 0))
+	{
+		uint8_t chEnc = currentChannelData->encrypt;
+
+		if (chEnc == 0xFF)
+		{
+			keyId = 0;                 // per-channel: force clear
+		}
+		else if ((chEnc >= 1) && (chEnc < DMR_AES_MAX_KEYS))
+		{
+			keyId = chEnc;             // per-channel: use this key slot
+		}
+		// chEnc == 0 (or an out-of-range value): inherit the global selector
+	}
+
+	return keyId;
+}
+
 // Seed the per-call Message Indicator from the STM32 on-chip TRNG (RNG @ 0x50060800).
 // Falls back to the millisecond tick if the RNG never produces a word, so TX can't hang.
 static uint32_t hrc6000AesRngSeed(void)
