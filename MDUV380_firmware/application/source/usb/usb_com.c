@@ -671,6 +671,39 @@ static void cpsHandleCommand(void)
 			hasToReply = true;
 			replyLength = 1;
 			break;
+		case 0x82: // SUB set per-channel AES key: [2..3]=channel index (LE, 1-based), [4]=encrypt
+			{          // encrypt: 0=inherit global TX key, 1..15=AES key slot, 0xFF=force clear
+				int chIdx = com_requestbuffer[2] | (com_requestbuffer[3] << 8);
+				if ((chIdx >= 1) && (chIdx <= CODEPLUG_CHANNELS_MAX))
+				{
+					CodeplugChannel_t ch;
+					codeplugChannelGetDataForIndex(chIdx, &ch);
+					ch.encrypt = com_requestbuffer[4];
+					codeplugChannelSaveDataForIndex(chIdx, &ch);
+				}
+				usbComSendBuf[0] = com_requestbuffer[0];
+				hasToReply = true;
+				replyLength = 1;
+			}
+			break;
+		case 0x83: // SUB get per-channel AES key: [2..3]=channel index (LE) -> [cmd, encrypt, flags]
+			{          // flags bit0 = optional-DMRID flag set (encrypt byte holds the DMR ID, not a key)
+				int chIdx = com_requestbuffer[2] | (com_requestbuffer[3] << 8);
+				uint8_t enc = 0, fl = 0;
+				if ((chIdx >= 1) && (chIdx <= CODEPLUG_CHANNELS_MAX))
+				{
+					CodeplugChannel_t ch;
+					codeplugChannelGetDataForIndex(chIdx, &ch);
+					enc = ch.encrypt;
+					fl = (codeplugChannelGetFlag(&ch, CHANNEL_FLAG_OPTIONAL_DMRID) != 0) ? 0x01 : 0x00;
+				}
+				usbComSendBuf[0] = com_requestbuffer[0];
+				usbComSendBuf[1] = enc;
+				usbComSendBuf[2] = fl;
+				hasToReply = true;
+				replyLength = 3;
+				return; // bypass the trailing generic '-' reply (it overwrites usbComSendBuf)
+			}
 #ifdef DMR_AES_DIAG_RX
 		case 0x84: // DIAGNOSTIC: dump the AES-RX event ring -> [cmd, len_hi, len_lo, data...]
 			{
