@@ -148,6 +148,9 @@ static menuFunctionData_t menuFunctions[] =
 #if !defined(PLATFORM_GD77S)
 		{ menuAPRSOptions,          NULL, NULL, 0 },
 #endif
+#if defined(ENABLE_AES)
+		{ menuAESKeys,              NULL, NULL, 0 },
+#endif
 		// *** Add new menus to be accessed using quickkey (ID: 0..31) above this line ***
 		{ uiMessageBox,             NULL, NULL, 0 },
 		{ menuHotspotMode,          NULL, NULL, 0 },
@@ -693,6 +696,10 @@ static const menuItemNewData_t optionsMenuItems[] =
 #endif
 #if !defined(PLATFORM_GD77S)
 	{ 257, MENU_APRS            },
+#endif
+#if defined(ENABLE_AES)
+	// stringOffset = the ordinal of stringsTable_t.aes_keys (computed, so it can't drift)
+	{ (int)(offsetof(stringsTable_t, aes_keys) / LANGUAGE_TEXTS_LENGTH), MENU_AES_KEYS },
 #endif
 };
 

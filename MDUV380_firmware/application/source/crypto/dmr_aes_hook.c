@@ -2,6 +2,7 @@
 #ifdef ENABLE_AES
 #include "crypto/dmr_aes.h"
 #include "functions/codeplug.h"
+#include "hardware/SPI_Flash.h"
 #include <stddef.h>
 #include <string.h>
 
@@ -285,6 +286,63 @@ int dmrAesStoreKey(uint8_t keyId, const uint8_t *key32)
     int ok = codeplugSetOpenGD77CustomData(CODEPLUG_CUSTOM_DATA_TYPE_AES_KEYS, blk, AESK_BLOCK_LEN) ? 1 : 0;
     dmrAesLoadKeys();
     return ok;
+}
+
+/* Ensure the OpenGD77 custom-data region carries its "OpenGD77" magic, so the
+ * codeplugSet/GetOpenGD77CustomData block chain works. On a radio whose region
+ * was never initialized it reads all-0xFF (no magic) and dmrAesStoreKey/SetTxKeyId
+ * silently fail (the host aes_key_store.py creates the magic; the on-radio menu
+ * must be able to do it too). Writing the 12-byte magic leaves offset 12 onward
+ * as a CODEPLUG_CUSTOM_DATA_TYPE_EMPTY (0xFFFFFFFF) block, which the append path
+ * then fills. SPI_Flash_write does a read-modify-write of the whole 4 KB sector,
+ * so the rest of the region is preserved. MUST run in the UI/main-loop task
+ * (SPI_Flash_write uses osDelay) — never from the CPS critical section. */
+int dmrAesEnsureCustomDataRegion(void)
+{
+    uint8_t hdr[12];
+    SPI_Flash_read(FLASH_ADDRESS_OFFSET + 0, hdr, 12);
+    if (memcmp(hdr, "OpenGD77", 8) == 0) { return 1; }   /* already initialized */
+    memcpy(hdr, "OpenGD77", 8);
+    hdr[8] = hdr[9] = hdr[10] = hdr[11] = 0xFF;
+    return SPI_Flash_write(FLASH_ADDRESS_OFFSET + 0, hdr, 12) ? 1 : 0;
+}
+
+/* Clear the stored key(s) for keyId. Returns 1 on success (incl. nothing to do). */
+int dmrAesClearKey(uint8_t keyId)
+{
+    uint8_t *blk = s_aesBlk;
+    int changed = 0;
+    if (!codeplugGetOpenGD77CustomData(CODEPLUG_CUSTOM_DATA_TYPE_AES_KEYS, blk) || memcmp(blk, "AESK", 4) != 0)
+    {
+        return 1;   /* no block -> nothing stored for any keyId */
+    }
+    for (int i = 0; i < AESK_SLOTS; i++)
+    {
+        uint8_t *e = blk + AESK_HDR_LEN + i * AESK_ENTRY_LEN;
+        if ((e[0] == 1) && (e[1] == keyId)) { memset(e, 0, AESK_ENTRY_LEN); changed = 1; }
+    }
+    if (!changed) { return 1; }
+    int ok = codeplugSetOpenGD77CustomData(CODEPLUG_CUSTOM_DATA_TYPE_AES_KEYS, blk, AESK_BLOCK_LEN) ? 1 : 0;
+    dmrAesLoadKeys();
+    return ok;
+}
+
+/* Bitmask of stored key ids (bit k set => keyId k has a key), for the menu's
+ * set/empty display. Never returns key material. keyId 0 is the "off" sentinel. */
+uint16_t dmrAesGetKeyMask(void)
+{
+    uint8_t *blk = s_aesBlk;
+    uint16_t mask = 0;
+    if (!codeplugGetOpenGD77CustomData(CODEPLUG_CUSTOM_DATA_TYPE_AES_KEYS, blk) || memcmp(blk, "AESK", 4) != 0)
+    {
+        return 0;
+    }
+    for (int i = 0; i < AESK_SLOTS; i++)
+    {
+        uint8_t *e = blk + AESK_HDR_LEN + i * AESK_ENTRY_LEN;
+        if ((e[0] == 1) && (e[1] < 16)) { mask |= (uint16_t)(1u << e[1]); }
+    }
+    return mask;
 }
 
 /* ---- RX --------------------------------------------------------------------

@@ -320,6 +320,9 @@ enum MENU_SCREENS
 #if !defined(PLATFORM_GD77S)
 	MENU_APRS,
 #endif
+#if defined(ENABLE_AES)
+	MENU_AES_KEYS,// index-matched to menuFunctions[] (standard menu wiring)
+#endif
 	// *** Add new menus to be accessed using quickkey (ID: 0..31) above this line ***
 	UI_MESSAGE_BOX,
 	UI_HOTSPOT_MODE,
@@ -474,6 +477,9 @@ menuStatus_t menuGPS(uiEvent_t *event, bool isFirstRun);
 menuStatus_t menuCalibration(uiEvent_t *ev, bool isFirstRun);
 #if !defined(PLATFORM_GD77S)
 menuStatus_t menuAPRSOptions(uiEvent_t *ev, bool isFirstRun);
+#endif
+#if defined(ENABLE_AES)
+menuStatus_t menuAESKeys(uiEvent_t *ev, bool isFirstRun);
 #endif
 #if defined(HAS_COLOURS)
 menuStatus_t menuThemeOptions(uiEvent_t *ev, bool isFirstRun);
