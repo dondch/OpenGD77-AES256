@@ -55,11 +55,36 @@ static uint8_t          s_bursts[DMR_DATA_MAX_BURSTS][1 + DMR_DATA_BURST_LEN];
 static uint8_t          s_burstCount;
 static uint8_t          s_burstIndex;
 static volatile uint8_t s_dataTxActive;
+static uint16_t         s_txFinishPolls;
+
+#define DMR_DATA_TX_FINISH_POLL_MS   25
+#define DMR_DATA_TX_FINISH_TIMEOUT   120  // * poll period -> ~3 s safety cap
+
+/*
+ * Un-key the data call cleanly, mirroring a PTT release. The command path keys via
+ * trxEnableTransmission() but, unlike the voice path, has no PTT-release handler to call
+ * trxDisableTransmission() -- so without this the PA is left keyed (red LED stuck on) and
+ * the half-keyed state hangs the radio after a few triggers. Runs in the main-loop timer
+ * context, re-arming itself until the queue has drained (s_dataTxActive) AND the HR-C6000
+ * TX-END sequence has returned to RX (trxIsTransmitting), bounded by a timeout so a TX that
+ * never started (slot stayed busy) still cleans up instead of latching s_dataTxActive.
+ */
+static void dmrDataTxFinishPoll(void)
+{
+	if ((s_dataTxActive || trxIsTransmitting) && (++s_txFinishPolls < DMR_DATA_TX_FINISH_TIMEOUT))
+	{
+		addTimerCallback(dmrDataTxFinishPoll, DMR_DATA_TX_FINISH_POLL_MS, MENU_ANY, false);
+		return;
+	}
+	dmrDataTxEnd();           // ensure the queue/flags are cleared (idempotent)
+	trxDisableTransmission(); // LED_RED off + trxActivateRx() -> back to RX, like PTT release
+}
 
 static void dmrDataKeyTx(void)
 {
 	s_burstIndex = 0;
 	s_dataTxActive = 1;
+	s_txFinishPolls = 0;
 	// hrc6000Tick() starts the DMR TX only when isWaking == NONE AND slotState == IDLE.
 	// Clearing isWaking alone isn't enough: on a channel with any stray/recent RX the
 	// timeslot ISR keeps slotState in an RX state until END_TICK_TIMEOUT of silence, so
@@ -68,10 +93,16 @@ static void dmrDataKeyTx(void)
 	// IDLE (also clears isWaking) so the next hrc6000Tick() keys deterministically.
 	HRC6000ForceDMRIdleForTx();
 	trxEnableTransmission(); // LEDs + trxSetTX() (sets trxTransmissionEnabled); state machine -> TX_2 sends our bursts
+	// Poll for completion and un-key (the data call has no PTT release to do it).
+	addTimerCallback(dmrDataTxFinishPoll, DMR_DATA_TX_FINISH_POLL_MS, MENU_ANY, false);
 }
 
 void dmrDataTxLoad(const uint8_t *bursts, uint8_t count)
 {
+	if (s_dataTxActive)
+	{
+		return; // a data call is already keyed; ignore overlapping triggers
+	}
 	if (count > DMR_DATA_MAX_BURSTS)
 	{
 		count = DMR_DATA_MAX_BURSTS;
