@@ -30,6 +30,7 @@
 #include "hardware/HR-C6000.h"
 #include "crypto/dmr_aes_hook.h"
 #include "crypto/dmr_aes.h"   // DMR_AES_MAX_KEYS (per-channel key-slot range check)
+#include "functions/dmr_data.h"   // DMR data-frame TX harness (ENABLE_DMR_DATA)
 #include "functions/settings.h"
 #if defined(USING_EXTERNAL_DEBUGGER)
 #include "SeggerRTT/RTT/SEGGER_RTT.h"
@@ -1836,6 +1837,34 @@ void hrc6000TimeslotInterruptHandler(void)
 			break;
 
 		case DMR_STATE_TX_2: // Ongoing TX (active timeslot)
+#if defined(ENABLE_DMR_DATA)
+			// DMR data call (SMS/GPS harness): on each active timeslot emit the next queued
+			// data burst instead of a voice frame. The chip BPTC/Trellis-encodes the 12-byte
+			// payload for the slot type written to reg 0x50 (e.g. 0x60 data header, 0x70
+			// rate-1/2 data), exactly like the proven PI-header path. When the queue drains,
+			// send a terminator and drop transmissionEnabled so the next TX_1 -> TX_END.
+			if (dmrDataTxActive())
+			{
+				uint8_t dtype;
+				uint8_t payload[LC_DATA_LENGTH] = { 0 };
+
+				if (dmrDataTxNextBurst(&dtype, payload))
+				{
+					SPI0WritePageRegByteArray(0x02, 0x00, payload, LC_DATA_LENGTH);
+					SPI0WritePageRegByte(0x04, 0x41, 0x80);   // transmit during next timeslot
+					SPI0WritePageRegByte(0x04, 0x50, dtype);  // slot type (data)
+				}
+				else
+				{
+					dmrDataTxEnd();                            // clears trxTransmissionEnabled
+					hrc.transmissionEnabled = false;          // -> next TX_1 exits to TX_END
+					SPI0WritePageRegByte(0x04, 0x41, 0x80);
+					SPI0WritePageRegByte(0x04, 0x50, 0x20);   // Terminator with LC, Data
+				}
+				slotState = DMR_STATE_TX_1;
+				break;
+			}
+#endif
 			if (hrc.transmissionEnabled)
 			{
 				if (settingsUsbMode == USB_MODE_HOTSPOT)
@@ -2842,6 +2871,31 @@ int HRC6000GetIsWakingState(void)
 {
 	return hrc.isWaking;
 }
+
+#if defined(ENABLE_DMR_DATA)
+// Force the DMR digital slot to IDLE so a host-queued data TX (functions/dmr_data.c)
+// keys deterministically, even when the slot is currently in an RX state from stray or
+// recent activity. hrc6000Tick() starts a DMR TX only from DMR_STATE_IDLE; the normal
+// PTT path doesn't force this either -- it relies on the channel being quiet long enough
+// for the timeslot ISR to settle the slot to IDLE (after END_TICK_TIMEOUT). This mirrors
+// that ISR RX-timeout reset (slotState -> IDLE), under the same interrupt guard the rest
+// of this file uses when mutating slotState. Intended for the controlled self-test path;
+// it will key over an active call (impolite), which is exactly what the harness wants.
+void HRC6000ForceDMRIdleForTx(void)
+{
+	interruptsDisableC6000Interrupts();
+
+	// Ensure the ISR has exited before we mutate the slot state it also writes.
+	while (hrc.inIRQHandler);
+
+	slotState = DMR_STATE_IDLE;
+	trxIsTransmitting = false;
+	hrc.isWaking = WAKING_MODE_NONE;
+	hrc.tickCount = 0;
+
+	interruptsEnableC6000Interrupts();
+}
+#endif // ENABLE_DMR_DATA
 
 void HRC6000ClearActiveDMRID(void)
 {
