@@ -76,6 +76,7 @@ enum CPS_ACCESS_AREA
 
 
 #include "crypto/dmr_aes_hook.h"
+#include "functions/dmr_data.h"
 static void handleCPSRequest(void);
 
 volatile int com_request = 0;
@@ -747,6 +748,20 @@ static void cpsHandleCommand(void)
 				return;
 			}
 #endif
+#endif
+#if defined(ENABLE_DMR_DATA)
+		case 0x90: // SUB reboot into the STM32 ROM DFU bootloader (button-free USB flashing)
+			dmrDataTriggerReboot();   // deferred ~500 ms so this ACK is sent first
+			usbComSendBuf[0] = com_requestbuffer[0];
+			hasToReply = true;
+			replyLength = 1;
+			break;
+		case 0x91: // SUB queue + key a DMR data call: [2]=burst count, [3..]=count x (1 type byte + 12 payload)
+			dmrDataTxLoad((const uint8_t *)&com_requestbuffer[3], com_requestbuffer[2]);
+			usbComSendBuf[0] = com_requestbuffer[0];
+			hasToReply = true;
+			replyLength = 1;
+			break;
 #endif
 		case 0:
 #if defined(HAS_GPS)

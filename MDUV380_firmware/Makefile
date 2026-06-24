@@ -25,6 +25,10 @@ ifeq ($(ENABLE_AES),1)
 DEFS += -DENABLE_AES
 endif
 
+ifeq ($(ENABLE_DMR_DATA),1)
+DEFS += -DENABLE_DMR_DATA
+endif
+
 ifeq ($(DMR_AES_DIAG_PATTERN),1)
 DEFS += -DDMR_AES_DIAG_PATTERN
 endif
