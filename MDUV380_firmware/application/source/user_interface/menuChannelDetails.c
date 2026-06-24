@@ -113,6 +113,9 @@ enum
 	CH_DETAILS_TA_TX_TS2,
 	CH_DETAILS_APRS_CONFIG,
 	CH_DETAILS_DMR_FORCE_DMO,
+#if defined(ENABLE_AES)
+	CH_DETAILS_ENCRYPT,// per-channel AES TX key (codeplug encrypt byte); appended last so entryIds don't shift
+#endif
 	NUM_CH_DETAILS_ITEMS
 };// The last item in the list is used so that we automatically get a total number of items in the list
 
@@ -677,6 +680,27 @@ static void updateScreen(bool isFirstRun, bool allowedToSpeakUpdate)
 							rightSideConst = currentLanguage->none;
 						}
 						break;
+#if defined(ENABLE_AES)
+					case CH_DETAILS_ENCRYPT:
+						leftSide = currentLanguage->encrypt_tx;
+						if (rootMenuIsVFO || (tmpChannel.chMode == RADIO_MODE_ANALOG) || (codeplugChannelGetFlag(&tmpChannel, CHANNEL_FLAG_OPTIONAL_DMRID) != 0))
+						{
+							rightSideConst = currentLanguage->n_a;
+						}
+						else if (tmpChannel.encrypt == 0)
+						{
+							strcpy(rightSideVar, "Inherit");
+						}
+						else if (tmpChannel.encrypt == 0xFF)
+						{
+							strcpy(rightSideVar, "Off");
+						}
+						else
+						{
+							snprintf(rightSideVar, SCREEN_LINE_BUFFER_SIZE, "Key %u", tmpChannel.encrypt);
+						}
+						break;
+#endif
 					case CH_DETAILS_DMR_FORCE_DMO:
 						leftSide = currentLanguage->dmr_force_dmo;
 						if (tmpChannel.chMode == RADIO_MODE_ANALOG)
@@ -1358,6 +1382,16 @@ static void handleEvent(uiEvent_t *ev)
 						readAprsConfig();
 					}
 					break;
+#if defined(ENABLE_AES)
+				case CH_DETAILS_ENCRYPT:
+					if ((rootMenuIsVFO == false) && (tmpChannel.chMode == RADIO_MODE_DIGITAL) && (codeplugChannelGetFlag(&tmpChannel, CHANNEL_FLAG_OPTIONAL_DMRID) == 0))
+					{
+						int eidx = (tmpChannel.encrypt == 0) ? 0 : ((tmpChannel.encrypt == 0xFF) ? 16 : tmpChannel.encrypt);
+						if (eidx < 16) { eidx++; }
+						tmpChannel.encrypt = (eidx == 0) ? 0 : ((eidx == 16) ? 0xFF : (uint8_t)eidx);
+					}
+					break;
+#endif
 				case CH_DETAILS_DMR_FORCE_DMO:
 					if (tmpChannel.chMode == RADIO_MODE_DIGITAL)
 					{
@@ -1611,6 +1645,16 @@ static void handleEvent(uiEvent_t *ev)
 						readAprsConfig();
 					}
 					break;
+#if defined(ENABLE_AES)
+				case CH_DETAILS_ENCRYPT:
+					if ((rootMenuIsVFO == false) && (tmpChannel.chMode == RADIO_MODE_DIGITAL) && (codeplugChannelGetFlag(&tmpChannel, CHANNEL_FLAG_OPTIONAL_DMRID) == 0))
+					{
+						int eidx = (tmpChannel.encrypt == 0) ? 0 : ((tmpChannel.encrypt == 0xFF) ? 16 : tmpChannel.encrypt);
+						if (eidx > 0) { eidx--; }
+						tmpChannel.encrypt = (eidx == 0) ? 0 : ((eidx == 16) ? 0xFF : (uint8_t)eidx);
+					}
+					break;
+#endif
 				case CH_DETAILS_DMR_FORCE_DMO:
 					if (tmpChannel.chMode == RADIO_MODE_DIGITAL)
 					{

@@ -11,6 +11,11 @@ int  dmrAesStoreKey(uint8_t keyId, const uint8_t *key32);
 /* TX key selection: 0 = encrypted TX disabled, otherwise the keyId to transmit with. */
 uint8_t dmrAesTxKeyId(void);
 int     dmrAesSetTxKeyId(uint8_t keyId);
+/* On-radio key management (UI/main-loop context only — these do SPI-flash writes
+ * that use osDelay, so they must NOT run from the CPS critical section). */
+int      dmrAesEnsureCustomDataRegion(void); /* write the "OpenGD77" magic on a blank custom-data region */
+int      dmrAesClearKey(uint8_t keyId);      /* clear the stored key for keyId */
+uint16_t dmrAesGetKeyMask(void);             /* bit k set => keyId k (1..15) has a stored key */
 /* RX. Decryption is applied in the codec at the 49-bit decoded-AMBE layer
  * (dmrAesRxCodecFrame), NOT on the 27 raw FEC octets. The HR-C6000 ISR calls
  * dmrAesRxBurst(seq) per voice burst to advance the superframe/keystream offset;
@@ -50,6 +55,9 @@ static inline void dmrAesLoadKeys(void){ }
 static inline int  dmrAesStoreKey(uint8_t k, const uint8_t *p){ (void)k; (void)p; return 0; }
 static inline uint8_t dmrAesTxKeyId(void){ return 0; }
 static inline int  dmrAesSetTxKeyId(uint8_t k){ (void)k; return 0; }
+static inline int  dmrAesEnsureCustomDataRegion(void){ return 0; }
+static inline int  dmrAesClearKey(uint8_t k){ (void)k; return 0; }
+static inline uint16_t dmrAesGetKeyMask(void){ return 0; }
 static inline void dmrAesRxPI(const uint8_t *p, int n){ (void)p; (void)n; }
 static inline void dmrAesRxBurst(int s){ (void)s; }
 static inline void dmrAesRxLateEntry(int s, const uint8_t *a){ (void)s; (void)a; }

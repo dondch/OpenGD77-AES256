@@ -65,7 +65,7 @@ int main(void) {
              ? "PASS" : (fails++,"FAIL"), pi.alg_id, pi.key_id, pi.mi);
 
     /* 5) Bit-domain VOICE decrypt vs DSD-FME ground truth (real on-air capture,
-     *    reversed KEY1, IV 174E6042..., superframe frames vc=0,1,17). DSD-FME
+     *    KEY1 in radio/CPS order, IV 174E6042..., superframe frames vc=0,1,17). DSD-FME
      *    (which decodes this scheme correctly) produced these enc->dec pairs;
      *    dmr_aes_voice_frame must reproduce dec exactly. */
     {
