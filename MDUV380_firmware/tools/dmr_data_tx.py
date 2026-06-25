@@ -10,10 +10,17 @@ Each burst = 1 data-type byte (HR-C6000 reg 0x50: slot-type<<4 | data | hdr | LC
   0x60 = data header, 0x70 = rate-1/2 data, 0x20 = terminator
 followed by 12 payload bytes (the 96 info bits the chip FEC-encodes).
 
+  # WORKING text SMS: DMR UDT (Unified Data Transport) UTF-16, decodes in DSD-FME as
+  # "UDT UTF16 Text: <msg>". Validated on-air. Up to ~17 chars (see the 64-byte note).
+  python3 dmr_data_tx.py --udt "HELLO WORLD" --dst 9661 --src 12341 --group
   # raw bursts (the iteration vehicle) - TYPE:24-hex-payload, repeatable:
   python3 dmr_data_tx.py --burst 60:0123...  --burst 70:abcd...
-  # first-cut SMS builder (framing is the bring-up target - verify via DSD-FME):
-  python3 dmr_data_tx.py --sms "hello" --dst 9990 --src 12341 [--group]
+  # dev/exploration: --sms (Short-Data first cut), --crcsweep, --replay-real.
+
+Framing/CRCs are RE'd byte-exact from DSD-FME (see build_udt). NOTE the CPS command must
+stay <=64 bytes (one USB full-speed packet) or bytes past ~64 are truncated by the
+firmware; build_udt sizes the CSBK preamble to fit, which caps a single UDT SMS at ~17
+chars. This SMS is CLEARTEXT -- TYT's AES *data* encryption is a separate unsolved wall.
 """
 import argparse, sys, time
 try:
