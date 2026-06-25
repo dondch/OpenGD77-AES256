@@ -231,12 +231,10 @@ def build_udt(text, dst, src, group=True):
     bursts = [bytes([DT_DATA_HEADER]) + header_block]
     for i in range(0, len(appended), 12):
         bursts.append(bytes([DT_RATE12_DATA]) + bytes(appended[i:i + 12]))
-    # Keep the whole CPS command <= 64 bytes (one USB full-speed packet): commands that
-    # span two packets get the 2nd packet truncated (the cmd is dispatched on the 1st).
-    # 3 + N*13 <= 64  -> N <= 4 bursts. The firmware's own voice-LC/PI bursts already
-    # absorb the TX ramp-up, so pad with CSBK preambles only up to that 4-burst budget.
-    csbk_n = max(0, 4 - len(bursts))
-    return build_csbk_preamble(dst, src, group, csbk_n) + bursts
+    # 3 CSBK preamble bursts (like a real radio) absorb the TX ramp-up so the UDT header
+    # isn't the first burst. The firmware USB fix (CDC 'C'/0x91 length) lets the whole
+    # command span multiple USB packets, so a full UDT SMS (up to UAB=4 / 23 chars) works.
+    return build_csbk_preamble(dst, src, group, 3) + bursts
 
 def main():
     ap = argparse.ArgumentParser()

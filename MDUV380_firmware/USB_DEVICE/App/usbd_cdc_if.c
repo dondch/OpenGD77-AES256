@@ -405,6 +405,16 @@ static int8_t CDC_Receive_FS(uint8_t* Buf, uint32_t *Len)
 								case 'C':
 									// Clamp commands, it may not exceed 5 + 16
 									s_recvCount = recvSize;
+#if defined(ENABLE_DMR_DATA)
+									// CPS 0x91 (DMR data-TX) can exceed one 64-byte USB packet: its full
+									// length is 3 + burstCount*13. Set the real expected length so the
+									// receiver waits for the whole multi-packet transfer instead of
+									// dispatching after the first packet (which truncated the bursts).
+									if ((recvSize >= 3) && (Buf[1] == 0x91) && (Buf[2] <= 24))
+									{
+										s_recvCount = 3 + (Buf[2] * 13);
+									}
+#endif
 									break;
 
 								default:
