@@ -24,6 +24,10 @@ chars. This SMS is CLEARTEXT -- TYT's AES *data* encryption is a separate unsolv
 """
 import argparse, sys, time
 try:
+    from dmr_enc_sms import build_encrypted_sms
+except ImportError:
+    build_encrypted_sms=None
+try:
     import serial
     from serial.tools import list_ports
 except ImportError:
@@ -247,12 +251,23 @@ def main():
     ap.add_argument("--crcsweep", action="store_true", help="send one data header per CRC-16 variant to find the one DSD-FME accepts")
     ap.add_argument("--replay-real", action="store_true", help="replay the verbatim captured stock-TYT encrypted SMS (CSBKs+headers+blocks)")
     ap.add_argument("--udt", help="build+send a cleartext DMR UDT UTF-16 text SMS (DSD-FME decodable)")
+    ap.add_argument("--enc-sms", dest="enc_sms", help="build+send an AES-256-ECB ENCRYPTED DMR SMS (IP/UDP/TMS); needs --key")
+    ap.add_argument("--key", help="32-byte AES-256 key as 64 hex chars (KEY1 order, as in CPS)")
+    ap.add_argument("--mi", type=lambda x:int(x,16), default=0, help="32-bit MI for ENC header (hex; unused by ECB)")
+    ap.add_argument("--seq", type=int, default=0, help="TMS sequence byte")
+    ap.add_argument("--ipid", type=int, default=0, help="IP identification field")
     a = ap.parse_args()
 
     legend = None
     if a.udt is not None:
         bursts = build_udt(a.udt, a.dst, a.src, a.group)
         print("UDT SMS %r -> %d bursts (3 CSBK + UDT header + appended blocks)" % (a.udt, len(bursts)))
+    elif getattr(a, "enc_sms", None) is not None:
+        if build_encrypted_sms is None: sys.exit("dmr_enc_sms.py must be next to this tool")
+        if not a.key: sys.exit("--enc-sms needs --key (64 hex chars)")
+        key=bytes.fromhex(a.key.replace(" ",""))
+        bursts=build_encrypted_sms(a.enc_sms, a.dst, a.src, key, group=a.group, mi=a.mi, seq=a.seq, ipid=a.ipid)
+        print("ENCRYPTED SMS %r -> %d bursts (AES-256-ECB)" % (a.enc_sms, len(bursts)))
     elif getattr(a, "replay_real", False):
         bursts = [bytes([t]) + bytes.fromhex(h) for t, h in REPLAY_REAL]
         print("replaying %d verbatim stock-TYT SMS frames" % len(bursts))
