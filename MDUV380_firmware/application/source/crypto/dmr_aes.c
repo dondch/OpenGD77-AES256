@@ -421,3 +421,89 @@ int dmr_aes_first_keyid(void) {
     for (i = 0; i < DMR_AES_MAX_KEYS; i++) { if (s_have[i]) { return i; } }
     return -1;
 }
+
+/* ===== AES-256-ECB decrypt + DMR data/SMS RX (added 2026-06-27) =========
+ * Stock TYT DMR data/SMS payload = AES-256-ECB: each 16-byte block of the
+ * reassembled rate-1/2 payload is independently AES-decrypted with the key
+ * (no IV / no chaining; header MI unused). RE'd + bench-validated: 3 captures
+ * (2 radios, MI=0 and MI=AB5C8269) all decrypt to an IPv4/UDP/TMS "Hello".  */
+
+static uint8_t s_rsbox_ready = 0;
+static uint8_t rsbox[256];
+static void build_rsbox(void) {
+    int i; if (s_rsbox_ready) return;
+    for (i = 0; i < 256; ++i) rsbox[sbox[i]] = (uint8_t)i;
+    s_rsbox_ready = 1;
+}
+static uint8_t gmul(uint8_t a, uint8_t b) {       /* GF(2^8) multiply */
+    uint8_t p = 0; int i;
+    for (i = 0; i < 8; ++i) {
+        if (b & 1) p ^= a;
+        b >>= 1; { uint8_t hi = a & 0x80; a <<= 1; if (hi) a ^= 0x1b; }
+    }
+    return p;
+}
+static void inv_cipher(uint8_t *s, const uint8_t *rk) {
+    int r, c;
+    build_rsbox();
+    for (c = 0; c < 16; c++) s[c] ^= rk[Nr*16 + c];                 /* AddRoundKey Nr */
+    for (r = Nr - 1; r >= 0; r--) {
+        { uint8_t t;                                                /* InvShiftRows */
+          t=s[13]; s[13]=s[9]; s[9]=s[5]; s[5]=s[1]; s[1]=t;
+          t=s[2];  s[2]=s[10]; s[10]=t; t=s[6]; s[6]=s[14]; s[14]=t;
+          t=s[3];  s[3]=s[7];  s[7]=s[11];s[11]=s[15];s[15]=t; }
+        for (c = 0; c < 16; c++) s[c] = rsbox[s[c]];                /* InvSubBytes */
+        for (c = 0; c < 16; c++) s[c] ^= rk[r*16 + c];              /* AddRoundKey r */
+        if (r != 0) {                                              /* InvMixColumns */
+            for (c = 0; c < 16; c += 4) {
+                uint8_t a0=s[c],a1=s[c+1],a2=s[c+2],a3=s[c+3];
+                s[c+0]=gmul(a0,14)^gmul(a1,11)^gmul(a2,13)^gmul(a3,9);
+                s[c+1]=gmul(a0,9) ^gmul(a1,14)^gmul(a2,11)^gmul(a3,13);
+                s[c+2]=gmul(a0,13)^gmul(a1,9) ^gmul(a2,14)^gmul(a3,11);
+                s[c+3]=gmul(a0,11)^gmul(a1,13)^gmul(a2,9) ^gmul(a3,14);
+            }
+        }
+    }
+}
+void aes256_ecb_decrypt(const uint8_t key[32], uint8_t block[16]) {
+    uint8_t rk[240]; key_expansion(rk, key); inv_cipher(block, rk);
+}
+
+/* Decrypt an ECB payload (len multiple of 16) in place. */
+void dmr_sms_ecb_decrypt(uint8_t *payload, int len, const uint8_t key[32]) {
+    uint8_t rk[240]; int i;
+    key_expansion(rk, key);
+    for (i = 0; i + 16 <= len; i += 16) inv_cipher(payload + i, rk);
+}
+
+/* Decrypt a received stock-format encrypted SMS and extract the UTF-16LE text.
+ *  pdu      = reassembled rate-1/2 payload AFTER the ENC ext header (encrypted
+ *             blocks; the trailing pad+CRC32 block is ignored).
+ *  pdu_len  = number of encrypted bytes (multiple of 16; e.g. 48 for "Hello").
+ *  key      = 32-byte AES-256 key (KEY1 order, as in CPS).
+ *  out/out_max = ASCII output buffer for the message text.
+ * Returns text length, or -1 if not a valid IPv4/UDP packet (wrong key / not SMS). */
+int dmr_sms_rx_decrypt(uint8_t *pdu, int pdu_len, const uint8_t key[32],
+                       char *out, int out_max) {
+    int i, n = 0, tlen, base;
+    if (pdu_len < 32 || (pdu_len & 15)) return -1;
+    dmr_sms_ecb_decrypt(pdu, pdu_len, key);
+    if ((pdu[0] >> 4) != 4 || pdu[9] != 0x11) return -1;   /* not IPv4/UDP */
+    /* TMS text length is at IP+UDP+TMS offset: byte 36 (=2*chars), text at byte 38 */
+    tlen = pdu[36]; base = 38;
+    if (tlen <= 0 || base + tlen > pdu_len) {
+        /* fall back: scan for the UTF-16LE run */
+        tlen = pdu_len - 38; base = 38; if (tlen < 0) return -1;
+    }
+    for (i = base; i + 1 < base + tlen && n < out_max - 1; i += 2) {
+        if (pdu[i+1] == 0 && pdu[i] >= 0x20 && pdu[i] < 0x7f) out[n++] = (char)pdu[i];
+    }
+    out[n] = 0;
+    return n;
+}
+
+/* On-device SMS decrypt test: decrypt ct with stored key slot, return text length. */
+int dmr_aes_sms_decrypt(uint8_t key_id, uint8_t *pdu, int pdu_len, char *out, int out_max) {
+    if (key_id >= DMR_AES_MAX_KEYS || !s_have[key_id]) return -1;
+    return dmr_sms_rx_decrypt(pdu, pdu_len, s_keys[key_id], out, out_max);
+}

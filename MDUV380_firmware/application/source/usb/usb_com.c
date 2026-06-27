@@ -32,6 +32,9 @@
 #include "user_interface/uiUtilities.h"
 #include "user_interface/menuSystem.h"
 #include "usb/usb_com.h"
+#ifdef ENABLE_AES
+#include "crypto/dmr_aes.h"
+#endif
 #include "functions/ticks.h"
 #include "interfaces/wdog.h"
 #include "hardware/HR-C6000.h"
@@ -671,6 +674,18 @@ static void cpsHandleCommand(void)
 			usbComSendBuf[0] = com_requestbuffer[0];
 			hasToReply = true;
 			replyLength = 1;
+			break;
+		case 0x92: // DIAG: decrypt data-SMS [2]=keyId [3]=ctLen [4..]=ct -> [cmd, textLen|0xFF, text...]
+			{
+				int ctlen = com_requestbuffer[3];
+				char txt[80];
+				int tn = dmr_aes_sms_decrypt(com_requestbuffer[2], (uint8_t *)&com_requestbuffer[4], ctlen, txt, sizeof txt);
+				usbComSendBuf[0] = com_requestbuffer[0];
+				usbComSendBuf[1] = (tn < 0) ? 0xFF : (uint8_t)tn;
+				if (tn > 0) { memcpy((uint8_t *)&usbComSendBuf[2], txt, tn); }
+				hasToReply = true;
+				replyLength = 2 + ((tn > 0) ? tn : 0);
+			}
 			break;
 		case 0x82: // SUB set per-channel AES key: [2..3]=channel index (LE, 1-based), [4]=encrypt
 			{          // encrypt: 0=inherit global TX key, 1..15=AES key slot, 0xFF=force clear

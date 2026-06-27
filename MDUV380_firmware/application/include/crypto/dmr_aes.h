@@ -126,4 +126,11 @@ void aes256_ecb_encrypt(const uint8_t key[32], uint8_t block[16]); /* test vecto
 #ifdef __cplusplus
 }
 #endif
+
+void aes256_ecb_decrypt(const uint8_t key[32], uint8_t block[16]);
+void dmr_sms_ecb_decrypt(uint8_t *payload, int len, const uint8_t key[32]);
+int  dmr_sms_rx_decrypt(uint8_t *pdu, int pdu_len, const uint8_t key[32], char *out, int out_max);
+
+int  dmr_aes_sms_decrypt(uint8_t key_id, uint8_t *pdu, int pdu_len, char *out, int out_max);
+
 #endif /* DMR_AES_H */
