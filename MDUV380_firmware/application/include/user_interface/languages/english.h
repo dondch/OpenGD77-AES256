@@ -330,6 +330,9 @@ const stringsTable_t englishLanguage =
 #if defined(ENABLE_AES)
 .aes_keys				= "AES Keys", // MaxLen: 16
 .encrypt_tx				= "Encrypt TX", // MaxLen: 16
+#if defined(ENABLE_DMR_DATA)
+.messages				= "Messages", // MaxLen: 16
+#endif
 #endif
 };
 /********************************************************************

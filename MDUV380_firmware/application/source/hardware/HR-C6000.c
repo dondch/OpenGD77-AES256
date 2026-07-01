@@ -31,6 +31,7 @@
 #include "crypto/dmr_aes_hook.h"
 #include "crypto/dmr_aes.h"   // DMR_AES_MAX_KEYS (per-channel key-slot range check)
 #include "functions/dmr_data.h"   // DMR data-frame TX harness (ENABLE_DMR_DATA)
+#include "functions/dmr_sms.h"    // encrypted-SMS RX reassembly (ENABLE_DMR_DATA + ENABLE_AES)
 #include "functions/settings.h"
 #if defined(USING_EXTERNAL_DEBUGGER)
 #include "SeggerRTT/RTT/SEGGER_RTT.h"
@@ -313,6 +314,9 @@ volatile int dmrMonitorCapturedTS = -1;
 
 static bool hrc6000CallAcceptFilter(void);
 static void hrc6000SendPcOrTgLCHeader(void);
+#if defined(ENABLE_DMR_DATA)
+static void hrc6000DataTxStartBurst(void);
+#endif
 #ifdef ENABLE_AES
 static uint32_t hrc6000AesRngSeed(void);
 static bool hrc6000SendAesPIHeader(void);
@@ -1063,6 +1067,9 @@ static inline void hrc6000SysReceivedDataInt(void)
 			dmrAesDiagRxMark(4); // RXEND: CRC-valid Terminator
 #endif
 			dmrAesRxEnd(); // AES: call ended (no-op unless ENABLE_AES)
+#if defined(ENABLE_DMR_DATA) && defined(ENABLE_AES)
+			dmrSmsRxReset(); // drop any partial SMS data-PDU reassembly
+#endif
 			trxIsTransmitting = false;
 
 			if (settingsUsbMode == USB_MODE_HOTSPOT)
@@ -1081,6 +1088,26 @@ static inline void hrc6000SysReceivedDataInt(void)
 			}
 		}
 	}
+
+#if defined(ENABLE_DMR_DATA) && defined(ENABLE_AES)
+	// Encrypted-SMS RX: the chip BPTC-decodes + CRC-checks each data-sync burst and presents
+	// its 96 info bits at page 0x02 (the same path the PI header uses). Hand Data Header (6)
+	// and Rate-1/2 (7) bursts to the SMS reassembler; it accumulates the PDU and the main loop
+	// (dmrSmsRxTick) decrypts + stores it. Skip our own TX echoes.
+	if ((hrc.transmissionEnabled == false) && (rxSyncClass == SYNC_CLASS_DATA))
+	{
+		int crcOk = hrc6000CrcIsValid() ? 1 : 0;
+		dmrSmsRxDiagBurst(rxDataType, crcOk);   // log every data-sync burst (any type/CRC)
+		if (crcOk && ((rxDataType == 6) || (rxDataType == 7)))
+		{
+			uint8_t dataBurst[LC_DATA_LENGTH];
+			if (SPI0ReadPageRegByteArray(0x02, 0x00, dataBurst, LC_DATA_LENGTH) == kStatus_Success)
+			{
+				dmrSmsRxBurst(rxDataType, dataBurst);
+			}
+		}
+	}
+#endif
 
 	if (hrc6000CrcIsValid() && (slotState != DMR_STATE_IDLE) && (hrc.skipCount > 0) && (rxSyncClass != SYNC_CLASS_DATA) && ((rxDataType & 0x07) == 0x01))
 	{
@@ -1290,6 +1317,18 @@ static inline void hrc6000SysReceivedInformationInt(void)
 			2. 0x00 indicates the entire information reception check error;
 			3. 0x40 indicates that a non-confirmed SMS abnormal interrupt is generated;
 	 */
+#if defined(ENABLE_DMR_DATA) && defined(ENABLE_AES)
+	// Capture the chip's reassembled data PDU for the de-permute experiment: read a big chunk
+	// of the RX data RAM (SPI1 page 0x03 from reg 0x00 — AMBE lives at 0x00, data "after 0x30")
+	// and hand it to dmr_sms for USB dump. Diagnostic only.
+	{
+		uint8_t riBuf[160];
+		if (SPI1ReadPageRegByteArray(0x03, 0x00, riBuf, sizeof riBuf) == kStatus_Success)
+		{
+			dmrSmsRiCapture(reg_0x90, riBuf, sizeof riBuf);
+		}
+	}
+#endif
 }
 
 static inline void hrc6000SysAbnormalExitInt(void)
@@ -1764,15 +1803,33 @@ void hrc6000TimeslotInterruptHandler(void)
 #ifdef ENABLE_AES
 			{
 				uint8_t aesTxKeyId = hrc6000ResolveAesTxKeyId(); // per-channel key, falling back to the global selector
+#if defined(ENABLE_DMR_DATA)
+				// A queued DATA call (encrypted SMS) carries its own ENC ext header + ECB blocks,
+				// so it must NOT start an encrypted VOICE call: the Voice-LC + AES PI headers that
+				// TX_START_3/5 would then emit make the stock radio treat the burst as voice and
+				// drop the data PDU. Forcing key id 0 here makes the encrypted-channel data TX
+				// behave exactly like the proven clear-channel path (Voice-LC headers + data).
+				if (dmrDataTxActive()) { aesTxKeyId = 0; }
+#endif
 				if (aesTxKeyId != 0)
 				{
 					dmrAesTxStart(aesTxKeyId, hrc6000AesRngSeed()); // begin encrypted call (fresh MI)
 				}
 			}
 #endif
-			hrc6000SendPcOrTgLCHeader(); // after dmrAesTxStart so the LC carries the encryption SO/FID
-			SPI0WritePageRegByte(0x04, 0x41, 0x80);    // Transmit during next Timeslot
-			SPI0WritePageRegByte(0x04, 0x50, 0x10);    // Set Data Type to 0001 (Voice LC Header), Data, LCSS=00
+#if defined(ENABLE_DMR_DATA)
+			if (dmrDataTxActive())
+			{
+				SPI0WritePageRegByte(0x04, 0x41, 0x80);    // Transmit during next Timeslot
+				hrc6000DataTxStartBurst();                 // CSBK-led key-up (no Voice-LC header)
+			}
+			else
+#endif
+			{
+				hrc6000SendPcOrTgLCHeader(); // after dmrAesTxStart so the LC carries the encryption SO/FID
+				SPI0WritePageRegByte(0x04, 0x41, 0x80);    // Transmit during next Timeslot
+				SPI0WritePageRegByte(0x04, 0x50, 0x10);    // Set Data Type to 0001 (Voice LC Header), Data, LCSS=00
+			}
 			trxIsTransmitting = true;
 			slotState = DMR_STATE_TX_START_2;
 			break;
@@ -1784,6 +1841,13 @@ void hrc6000TimeslotInterruptHandler(void)
 
 		case DMR_STATE_TX_START_3: // Start TX (fourth step)
 			SPI0WritePageRegByte(0x04, 0x41, 0x80);     // Transmit during Next Timeslot
+#if defined(ENABLE_DMR_DATA)
+			if (dmrDataTxActive())
+			{
+				hrc6000DataTxStartBurst();              // CSBK-led key-up (no Voice-LC / PI header)
+			}
+			else
+#endif
 #ifdef ENABLE_AES
 			// For an encrypted call, send the PI Header here (delivers the MI before voice so
 			// the receiver decrypts from frame A). START_5 restores the group Voice LC.
@@ -1810,6 +1874,13 @@ void hrc6000TimeslotInterruptHandler(void)
 
 		case DMR_STATE_TX_START_5: // Start TX (sixth step)
 			SPI0WritePageRegByte(0x04, 0x41, 0x80);     // Transmit during next Timeslot
+#if defined(ENABLE_DMR_DATA)
+			if (dmrDataTxActive())
+			{
+				hrc6000DataTxStartBurst();              // CSBK-led key-up (no Voice-LC / PI header)
+			}
+			else
+#endif
 #ifdef ENABLE_AES
 			// Second PI Header burst, on this stable preamble slot (the first burst is the weak
 			// PTT ramp). Two PI bursts greatly improve the odds the receiver locks the MI before
@@ -2312,6 +2383,30 @@ static void hrc6000SendPcOrTgLCHeader(void)
 	spi_tx[11] = 0x00;
 	SPI0WritePageRegByteArray(0x02, 0x00, spi_tx, LC_DATA_LENGTH);
 }
+
+#if defined(ENABLE_DMR_DATA)
+// Key-up burst for a DATA call: emit the next queued burst (the CSBK preamble) instead of
+// a Voice-LC header. A stock TYT SMS is CSBK-led with NO Voice-LC headers; front-loading
+// Voice-LC bursts makes the receiver classify the transmission as an incoming VOICE call
+// and drop the data PDU. Consuming the first 3 preamble CSBKs here (across TX_START_1/3/5)
+// leaves the remaining CSBKs + headers + blocks for TX_2, so the on-air frame is CSBK-led
+// exactly like a stock SMS. Falls back to Voice-LC only if the queue is unexpectedly empty.
+static void hrc6000DataTxStartBurst(void)
+{
+	uint8_t dtype;
+	uint8_t payload[LC_DATA_LENGTH] = { 0 };
+
+	if (dmrDataTxNextBurst(&dtype, payload))
+	{
+		SPI0WritePageRegByteArray(0x02, 0x00, payload, LC_DATA_LENGTH);
+		SPI0WritePageRegByte(0x04, 0x50, dtype);   // CSBK preamble (0x30) -> data-call key-up
+	}
+	else
+	{
+		SPI0WritePageRegByte(0x04, 0x50, 0x10);    // fallback: Voice-LC header
+	}
+}
+#endif
 
 #ifdef ENABLE_AES
 // Resolve the AES TX key id for the channel being keyed up. The codeplug channel "encrypt"

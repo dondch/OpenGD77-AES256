@@ -37,6 +37,7 @@
 #include "hardware/SPI_Flash.h"
 #include "functions/trx.h"
 #include "functions/rxPowerSaving.h"
+#include "functions/dmr_sms.h"
 #if defined(PLATFORM_MD9600) || defined(PLATFORM_MD380) || defined(PLATFORM_MDUV380) || defined(PLATFORM_RT84_DM1701) || defined(PLATFORM_MD2017)
 #include "interfaces/batteryAndPowerManagement.h"
 #include "hardware/radioHardwareInterface.h"
@@ -2220,6 +2221,26 @@ void uiUtilityRenderHeader(bool isVFODualWatchScanning, bool isVFOSweepScanning,
 			displayPrintCore(0, DISPLAY_Y_POS_HEADER, buffer, (apoEnabled ? FONT_SIZE_1_BOLD : FONT_SIZE_1), TEXT_ALIGN_RIGHT, ((batteryIsLow ? scanBlinkPhase : false)));// Display battery percentage at the right
 		}
 	}
+
+#if defined(ENABLE_AES) && defined(ENABLE_DMR_DATA)
+	// Unread encrypted-SMS indicator: a small envelope + count at the top-right of the
+	// main area. The receive pop-up (uiNotificationShow) is the alert; this is the
+	// persistent reminder. Drawn only when there are unread Inbox messages.
+	{
+		int unread = dmrSmsUnreadCount();
+		if (unread > 0)
+		{
+			int16_t ex = DISPLAY_SIZE_X - 24;
+			int16_t ey = DISPLAY_Y_POS_BAR + 2;
+			displayDrawRect(ex, ey, 13, 9, true);              // envelope body
+			displayDrawLine(ex, ey, ex + 6, ey + 4, true);     // flap (left)
+			displayDrawLine(ex + 12, ey, ex + 6, ey + 4, true);// flap (right)
+			char nb[4];
+			snprintf(nb, sizeof nb, "%d", (unread > 9) ? 9 : unread);
+			displayPrintCore(ex + 15, ey, nb, FONT_SIZE_1, TEXT_ALIGN_LEFT, false);
+		}
+	}
+#endif
 
 	displayThemeResetToDefault();
 }

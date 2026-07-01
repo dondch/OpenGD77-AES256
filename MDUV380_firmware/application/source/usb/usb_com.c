@@ -80,6 +80,7 @@ enum CPS_ACCESS_AREA
 
 #include "crypto/dmr_aes_hook.h"
 #include "functions/dmr_data.h"
+#include "functions/dmr_sms.h"
 static void handleCPSRequest(void);
 
 volatile int com_request = 0;
@@ -657,14 +658,20 @@ static void cpsHandleCommand(void)
 	switch(command)
 	{
 #ifdef ENABLE_AES
-		case 0x80: // SUB set AES key: [2]=keyId, [3..34]=32-byte key
+		case 0x80: // SUB set AES key: [2]=keyId, [3..34]=32-byte key (persistent flash store)
+			// dmrAesStoreKey writes flash (SPI_Flash_write -> osDelay), which must NOT run inside
+			// the CPS TASK_LOCK_WRITE critical section. Bracket with unlock/lock like the 'X' write.
+			TASK_UNLOCK_WRITE();
 			dmrAesStoreKey(com_requestbuffer[2], (uint8_t *)&com_requestbuffer[3]);
+			TASK_LOCK_WRITE();
 			usbComSendBuf[0] = com_requestbuffer[0];
 			hasToReply = true;
 			replyLength = 1;
 			break;
-		case 0x81: // SUB select TX key: [2]=keyId (0 = encrypted TX off)
+		case 0x81: // SUB select TX key: [2]=keyId (0 = encrypted TX off) (persistent flash store)
+			TASK_UNLOCK_WRITE();
 			dmrAesSetTxKeyId(com_requestbuffer[2]);
+			TASK_LOCK_WRITE();
 			usbComSendBuf[0] = com_requestbuffer[0];
 			hasToReply = true;
 			replyLength = 1;
@@ -777,6 +784,55 @@ static void cpsHandleCommand(void)
 			hasToReply = true;
 			replyLength = 1;
 			break;
+#if defined(ENABLE_AES)
+		case 0x93: // DIAGNOSTIC: dump the SMS RX diag counters -> [cmd, len_hi, len_lo, 7x uint32 LE +
+			   //  txActive byte]. Counters: d=all data bursts, hOk,hBad,bOk,bBad,pdu,msg.
+			{
+				uint32_t d[7];
+				int n = 0;
+				dmrSmsRxDiag(d);
+				for (int i = 0; i < 7; i++)
+				{
+					usbComSendBuf[3 + n++] = (uint8_t)(d[i]);
+					usbComSendBuf[3 + n++] = (uint8_t)(d[i] >> 8);
+					usbComSendBuf[3 + n++] = (uint8_t)(d[i] >> 16);
+					usbComSendBuf[3 + n++] = (uint8_t)(d[i] >> 24);
+				}
+				usbComSendBuf[3 + n++] = (uint8_t)(dmrDataTxActive() ? 1 : 0);
+				usbComSendBuf[0] = com_requestbuffer[0];
+				usbComSendBuf[1] = (uint8_t)((n >> 8) & 0xFF);
+				usbComSendBuf[2] = (uint8_t)(n & 0xFF);
+				hasToReply = true;
+				replyLength = n + 3;
+				return; // bypass the trailing generic '-' reply
+			}
+		case 0x94: // DIAGNOSTIC: zero the SMS RX diag counters (clean test runs)
+			dmrSmsRxDiagReset();
+			usbComSendBuf[0] = com_requestbuffer[0];
+			hasToReply = true;
+			replyLength = 1;
+			break;
+		case 0x95: // DIAGNOSTIC: dump the last reassembled (encrypted) SMS PDU + metadata
+			{
+				int n = dmrSmsRxLastPdu((uint8_t *)&usbComSendBuf[3], COM_BUFFER_SIZE - 3);
+				usbComSendBuf[0] = com_requestbuffer[0];
+				usbComSendBuf[1] = (uint8_t)((n >> 8) & 0xFF);
+				usbComSendBuf[2] = (uint8_t)(n & 0xFF);
+				hasToReply = true;
+				replyLength = n + 3;
+				return; // bypass the trailing generic '-' reply
+			}
+		case 0x96: // DIAGNOSTIC: dump the chip "Received Information" RX-RAM capture
+			{
+				int n = dmrSmsRiDump((uint8_t *)&usbComSendBuf[3], COM_BUFFER_SIZE - 3);
+				usbComSendBuf[0] = com_requestbuffer[0];
+				usbComSendBuf[1] = (uint8_t)((n >> 8) & 0xFF);
+				usbComSendBuf[2] = (uint8_t)(n & 0xFF);
+				hasToReply = true;
+				replyLength = n + 3;
+				return; // bypass the trailing generic '-' reply
+			}
+#endif
 #endif
 		case 0:
 #if defined(HAS_GPS)

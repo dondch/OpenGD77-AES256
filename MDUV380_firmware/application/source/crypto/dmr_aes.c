@@ -507,3 +507,10 @@ int dmr_aes_sms_decrypt(uint8_t key_id, uint8_t *pdu, int pdu_len, char *out, in
     if (key_id >= DMR_AES_MAX_KEYS || !s_have[key_id]) return -1;
     return dmr_sms_rx_decrypt(pdu, pdu_len, s_keys[key_id], out, out_max);
 }
+
+/* Pointer to the 32-byte key for a loaded slot, or NULL. For the SMS TX builder
+ * (ECB-encrypt); keep the pointer's lifetime short and never copy key bytes off-device. */
+const uint8_t *dmr_aes_key_ptr(uint8_t key_id) {
+    if (key_id >= DMR_AES_MAX_KEYS || !s_have[key_id]) return 0;
+    return s_keys[key_id];
+}

@@ -52,6 +52,7 @@
 #include "interfaces/settingsStorage.h"
 #include "interfaces/adc.h"
 #include "functions/rxPowerSaving.h"
+#include "functions/dmr_sms.h"
 
 #if defined(USING_EXTERNAL_DEBUGGER)
 #include "SeggerRTT/RTT/SEGGER_RTT.h"
@@ -543,6 +544,10 @@ void applicationMainTask(void)
 
 	aprsBeaconingInit();
 	aprsBeaconingStart();
+
+#if defined(ENABLE_DMR_DATA) && defined(ENABLE_AES)
+	dmrSmsInit();   // load the encrypted-SMS store from flash
+#endif
 
 	/* Infinite loop */
 	for(;;)
@@ -1374,6 +1379,9 @@ void applicationMainTask(void)
 		gpsTick();
 		aprsBeaconingTick(&ev);
 		settingsSaveIfNeeded(false);
+#if defined(ENABLE_DMR_DATA) && defined(ENABLE_AES)
+		dmrSmsRxTick();   // decrypt + store + notify any received encrypted SMS
+#endif
 
 		if (settingsIsOptionBitSet(BIT_DISPLAY_TIME_IN_HEADER))
 		{

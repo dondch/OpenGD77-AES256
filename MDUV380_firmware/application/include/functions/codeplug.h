@@ -354,6 +354,8 @@ typedef enum
 	CODEPLUG_CUSTOM_DATA_TYPE_THEME_DAY,
 	CODEPLUG_CUSTOM_DATA_TYPE_THEME_NIGHT,
 	CODEPLUG_CUSTOM_DATA_TYPE_AES_KEYS,
+	CODEPLUG_CUSTOM_DATA_TYPE_MESSAGES,   /* OpenGD77-AES on-radio SMS store (see dmr_sms.c) */
+	CODEPLUG_CUSTOM_DATA_TYPE_MSG_CONFIG, /* SMS config: quick-text presets + default recipient (CHIRP-set) */
 } CodeplugCustomDataType_t;
 
 
