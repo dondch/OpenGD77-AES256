@@ -522,10 +522,6 @@ static volatile uint16_t s_rxPduLen DMR_AES_CCM;
 static volatile uint32_t s_rxPeer DMR_AES_CCM;
 static volatile uint8_t  s_rxPeerGroup DMR_AES_CCM;
 static volatile uint8_t  s_rxPeerKeyId DMR_AES_CCM;
-/* de-dupe of retransmits */
-static uint32_t s_rxLastPeer DMR_AES_CCM;
-static uint16_t s_rxLastHash DMR_AES_CCM;
-static uint32_t s_rxLastTime DMR_AES_CCM;
 /* diagnostic counters (visible on the Messages home screen) to localise RX failures */
 static volatile uint32_t s_diagData   DMR_AES_CCM; /* ALL data-sync-class bursts the chip delivered */
 static volatile uint32_t s_diagHdrOk  DMR_AES_CCM; /* type-6 data-header, CRC OK   */
@@ -693,13 +689,6 @@ void dmrSmsRxBurst(int rxDataType, const uint8_t *p)
 	}
 }
 
-static uint16_t text_hash(const char *t, int n)
-{
-	uint16_t h = 0;
-	for (int i = 0; i < n; i++) { h = (uint16_t)(h * 31u + (uint8_t)t[i]); }
-	return h;
-}
-
 void dmrSmsRxTick(void)
 {
 	if (!s_rxReady) { return; }
@@ -742,16 +731,6 @@ void dmrSmsRxTick(void)
 	}
 	if (got <= 0) { return; }   /* wrong/no key, or not an SMS */
 
-	/* de-dupe identical retransmits within a short window */
-	uint16_t h = text_hash(text, got);
-	uint32_t now = ticksGetMillis();
-	if ((peer == s_rxLastPeer) && (h == s_rxLastHash) && ((now - s_rxLastTime) < 30000u))
-	{
-		s_rxLastTime = now;
-		return;
-	}
-	s_rxLastPeer = peer; s_rxLastHash = h; s_rxLastTime = now;
-
 	store_add(DMR_SMS_FLAG_UNREAD | (group ? DMR_SMS_FLAG_GROUP : 0), peer, text, got);
 	s_diagMsg++;
 
@@ -768,7 +747,6 @@ static void runtimeReset(void)
 	s_diagData = s_diagHdrOk = s_diagHdrBad = s_diagBlkOk = s_diagBlkBad = 0;
 	s_diagPdu = s_diagMsg = 0;
 	s_rxReady = 0;                   /* don't process stray garbage as a PDU */
-	s_rxLastPeer = 0; s_rxLastHash = 0; s_rxLastTime = 0;
 	dmrSmsRxReset();                 /* clear the burst accumulator */
 }
 
