@@ -151,6 +151,9 @@ static menuFunctionData_t menuFunctions[] =
 #if defined(ENABLE_AES)
 		{ menuAESKeys,              NULL, NULL, 0 },
 #endif
+#if defined(ENABLE_AES) && defined(ENABLE_DMR_DATA)
+		{ menuMessages,             NULL, NULL, 0 },
+#endif
 		// *** Add new menus to be accessed using quickkey (ID: 0..31) above this line ***
 		{ uiMessageBox,             NULL, NULL, 0 },
 		{ menuHotspotMode,          NULL, NULL, 0 },
@@ -700,6 +703,9 @@ static const menuItemNewData_t optionsMenuItems[] =
 #if defined(ENABLE_AES)
 	// stringOffset = the ordinal of stringsTable_t.aes_keys (computed, so it can't drift)
 	{ (int)(offsetof(stringsTable_t, aes_keys) / LANGUAGE_TEXTS_LENGTH), MENU_AES_KEYS },
+#endif
+#if defined(ENABLE_AES) && defined(ENABLE_DMR_DATA)
+	{ (int)(offsetof(stringsTable_t, messages) / LANGUAGE_TEXTS_LENGTH), MENU_MESSAGES },
 #endif
 };
 

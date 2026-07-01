@@ -132,5 +132,6 @@ void dmr_sms_ecb_decrypt(uint8_t *payload, int len, const uint8_t key[32]);
 int  dmr_sms_rx_decrypt(uint8_t *pdu, int pdu_len, const uint8_t key[32], char *out, int out_max);
 
 int  dmr_aes_sms_decrypt(uint8_t key_id, uint8_t *pdu, int pdu_len, char *out, int out_max);
+const uint8_t *dmr_aes_key_ptr(uint8_t key_id);   /* 32-byte key for a loaded slot, or NULL */
 
 #endif /* DMR_AES_H */
