@@ -170,10 +170,11 @@ static void cyclePreset(void)
 		const char *p = dmrSmsPresetGet(s_msg.presetIdx);
 		if (p != NULL)
 		{
-			strncpy(s_msg.compose, p, DMR_SMS_TEXT_MAX);
-			s_msg.compose[DMR_SMS_TEXT_MAX] = 0;
+			int cap = dmrSmsMaxLen();
+			strncpy(s_msg.compose, p, cap);
+			s_msg.compose[cap] = 0;
 			s_msg.composePos = (int16_t)strlen(s_msg.compose);
-			if (s_msg.composePos > DMR_SMS_TEXT_MAX - 1) { s_msg.composePos = DMR_SMS_TEXT_MAX - 1; }
+			if (s_msg.composePos > cap - 1) { s_msg.composePos = cap - 1; }
 			composeUpdate();
 			return;
 		}
@@ -369,7 +370,7 @@ static void composeUpdate(void)
 	}
 
 	char cnt[20];
-	snprintf(cnt, sizeof cnt, "%d/%d chars", n, DMR_SMS_TEXT_MAX);
+	snprintf(cnt, sizeof cnt, "%d/%d chars", n, dmrSmsMaxLen());
 	displayPrintCentered(96, cnt, FONT_SIZE_1);
 	if (dmrSmsPresetCount() > 0)
 	{
@@ -430,7 +431,7 @@ static void composeEvent(uiEvent_t *ev)
 		return;
 	}
 	// multi-tap alpha entry (keypadAlphaEnable handles cycling; same idiom as contact name)
-	if (s_msg.composePos < DMR_SMS_TEXT_MAX)
+	if (s_msg.composePos < dmrSmsMaxLen())
 	{
 		if (ev->keys.event == KEY_MOD_PREVIEW)
 		{
@@ -441,7 +442,7 @@ static void composeEvent(uiEvent_t *ev)
 		if (ev->keys.event == KEY_MOD_PRESS)
 		{
 			s_msg.compose[s_msg.composePos] = ev->keys.key;
-			if (s_msg.composePos < (int)strlen(s_msg.compose) && s_msg.composePos < DMR_SMS_TEXT_MAX - 1)
+			if (s_msg.composePos < (int)strlen(s_msg.compose) && s_msg.composePos < dmrSmsMaxLen() - 1)
 			{
 				s_msg.composePos++;
 			}

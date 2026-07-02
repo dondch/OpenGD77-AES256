@@ -22,8 +22,9 @@
 
 #if defined(ENABLE_DMR_DATA) && defined(ENABLE_AES)
 
-#define DMR_SMS_TEXT_MAX    48     /* max chars stored/composed per message (ASCII) */
-#define DMR_SMS_MAX_COUNT   24     /* ring capacity (inbox + sent combined)          */
+#define DMR_SMS_TEXT_MAX    144    /* hard max chars stored/composed per message (buffer size) */
+#define DMR_SMS_STORE_DATA  1342   /* packed variable-length message bytes (keeps the MSGS block
+                                    * the same 1352 B total as the old fixed 24x56 array) */
 
 /* message record flags */
 #define DMR_SMS_FLAG_USED      0x01
@@ -96,6 +97,9 @@ int  dmrSmsPresetCount(void);              /* number of non-empty presets */
 const char *dmrSmsPresetGet(int idx);      /* preset text by index, or NULL */
 /* Default compose recipient; *dst==0 if unset (fall back to current channel). */
 void dmrSmsDefaultRecipient(uint32_t *dst, int *group);
+/* CHIRP-configurable max compose length, clamped to [1, DMR_SMS_TEXT_MAX]; the MSGC
+ * maxLen byte (0 or out-of-range -> DMR_SMS_TEXT_MAX). Limits on-radio composing only. */
+int  dmrSmsMaxLen(void);
 
 /* ---- TX ---------------------------------------------------------------- *
  * Build a stock-TYT-compatible AES-256-ECB encrypted SMS and key a data call.

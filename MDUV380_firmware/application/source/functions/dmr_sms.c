@@ -32,32 +32,43 @@
 #define UDP_SMS_PORT     0x0FA7          /* 4007, src==dst, stock TYT */
 
 /* ============================ message store ============================== */
-/* The store struct is the on-flash MESSAGES custom-data block verbatim; a CCM working
- * copy (DMR_AES_CCM -> no net-new main RAM, so AMBE buffers don't shift) is the live store. */
+/* Variable-length packed store: the MSGS custom-data block holds a small header plus a
+ * byte area of back-to-back entries, so a message uses only the space its text needs
+ * (stock-like: many short messages OR a few long ones share the same fixed block). A CCM
+ * working copy (DMR_AES_CCM -> no net-new main RAM) is the live store. Block stays 1352 B
+ * (== the old fixed 24x56 array) so it drops into an existing codeplug slot.
+ * Entry layout in data[]:  [0]=flags [1]=textLen [2..3]=seq(LE) [4..7]=peerId(LE) [8..]=text */
+#define SMS_ENTRY_HDR  8
 typedef struct
 {
-	char    magic[4];                       /* "MSGS" */
-	uint8_t version;                        /* 1 */
-	uint8_t count;                          /* messages in use (0..DMR_SMS_MAX_COUNT) */
-	uint16_t nextSeq;                       /* next message ordering id */
-	dmrSmsMessage_t msg[DMR_SMS_MAX_COUNT];
+	char     magic[4];                 /* "MSGV" (v2 variable-length; old "MSGS" is ignored) */
+	uint8_t  version;                  /* 2 */
+	uint8_t  rsvd;
+	uint16_t used;                     /* bytes in use in data[] */
+	uint16_t nextSeq;                  /* next message ordering id */
+	uint8_t  data[DMR_SMS_STORE_DATA];
 } dmrSmsStore_t;
 
-static dmrSmsStore_t s_store DMR_AES_CCM;
-static uint8_t       s_loaded DMR_AES_CCM;  /* CCM is not zeroed at boot -> guard init */
+static dmrSmsStore_t   s_store   DMR_AES_CCM;
+static uint8_t         s_loaded  DMR_AES_CCM;  /* CCM is not zeroed at boot -> guard init */
+static dmrSmsMessage_t s_scratch;                /* copy-out buffer for dmrSmsGet (main RAM, not CCM) */
 
-/* Zero every CCM runtime/diagnostic variable (CCM is NOT cleared at boot, so without
- * this they hold garbage: bogus rx counters, a stray s_rxReady that processes junk, a
- * stray s_cfgLoaded that skips the config load -> garbage default recipient). Defined
- * at end-of-file where all the statics are in scope; called first thing in dmrSmsInit. */
 static void runtimeReset(void);
+
+static int entry_size(int off) { return SMS_ENTRY_HDR + s_store.data[off + 1]; }
+static uint16_t entry_seq(int off) { return (uint16_t)(s_store.data[off + 2] | (s_store.data[off + 3] << 8)); }
+static int entry_matches(int off, int outgoing)
+{
+	int want = outgoing ? DMR_SMS_FLAG_OUTGOING : 0;
+	return (s_store.data[off] & DMR_SMS_FLAG_OUTGOING) == want;
+}
 
 static void store_blank(void)
 {
 	memset(&s_store, 0, sizeof s_store);
-	memcpy(s_store.magic, "MSGS", 4);
-	s_store.version = 1;
-	s_store.count = 0;
+	memcpy(s_store.magic, "MSGV", 4);
+	s_store.version = 2;
+	s_store.used = 0;
 	s_store.nextSeq = 1;
 }
 
@@ -68,18 +79,15 @@ void dmrSmsInit(void)
 	s_loaded = 1;
 	dmrAesLoadKeys();   /* ensure the key store is populated for RX decrypt */
 	if (codeplugGetOpenGD77CustomData(CODEPLUG_CUSTOM_DATA_TYPE_MESSAGES, blk) &&
-			(memcmp(s_store.magic, "MSGS", 4) == 0) && (s_store.version == 1) &&
-			(s_store.count <= DMR_SMS_MAX_COUNT))
+			(memcmp(s_store.magic, "MSGV", 4) == 0) && (s_store.version == 2) &&
+			(s_store.used <= DMR_SMS_STORE_DATA))
 	{
-		return;   /* valid store loaded from flash */
+		return;   /* valid variable-length store loaded from flash */
 	}
-	store_blank();
+	store_blank();      /* fresh, or an old "MSGS" v1 block -> start empty */
 }
 
-static void store_ensure(void)
-{
-	if (!s_loaded) { dmrSmsInit(); }
-}
+static void store_ensure(void) { if (!s_loaded) { dmrSmsInit(); } }
 
 static void store_save(void)
 {
@@ -88,43 +96,34 @@ static void store_save(void)
 			(uint8_t *)&s_store, (int)sizeof s_store);
 }
 
-/* Find the array slot for the idx-th newest message of a folder (newest = idx 0). */
-static int slot_for(int outgoing, int idx)
+/* Byte offset of the idx-th newest entry of a folder (newest = idx 0), or -1. Selection
+ * scan (no large stack array): rank 0 = highest seq, each next rank = highest seq below it. */
+static int off_for(int outgoing, int idx)
 {
-	int want = outgoing ? DMR_SMS_FLAG_OUTGOING : 0;
-	int order[DMR_SMS_MAX_COUNT];
-	int n = 0;
-	for (int i = 0; i < DMR_SMS_MAX_COUNT; i++)
+	uint32_t prevSeq = 0x10000;   /* above any 16-bit seq */
+	int chosen = -1;
+	for (int rank = 0; rank <= idx; rank++)
 	{
-		dmrSmsMessage_t *m = &s_store.msg[i];
-		if ((m->flags & DMR_SMS_FLAG_USED) && ((m->flags & DMR_SMS_FLAG_OUTGOING) == want))
+		int bestOff = -1; uint32_t bestSeq = 0;
+		for (int o = 0; o + SMS_ENTRY_HDR <= (int)s_store.used; o += entry_size(o))
 		{
-			order[n++] = i;
+			if (!entry_matches(o, outgoing)) { continue; }
+			uint32_t sq = entry_seq(o);
+			if (sq < prevSeq && (bestOff < 0 || sq > bestSeq)) { bestSeq = sq; bestOff = o; }
 		}
+		if (bestOff < 0) { return -1; }
+		chosen = bestOff; prevSeq = bestSeq;
 	}
-	/* sort matching slots by seq descending (n is small) -> newest first */
-	for (int a = 0; a < n; a++)
-	{
-		for (int b = a + 1; b < n; b++)
-		{
-			if (s_store.msg[order[b]].seq > s_store.msg[order[a]].seq)
-			{
-				int t = order[a]; order[a] = order[b]; order[b] = t;
-			}
-		}
-	}
-	return (idx >= 0 && idx < n) ? order[idx] : -1;
+	return chosen;
 }
 
 int dmrSmsCount(int outgoing)
 {
 	store_ensure();
-	int want = outgoing ? DMR_SMS_FLAG_OUTGOING : 0;
 	int n = 0;
-	for (int i = 0; i < DMR_SMS_MAX_COUNT; i++)
+	for (int o = 0; o + SMS_ENTRY_HDR <= (int)s_store.used; o += entry_size(o))
 	{
-		dmrSmsMessage_t *m = &s_store.msg[i];
-		if ((m->flags & DMR_SMS_FLAG_USED) && ((m->flags & DMR_SMS_FLAG_OUTGOING) == want)) { n++; }
+		if (entry_matches(o, outgoing)) { n++; }
 	}
 	return n;
 }
@@ -132,19 +131,26 @@ int dmrSmsCount(int outgoing)
 const dmrSmsMessage_t *dmrSmsGet(int outgoing, int idx)
 {
 	store_ensure();
-	int slot = slot_for(outgoing, idx);
-	return (slot >= 0) ? &s_store.msg[slot] : NULL;
+	int o = off_for(outgoing, idx);
+	if (o < 0) { return NULL; }
+	memset(&s_scratch, 0, sizeof s_scratch);
+	s_scratch.flags   = (uint8_t)(s_store.data[o] | DMR_SMS_FLAG_USED);
+	s_scratch.textLen = s_store.data[o + 1];
+	s_scratch.seq     = entry_seq(o);
+	s_scratch.peerId  = (uint32_t)s_store.data[o + 4] | ((uint32_t)s_store.data[o + 5] << 8) |
+	                    ((uint32_t)s_store.data[o + 6] << 16) | ((uint32_t)s_store.data[o + 7] << 24);
+	int tl = s_scratch.textLen; if (tl > DMR_SMS_TEXT_MAX) { tl = DMR_SMS_TEXT_MAX; }
+	memcpy(s_scratch.text, &s_store.data[o + SMS_ENTRY_HDR], tl);
+	return &s_scratch;
 }
 
 int dmrSmsUnreadCount(void)
 {
 	store_ensure();
 	int n = 0;
-	for (int i = 0; i < DMR_SMS_MAX_COUNT; i++)
+	for (int o = 0; o + SMS_ENTRY_HDR <= (int)s_store.used; o += entry_size(o))
 	{
-		dmrSmsMessage_t *m = &s_store.msg[i];
-		if ((m->flags & DMR_SMS_FLAG_USED) && (m->flags & DMR_SMS_FLAG_UNREAD) &&
-				((m->flags & DMR_SMS_FLAG_OUTGOING) == 0)) { n++; }
+		if (((s_store.data[o] & DMR_SMS_FLAG_OUTGOING) == 0) && (s_store.data[o] & DMR_SMS_FLAG_UNREAD)) { n++; }
 	}
 	return n;
 }
@@ -152,10 +158,10 @@ int dmrSmsUnreadCount(void)
 void dmrSmsMarkRead(int outgoing, int idx)
 {
 	store_ensure();
-	int slot = slot_for(outgoing, idx);
-	if (slot >= 0 && (s_store.msg[slot].flags & DMR_SMS_FLAG_UNREAD))
+	int o = off_for(outgoing, idx);
+	if (o >= 0 && (s_store.data[o] & DMR_SMS_FLAG_UNREAD))
 	{
-		s_store.msg[slot].flags &= ~DMR_SMS_FLAG_UNREAD;
+		s_store.data[o] &= (uint8_t)~DMR_SMS_FLAG_UNREAD;
 		store_save();
 	}
 }
@@ -164,78 +170,80 @@ void dmrSmsMarkAllRead(void)
 {
 	store_ensure();
 	int changed = 0;
-	for (int i = 0; i < DMR_SMS_MAX_COUNT; i++)
+	for (int o = 0; o + SMS_ENTRY_HDR <= (int)s_store.used; o += entry_size(o))
 	{
-		if ((s_store.msg[i].flags & DMR_SMS_FLAG_USED) && (s_store.msg[i].flags & DMR_SMS_FLAG_UNREAD))
+		if (((s_store.data[o] & DMR_SMS_FLAG_OUTGOING) == 0) && (s_store.data[o] & DMR_SMS_FLAG_UNREAD))
 		{
-			s_store.msg[i].flags &= ~DMR_SMS_FLAG_UNREAD; changed = 1;
+			s_store.data[o] &= (uint8_t)~DMR_SMS_FLAG_UNREAD; changed = 1;
 		}
 	}
 	if (changed) { store_save(); }
 }
 
+/* Remove the entry at byte offset o, compacting the block down. */
+static void entry_remove(int o)
+{
+	int sz = entry_size(o);
+	int tail = (int)s_store.used - (o + sz);
+	if (tail > 0) { memmove(&s_store.data[o], &s_store.data[o + sz], (size_t)tail); }
+	s_store.used = (uint16_t)(s_store.used - sz);
+}
+
 void dmrSmsDelete(int outgoing, int idx)
 {
 	store_ensure();
-	int slot = slot_for(outgoing, idx);
-	if (slot >= 0)
-	{
-		memset(&s_store.msg[slot], 0, sizeof s_store.msg[slot]);
-		if (s_store.count) { s_store.count--; }
-		store_save();
-	}
+	int o = off_for(outgoing, idx);
+	if (o >= 0) { entry_remove(o); store_save(); }
 }
 
 void dmrSmsDeleteAll(int outgoing)
 {
 	store_ensure();
 	int changed = 0;
-	for (int i = 0; i < DMR_SMS_MAX_COUNT; i++)
+	int o = 0;
+	while (o + SMS_ENTRY_HDR <= (int)s_store.used)
 	{
-		dmrSmsMessage_t *m = &s_store.msg[i];
-		if ((m->flags & DMR_SMS_FLAG_USED) &&
-				((outgoing < 0) || (((m->flags & DMR_SMS_FLAG_OUTGOING) != 0) == (outgoing != 0))))
-		{
-			memset(m, 0, sizeof *m);
-			if (s_store.count) { s_store.count--; }
-			changed = 1;
-		}
+		int match = (outgoing < 0) ||
+				(((s_store.data[o] & DMR_SMS_FLAG_OUTGOING) != 0) == (outgoing != 0));
+		if (match) { entry_remove(o); changed = 1; }   /* next entry shifted into o; don't advance */
+		else { o += entry_size(o); }
 	}
 	if (changed) { store_save(); }
 }
 
-/* Insert a new message, evicting the oldest of its folder if the store is full. */
+/* Insert a new message, evicting the globally-oldest (lowest seq) until it fits. */
 static void store_add(uint8_t flags, uint32_t peerId, const char *text, int textLen)
 {
 	store_ensure();
 	if (textLen > DMR_SMS_TEXT_MAX) { textLen = DMR_SMS_TEXT_MAX; }
+	if (textLen < 0) { textLen = 0; }
+	int need = SMS_ENTRY_HDR + textLen;
+	if (need > DMR_SMS_STORE_DATA) { return; }   /* can't ever fit */
 
-	int slot = -1;
-	for (int i = 0; i < DMR_SMS_MAX_COUNT; i++)
+	while ((int)s_store.used + need > DMR_SMS_STORE_DATA)
 	{
-		if ((s_store.msg[i].flags & DMR_SMS_FLAG_USED) == 0) { slot = i; break; }
-	}
-	if (slot < 0)
-	{
-		/* full: evict the globally-oldest message (lowest seq) */
-		uint16_t lo = 0xFFFF;
-		for (int i = 0; i < DMR_SMS_MAX_COUNT; i++)
+		int oldest = -1; uint16_t lo = 0xFFFF;
+		for (int o = 0; o + SMS_ENTRY_HDR <= (int)s_store.used; o += entry_size(o))
 		{
-			if (s_store.msg[i].seq <= lo) { lo = s_store.msg[i].seq; slot = i; }
+			uint16_t sq = entry_seq(o);
+			if (sq <= lo) { lo = sq; oldest = o; }
 		}
-	}
-	else
-	{
-		s_store.count++;
+		if (oldest < 0) { break; }
+		entry_remove(oldest);
 	}
 
-	dmrSmsMessage_t *m = &s_store.msg[slot];
-	memset(m, 0, sizeof *m);
-	m->flags = (uint8_t)(DMR_SMS_FLAG_USED | flags);
-	m->textLen = (uint8_t)textLen;
-	m->seq = s_store.nextSeq++;
-	m->peerId = peerId;
-	memcpy(m->text, text, textLen);
+	int o = s_store.used;
+	uint16_t seq = s_store.nextSeq++;
+	s_store.data[o + 0] = (uint8_t)(DMR_SMS_FLAG_USED | flags);
+	s_store.data[o + 1] = (uint8_t)textLen;
+	s_store.data[o + 2] = (uint8_t)(seq & 0xFF);
+	s_store.data[o + 3] = (uint8_t)(seq >> 8);
+	s_store.data[o + 4] = (uint8_t)(peerId & 0xFF);
+	s_store.data[o + 5] = (uint8_t)((peerId >> 8) & 0xFF);
+	s_store.data[o + 6] = (uint8_t)((peerId >> 16) & 0xFF);
+	s_store.data[o + 7] = (uint8_t)((peerId >> 24) & 0xFF);
+	memcpy(&s_store.data[o + SMS_ENTRY_HDR], text, (size_t)textLen);
+	s_store.used = (uint16_t)(o + need);
 	store_save();
 }
 
@@ -249,7 +257,7 @@ typedef struct
 	uint8_t  version;
 	uint8_t  numPresets;
 	uint8_t  defaultGroup;
-	uint8_t  rsvd;
+	uint8_t  maxLen;                 /* CHIRP-set max compose length (0 = default 144) */
 	uint32_t defaultDst;               /* little-endian on the wire == native */
 	char     preset[DMR_SMS_NUM_PRESETS][MSGC_PRESET_LEN];
 } dmrSmsCfg_t;
@@ -293,6 +301,14 @@ void dmrSmsDefaultRecipient(uint32_t *dst, int *group)
 	cfg_ensure();
 	if (dst)   { *dst = s_cfg.defaultDst & 0x00FFFFFF; }
 	if (group) { *group = s_cfg.defaultGroup ? 1 : 0; }
+}
+
+int dmrSmsMaxLen(void)
+{
+	cfg_ensure();
+	int m = s_cfg.maxLen;
+	if (m <= 0 || m > DMR_SMS_TEXT_MAX) { m = DMR_SMS_TEXT_MAX; }
+	return m;
 }
 
 /* ============================ checksums / CRCs =========================== */
@@ -362,7 +378,7 @@ static int build_plaintext(const char *text, int tlen, uint32_t src, uint32_t ds
 	uint8_t tms[16 + 2 * DMR_SMS_TEXT_MAX];
 	int L = tlen * 2;            /* UTF-16LE byte count */
 	int ti = 0;
-	tms[ti++] = 0x00; tms[ti++] = (uint8_t)(8 + L);
+	tms[ti++] = (uint8_t)((8 + L) >> 8); tms[ti++] = (uint8_t)(8 + L);   /* 2-byte TMS length */
 	tms[ti++] = 0xA0; tms[ti++] = 0x00; tms[ti++] = seq; tms[ti++] = 0x04;
 	tms[ti++] = 0x0D; tms[ti++] = 0x00;   /* fixed CRLF header (stock uses 0d/0a here, NOT L+3/L) */
 	tms[ti++] = 0x0A; tms[ti++] = 0x00;
@@ -440,7 +456,7 @@ int dmrSmsSend(const char *text, uint32_t dst, int group, uint8_t keyId)
 	/* 1) plaintext -> ECB-encrypt the WHOLE 16-byte blocks only; the trailing partial block
 	 *    (< 16 B) stays CLEAR, exactly like a stock TYT (its receiver expects the last
 	 *    partial block unencrypted — short SMS carry their text there). Do NOT pad first. */
-	uint8_t pt[160];
+	uint8_t pt[360];   /* IPv4(20)+UDP(8)+TMS(10)+2*144 = 326 B max */
 	/* TMS type/seq byte = 0x90 (stock "text message" flag). With 0x00 a stock TYT starts
 	 * reading the text 4 bytes early and prepends the L+3 length field as a stray char. */
 	int ptLen = build_plaintext(text, tlen, src, dst, 0x90, 0x0001, pt);

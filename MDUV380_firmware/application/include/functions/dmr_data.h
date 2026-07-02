@@ -32,7 +32,7 @@ void dmrDataTriggerReboot(void);
  * header-bit | LCSS — e.g. 0x60 data header, 0x70 rate-1/2 data, 0x20 terminator)
  * followed by 12 payload bytes (the 96 info bits the chip FEC-encodes), matching
  * the proven AES PI-header burst path (page 0x02 reg 0x00 + reg 0x50). */
-#define DMR_DATA_MAX_BURSTS  24
+#define DMR_DATA_MAX_BURSTS  40   /* up to a 144-char SMS: 6 CSBK + 2 hdr + ~28 rate-1/2 + slack */
 #define DMR_DATA_BURST_LEN   12
 
 /* Load the burst queue (bursts = count * (1 type byte + DMR_DATA_BURST_LEN payload))
