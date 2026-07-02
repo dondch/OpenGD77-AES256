@@ -364,8 +364,8 @@ static int build_plaintext(const char *text, int tlen, uint32_t src, uint32_t ds
 	int ti = 0;
 	tms[ti++] = 0x00; tms[ti++] = (uint8_t)(8 + L);
 	tms[ti++] = 0xA0; tms[ti++] = 0x00; tms[ti++] = seq; tms[ti++] = 0x04;
-	tms[ti++] = (uint8_t)(L + 3); tms[ti++] = 0x00;
-	tms[ti++] = (uint8_t)L; tms[ti++] = 0x00;
+	tms[ti++] = 0x0D; tms[ti++] = 0x00;   /* fixed CRLF header (stock uses 0d/0a here, NOT L+3/L) */
+	tms[ti++] = 0x0A; tms[ti++] = 0x00;
 	for (int i = 0; i < tlen; i++) { tms[ti++] = (uint8_t)text[i]; tms[ti++] = 0x00; }
 
 	int udpLen = 8 + ti;
@@ -437,12 +437,15 @@ int dmrSmsSend(const char *text, uint32_t dst, int group, uint8_t keyId)
 
 	uint32_t src = trxDMRID;
 
-	/* 1) plaintext -> pad to AES block -> ECB encrypt */
+	/* 1) plaintext -> ECB-encrypt the WHOLE 16-byte blocks only; the trailing partial block
+	 *    (< 16 B) stays CLEAR, exactly like a stock TYT (its receiver expects the last
+	 *    partial block unencrypted — short SMS carry their text there). Do NOT pad first. */
 	uint8_t pt[160];
-	int ptLen = build_plaintext(text, tlen, src, dst, 0x00, 0x0001, pt);
-	while (ptLen & 15) { pt[ptLen++] = 0x00; }
+	/* TMS type/seq byte = 0x90 (stock "text message" flag). With 0x00 a stock TYT starts
+	 * reading the text 4 bytes early and prepends the L+3 length field as a stray char. */
+	int ptLen = build_plaintext(text, tlen, src, dst, 0x90, 0x0001, pt);
 	for (int i = 0; i + 16 <= ptLen; i += 16) { aes256_ecb_encrypt(key, pt + i); }
-	int ctLen = ptLen;                       /* multiple of 16 */
+	int ctLen = ptLen;                       /* ct = whole enc blocks + clear partial tail */
 
 	/* 2) pdu = ct + pad(poc) + crc32, padded so (ct+4) fills whole 12-byte blocks */
 	int totalData = (((ctLen + 4) + 11) / 12) * 12;
@@ -656,9 +659,12 @@ void dmrSmsRxBurst(int rxDataType, const uint8_t *p)
 		/* Complete when the accumulated blocks form a CRC32-valid data PDU. This is
 		 * self-terminating and does NOT trust the header's block count (which can be
 		 * stale when a header is missed) — block mixing or truncation simply won't
-		 * produce a valid CRC32, so only a correct, complete PDU is accepted. The
-		 * smallest SMS is 5 rate-1/2 blocks (60 B), so don't bother checking below that. */
-		if (s_rxHaveEnc && (s_rxCount >= 5) && !s_rxReady)
+		 * produce a valid CRC32, so only a correct, complete PDU is accepted.
+		 * Minimum is 2 blocks: a stock 1-char SMS is BLOCKS 05 = 4 rate-1/2 data blocks
+		 * (a hardcoded >=5 gate here silently dropped every short message — 5+ char msgs
+		 * have 5+ data blocks and worked, 1-char have 4 and never completed). CRC32 gates
+		 * correctness, so checking from 2 up is safe. */
+		if (s_rxHaveEnc && (s_rxCount >= 2) && !s_rxReady)
 		{
 			int total = s_rxCount * 12;
 			if (total > (int)sizeof s_rxPdu) { return; }
@@ -703,8 +709,7 @@ void dmrSmsRxTick(void)
 	memcpy(pdu, s_rxPdu, pduLen);
 	s_rxReady = 0;
 
-	int ctLen = (pduLen / 16) * 16;         /* ciphertext = whole AES blocks (drops pad+crc32) */
-	if (ctLen < 16 || pduLen < 8) { return; }
+	if (pduLen < 32) { return; }            /* whole PDU is passed; decrypt derives the enc len */
 
 	/* Validate the data-PDU CRC32 over [ct+pad] before trusting the bytes. This rejects
 	 * reassemblies that mixed blocks across retransmits (a missed burst/header) — without it
@@ -725,8 +730,8 @@ void dmrSmsRxTick(void)
 	{
 		uint8_t k = (attempt == 0) ? keyId : (uint8_t)attempt;
 		if (k == 0 || k >= DMR_AES_MAX_KEYS) { continue; }
-		memcpy(tmp, pdu, ctLen);
-		int r = dmr_aes_sms_decrypt(k, tmp, ctLen, text, sizeof text);
+		memcpy(tmp, pdu, pduLen);
+		int r = dmr_aes_sms_decrypt(k, tmp, pduLen, text, sizeof text);
 		if (r > 0) { got = r; }
 	}
 	if (got <= 0) { return; }   /* wrong/no key, or not an SMS */

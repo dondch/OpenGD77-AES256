@@ -485,17 +485,22 @@ void dmr_sms_ecb_decrypt(uint8_t *payload, int len, const uint8_t key[32]) {
  * Returns text length, or -1 if not a valid IPv4/UDP packet (wrong key / not SMS). */
 int dmr_sms_rx_decrypt(uint8_t *pdu, int pdu_len, const uint8_t key[32],
                        char *out, int out_max) {
-    int i, n = 0, tlen, base;
-    if (pdu_len < 32 || (pdu_len & 15)) return -1;
-    dmr_sms_ecb_decrypt(pdu, pdu_len, key);
+    int i, n = 0, iptot, enc, tend;
+    if (pdu_len < 32) return -1;
+    /* The stock AES-256-ECB-encrypts only WHOLE 16-byte plaintext blocks; a trailing
+     * partial block (< 16 B) is carried in the CLEAR (short SMS keep their text there).
+     * Decrypt block 0 to read the IPv4 total length, then decrypt only the whole encrypted
+     * blocks and leave the clear tail. The text is UTF-16LE from byte 38 to the IP packet
+     * end (byte iptot) — NOT a fixed length field, which varies by TMS layout. The full PDU
+     * (ct + clear tail + pad + crc32) is passed in; it need not be 16-aligned. */
+    dmr_sms_ecb_decrypt(pdu, 16, key);
     if ((pdu[0] >> 4) != 4 || pdu[9] != 0x11) return -1;   /* not IPv4/UDP */
-    /* TMS text length is at IP+UDP+TMS offset: byte 36 (=2*chars), text at byte 38 */
-    tlen = pdu[36]; base = 38;
-    if (tlen <= 0 || base + tlen > pdu_len) {
-        /* fall back: scan for the UTF-16LE run */
-        tlen = pdu_len - 38; base = 38; if (tlen < 0) return -1;
-    }
-    for (i = base; i + 1 < base + tlen && n < out_max - 1; i += 2) {
+    iptot = ((int)pdu[2] << 8) | pdu[3];                   /* plaintext IP packet length */
+    if (iptot > pdu_len) { iptot = pdu_len; }
+    enc = (iptot / 16) * 16;                               /* whole encrypted blocks only */
+    if (enc > 16) { dmr_sms_ecb_decrypt(pdu + 16, enc - 16, key); }
+    tend = iptot;                                          /* text runs [38, IP packet end) */
+    for (i = 38; i + 1 < tend && n < out_max - 1; i += 2) {
         if (pdu[i+1] == 0 && pdu[i] >= 0x20 && pdu[i] < 0x7f) out[n++] = (char)pdu[i];
     }
     out[n] = 0;

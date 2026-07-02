@@ -116,7 +116,7 @@ def _crc32_dmr(pdu):  # pdu incl 4-byte placeholder; byte-pair swap, poly 0x04C1
 # ---------------- IPv4/UDP/TMS plaintext ----------------
 def build_tms_plaintext(text, src, dst, seq=0, ipid=0):
     tb=text.encode('utf-16-le'); L=len(tb)
-    tms=bytes([0x00,8+L, 0xA0,0x00,seq&0xFF,0x04, (L+3)&0xFF,0x00, L&0xFF,0x00])+tb
+    tms=bytes([0x00,8+L, 0xA0,0x00,seq&0xFF,0x04, 0x0D,0x00, 0x0A,0x00])+tb   # bytes34/36 fixed 0d/0a (CRLF), NOT L+3/L
     udp=bytes([0x0F,0xA7,0x0F,0xA7,((8+len(tms))>>8)&0xFF,(8+len(tms))&0xFF,0,0])+tms
     src_ip=bytes([0x0C,0x00,(src>>8)&0xFF,src&0xFF]); dst_ip=bytes([0xE1,0x00,(dst>>8)&0xFF,dst&0xFF])
     uc=_udpcksum(src_ip,dst_ip,udp); udp=udp[:6]+bytes([(uc>>8)&0xFF,uc&0xFF])+udp[8:]
@@ -136,11 +136,11 @@ def _csbk_preamble(dst,src,group,count,tail=0):
                     (dst>>16)&0xFF,(dst>>8)&0xFF,dst&0xFF,(src>>16)&0xFF,(src>>8)&0xFF,src&0xFF])
         out.append(bytes([DT_CSBK])+body+_hdr_crc(body,0xA5A5))
     return out
-def build_encrypted_sms(text, dst, src, key, group=True, mi=0, seq=0, ipid=0, preamble=6):
+def build_encrypted_sms(text, dst, src, key, group=True, mi=0, seq=0x90, ipid=0, preamble=6):
     """Return list of (type+12B) bursts for a stock-compatible AES-256-ECB SMS."""
     pt=build_tms_plaintext(text,src,dst,seq,ipid)
-    if len(pt)%16: pt=pt+bytes(16-len(pt)%16)            # pad plaintext to AES block
-    ct=aes256_ecb(pt,key)                                 # ECB encrypt
+    nfull=(len(pt)//16)*16                                # whole 16B blocks only
+    ct=aes256_ecb(pt[:nfull],key)+pt[nfull:]              # encrypt whole blocks; partial block stays CLEAR (stock behaviour)
     # data blocks after ENC ext header = ct split into 12B + final (pad8 + CRC32) block
     nfull=len(ct)//12; rem=len(ct)-nfull*12
     # pad ct so (ct + 4-byte CRC) fills whole 12B blocks
