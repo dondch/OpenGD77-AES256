@@ -79,12 +79,6 @@ void dmrSmsRxDiagReset(void);
  * out = [pduLen_hi, pduLen_lo, keyId, expBlocks, peer(4 LE), rawPdu...]. Returns length. */
 int  dmrSmsRxLastPdu(uint8_t *out, int maxlen);
 
-/* Chip "Received Information" RX-RAM capture: HR-C6000.c calls dmrSmsRiCapture() when the
- * chip signals a fully reassembled PDU; dmrSmsRiDump() returns the last dump over USB:
- * out = [riCount(4 LE), reg90, len_hi, len_lo, ramBytes...]. */
-void dmrSmsRiCapture(uint8_t reg90, const uint8_t *ram, int len);
-int  dmrSmsRiDump(uint8_t *out, int maxlen);
-
 /* ---- RX (main-loop context) -------------------------------------------- *
  * Decrypt a completed PDU, store it to the Inbox, and pop a notification. Safe to
  * call every main-loop tick; does nothing unless a PDU has been reassembled. */

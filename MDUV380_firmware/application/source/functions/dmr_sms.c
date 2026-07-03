@@ -614,41 +614,6 @@ static volatile uint8_t  s_diagLastKeyId DMR_AES_CCM;
 static volatile uint8_t  s_diagLastExp DMR_AES_CCM;
 static volatile uint32_t s_diagLastPeer DMR_AES_CCM;
 
-/* ---- chip "Received Information" RX-RAM capture (de-permute experiment) ---- *
- * When the HR-C6000 reports a fully reassembled+verified data PDU, HR-C6000.c reads a
- * chunk of the chip's RX data RAM and hands it here. We dump it over USB to see whether
- * the chip's own reassembly is in the correct (de-interleaved) order. */
-static volatile uint32_t s_riCount DMR_AES_CCM;   /* Received-Information ints seen */
-static volatile uint8_t  s_riReg90 DMR_AES_CCM;   /* last reg 0x90 sub-status       */
-static uint8_t  s_riBuf[160] DMR_AES_CCM;         /* last RX-RAM dump               */
-static volatile uint16_t s_riLen DMR_AES_CCM;
-
-void dmrSmsRiCapture(uint8_t reg90, const uint8_t *ram, int len)
-{
-	s_riCount++;
-	s_riReg90 = reg90;
-	if (len > (int)sizeof s_riBuf) { len = (int)sizeof s_riBuf; }
-	for (int i = 0; i < len; i++) { s_riBuf[i] = ram[i]; }
-	s_riLen = (uint16_t)len;
-}
-
-/* Fill out with [riCount(4 LE), reg90, len_hi, len_lo, ramBytes...]. Returns bytes. */
-int dmrSmsRiDump(uint8_t *out, int maxlen)
-{
-	int n = s_riLen;
-	if (n > (int)sizeof s_riBuf) { n = (int)sizeof s_riBuf; }
-	if (maxlen < 7 + n) { n = maxlen - 7; if (n < 0) n = 0; }
-	out[0] = (uint8_t)(s_riCount);
-	out[1] = (uint8_t)(s_riCount >> 8);
-	out[2] = (uint8_t)(s_riCount >> 16);
-	out[3] = (uint8_t)(s_riCount >> 24);
-	out[4] = s_riReg90;
-	out[5] = (uint8_t)(s_riLen >> 8);
-	out[6] = (uint8_t)(s_riLen);
-	for (int i = 0; i < n; i++) { out[7 + i] = s_riBuf[i]; }
-	return 7 + n;
-}
-
 /* Fill out with [pduLen_hi,pduLen_lo, keyId, expBlocks, peer(4 LE), rawPdu...]. Returns bytes.
  * pduLen (and the raw bytes) are clamped to the snapshot buffer size: a PDU longer than
  * sizeof s_diagLastPdu is stored truncated, so only that many bytes exist to dump. */

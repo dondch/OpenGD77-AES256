@@ -1317,18 +1317,6 @@ static inline void hrc6000SysReceivedInformationInt(void)
 			2. 0x00 indicates the entire information reception check error;
 			3. 0x40 indicates that a non-confirmed SMS abnormal interrupt is generated;
 	 */
-#if defined(ENABLE_DMR_DATA) && defined(ENABLE_AES)
-	// Capture the chip's reassembled data PDU for the de-permute experiment: read a big chunk
-	// of the RX data RAM (SPI1 page 0x03 from reg 0x00 — AMBE lives at 0x00, data "after 0x30")
-	// and hand it to dmr_sms for USB dump. Diagnostic only.
-	{
-		uint8_t riBuf[160];
-		if (SPI1ReadPageRegByteArray(0x03, 0x00, riBuf, sizeof riBuf) == kStatus_Success)
-		{
-			dmrSmsRiCapture(reg_0x90, riBuf, sizeof riBuf);
-		}
-	}
-#endif
 }
 
 static inline void hrc6000SysAbnormalExitInt(void)
