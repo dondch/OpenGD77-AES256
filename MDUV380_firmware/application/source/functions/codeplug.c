@@ -1443,6 +1443,27 @@ bool codeplugGetOpenGD77CustomData(CodeplugCustomDataType_t dataType, uint8_t *d
 	return false;
 }
 
+// As codeplugGetOpenGD77CustomData, but never copies more than maxLen bytes into dataBuf.
+// The stored dataLength comes from flash; a corrupt/foreign block claiming a larger length
+// would otherwise overrun the caller's fixed buffer. Callers that know their buffer size
+// (e.g. the AES key store) use this so a bad block can't clobber adjacent memory.
+bool codeplugGetOpenGD77CustomDataBounded(CodeplugCustomDataType_t dataType, uint8_t *dataBuf, int maxLen)
+{
+	codeplugCustomDataBlockHeader_t blockHeader;
+	uint32_t dataHeaderAddress;
+
+	if ((maxLen > 0) && ((dataHeaderAddress = codeplugGetOpenGD77CustomDataStartAddressForType(dataType, &blockHeader)) > 0))
+	{
+		uint32_t len = blockHeader.dataLength;
+		if (len > (uint32_t)maxLen) { len = (uint32_t)maxLen; }   // clamp to the caller's buffer
+
+		SPI_Flash_read(FLASH_ADDRESS_OFFSET + dataHeaderAddress + sizeof(codeplugCustomDataBlockHeader_t), dataBuf, len);
+		return true;
+	}
+
+	return false;
+}
+
 bool codeplugSetOpenGD77CustomData(CodeplugCustomDataType_t dataType, uint8_t *dataBuf, int len)
 {
 	codeplugCustomDataBlockHeader_t blockHeader;

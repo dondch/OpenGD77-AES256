@@ -236,7 +236,7 @@ void dmrAesLoadKeys(void)
     s_keysLoaded = 1;
     dmr_aes_clear_keys();
     s_txKeyId = 0;
-    if (!codeplugGetOpenGD77CustomData(CODEPLUG_CUSTOM_DATA_TYPE_AES_KEYS, blk)) { return; }
+    if (!codeplugGetOpenGD77CustomDataBounded(CODEPLUG_CUSTOM_DATA_TYPE_AES_KEYS, blk, AESK_BLOCK_LEN)) { return; }
     if (memcmp(blk, "AESK", 4) != 0) { return; }
     s_txKeyId = blk[5];   /* active TX key selector (0 = encrypted TX disabled) */
     for (int i = 0; i < AESK_SLOTS; i++)
@@ -256,7 +256,7 @@ uint8_t dmrAesTxKeyId(void)
 int dmrAesSetTxKeyId(uint8_t keyId)
 {
     uint8_t *blk = s_aesBlk;
-    if (!codeplugGetOpenGD77CustomData(CODEPLUG_CUSTOM_DATA_TYPE_AES_KEYS, blk) || memcmp(blk, "AESK", 4) != 0)
+    if (!codeplugGetOpenGD77CustomDataBounded(CODEPLUG_CUSTOM_DATA_TYPE_AES_KEYS, blk, AESK_BLOCK_LEN) || memcmp(blk, "AESK", 4) != 0)
     {
         memset(blk, 0, AESK_BLOCK_LEN); memcpy(blk, "AESK", 4); blk[4] = 1;
     }
@@ -270,7 +270,7 @@ int dmrAesStoreKey(uint8_t keyId, const uint8_t *key32)
 {
     uint8_t *blk = s_aesBlk;
     int slot = -1, freeSlot = -1;
-    if (!codeplugGetOpenGD77CustomData(CODEPLUG_CUSTOM_DATA_TYPE_AES_KEYS, blk) || memcmp(blk, "AESK", 4) != 0)
+    if (!codeplugGetOpenGD77CustomDataBounded(CODEPLUG_CUSTOM_DATA_TYPE_AES_KEYS, blk, AESK_BLOCK_LEN) || memcmp(blk, "AESK", 4) != 0)
     {
         memset(blk, 0, AESK_BLOCK_LEN); memcpy(blk, "AESK", 4); blk[4] = 1;
     }
@@ -313,7 +313,7 @@ int dmrAesClearKey(uint8_t keyId)
 {
     uint8_t *blk = s_aesBlk;
     int changed = 0;
-    if (!codeplugGetOpenGD77CustomData(CODEPLUG_CUSTOM_DATA_TYPE_AES_KEYS, blk) || memcmp(blk, "AESK", 4) != 0)
+    if (!codeplugGetOpenGD77CustomDataBounded(CODEPLUG_CUSTOM_DATA_TYPE_AES_KEYS, blk, AESK_BLOCK_LEN) || memcmp(blk, "AESK", 4) != 0)
     {
         return 1;   /* no block -> nothing stored for any keyId */
     }
@@ -334,7 +334,7 @@ uint16_t dmrAesGetKeyMask(void)
 {
     uint8_t *blk = s_aesBlk;
     uint16_t mask = 0;
-    if (!codeplugGetOpenGD77CustomData(CODEPLUG_CUSTOM_DATA_TYPE_AES_KEYS, blk) || memcmp(blk, "AESK", 4) != 0)
+    if (!codeplugGetOpenGD77CustomDataBounded(CODEPLUG_CUSTOM_DATA_TYPE_AES_KEYS, blk, AESK_BLOCK_LEN) || memcmp(blk, "AESK", 4) != 0)
     {
         return 0;
     }

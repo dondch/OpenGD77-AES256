@@ -435,6 +435,7 @@ int codeplugContactGetFreeIndex(void);
 bool codeplugContactGetRXGroup(int index);
 void codeplugInitChannelsPerZone(void);
 bool codeplugGetOpenGD77CustomData(CodeplugCustomDataType_t dataType, uint8_t *dataBuf);
+bool codeplugGetOpenGD77CustomDataBounded(CodeplugCustomDataType_t dataType, uint8_t *dataBuf, int maxLen);
 bool codeplugSetOpenGD77CustomData(CodeplugCustomDataType_t dataType, uint8_t *dataBuf, int len);
 
 void codeplugAllChannelsInitCache(void);
