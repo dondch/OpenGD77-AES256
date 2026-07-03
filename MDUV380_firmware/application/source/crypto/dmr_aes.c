@@ -285,6 +285,7 @@ static uint8_t le_crc4(const uint8_t *bits, int len) {
 
 void dmr_le_mi_build(uint32_t mi, uint8_t frag[7][3]) {
     uint8_t mi_bits[36];
+    frag[0][0] = frag[0][1] = frag[0][2] = 0;   /* row 0 unused (vc 1..6) — don't leave it garbage */
     for (int i = 0; i < 32; ++i) { mi_bits[i] = (uint8_t)((mi >> (31 - i)) & 1u); }
     uint8_t crc = le_crc4(mi_bits, 32);
     for (int b = 0; b < 4; ++b) { mi_bits[32 + b] = (uint8_t)((crc >> (3 - b)) & 1u); }
@@ -418,8 +419,9 @@ int dmr_le_mi_decode(const uint8_t frag[7][3], uint32_t *mi_out) {
     for (i = 0; i < 32; i++) { mi_final = (mi_final << 1) | mi_bits[i]; }
     uint8_t crc_ext = 0;
     for (i = 0; i < 4; i++) { crc_ext = (uint8_t)((crc_ext << 1) | mi_bits[32 + i]); }
-    *mi_out = mi_final;
-    return (good && (crc_ext == le_crc4(mi_bits, 32))) ? 1 : 0;
+    int ok = (good && (crc_ext == le_crc4(mi_bits, 32))) ? 1 : 0;
+    if (ok) { *mi_out = mi_final; }   /* leave *mi_out untouched on a failed/uncorrectable decode */
+    return ok;
 }
 
 /* Lowest key slot that holds a loaded key, or -1 if none. Used as a fallback keyId
@@ -494,7 +496,7 @@ void dmr_sms_ecb_decrypt(uint8_t *payload, int len, const uint8_t key[32]) {
 int dmr_sms_rx_decrypt(uint8_t *pdu, int pdu_len, const uint8_t key[32],
                        char *out, int out_max) {
     int i, n = 0, iptot, enc, tend;
-    if (pdu_len < 32) return -1;
+    if (pdu_len < 32 || out_max <= 0) return -1;   /* need room for the NUL terminator write */
     /* The stock AES-256-ECB-encrypts only WHOLE 16-byte plaintext blocks; a trailing
      * partial block (< 16 B) is carried in the CLEAR (short SMS keep their text there).
      * Decrypt block 0 to read the IPv4 total length, then decrypt only the whole encrypted
