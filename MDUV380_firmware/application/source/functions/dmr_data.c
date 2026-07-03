@@ -52,9 +52,9 @@ void dmrDataTriggerReboot(void)
  * would corrupt a normal voice TX). The resulting ambebuffer shift is harmless —
  * the AMBE codec addresses its buffers via the pointer passed in r1 (proven on-air). */
 static uint8_t          s_bursts[DMR_DATA_MAX_BURSTS][1 + DMR_DATA_BURST_LEN];
-static uint8_t          s_burstCount;
-static uint8_t          s_burstIndex;
-static volatile uint8_t s_dataTxActive;
+static volatile uint8_t s_burstCount;   /* read in the HR-C6000 ISR (dmrDataTxNextBurst), so */
+static volatile uint8_t s_burstIndex;   /* volatile: dmrDataTxEnd's resets must not reorder  */
+static volatile uint8_t s_dataTxActive; /* past the active=0 store the ISR gates on           */
 static uint16_t         s_txFinishPolls;
 
 #define DMR_DATA_TX_FINISH_POLL_MS   25
