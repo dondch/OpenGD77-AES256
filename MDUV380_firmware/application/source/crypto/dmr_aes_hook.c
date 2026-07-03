@@ -586,7 +586,9 @@ void dmrAesTxCodecFrame(uint16_t *b49)
  * free-running counter dmrAesTxCodecFrame just advanced: f = s_txFrameCnt-1. */
 void dmrAesTxStuffMI(uint16_t *b72)
 {
-    if (!s_txActive) { return; }
+    /* s_txFrameCnt==0 would underflow f to 0xFFFFFFFF (stale frag nibble): can happen if an
+     * ISR dmrAesTxStart resets the counter between the encode and this stuff. Guard both. */
+    if (!s_txActive || s_txFrameCnt == 0) { return; }
     uint32_t f = s_txFrameCnt - 1;          /* the codeword dmrAesTxCodecFrame just processed */
     int cw = (int)(f % 3);                   /* codeword index within the burst (0..2) */
     int vc = (int)((f / 3) % 6) + 1;         /* voice frame within the superframe (1..6) */
