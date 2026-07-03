@@ -2231,7 +2231,7 @@ void uiUtilityRenderHeader(bool isVFODualWatchScanning, bool isVFOSweepScanning,
 		if (unread > 0)
 		{
 			int16_t ex = DISPLAY_SIZE_X - 24;
-			int16_t ey = DISPLAY_Y_POS_BAR + 2;
+			int16_t ey = DISPLAY_Y_POS_BAR + 6;
 			displayDrawRect(ex, ey, 13, 9, true);              // envelope body
 			displayDrawLine(ex, ey, ex + 6, ey + 4, true);     // flap (left)
 			displayDrawLine(ex + 12, ey, ex + 6, ey + 4, true);// flap (right)
