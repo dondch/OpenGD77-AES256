@@ -16,6 +16,7 @@
 #include "functions/trx.h"
 #include "functions/ticks.h"
 #include "functions/codeplug.h"
+#include "functions/settings.h"   /* currentChannelData (per-channel encrypt byte, voice logic) */
 #include "crypto/dmr_aes.h"
 #include "crypto/dmr_aes_hook.h"
 #include "user_interface/menuSystem.h"   /* uiNotificationShow + NOTIFICATION_* */
@@ -314,6 +315,8 @@ typedef struct
 	uint8_t  maxLen;                 /* CHIRP-set max compose length (0 = default 144) */
 	uint32_t defaultDst;               /* little-endian on the wire == native */
 	char     preset[DMR_SMS_NUM_PRESETS][MSGC_PRESET_LEN];
+	uint8_t  smsEncrypt;             /* SMS-encrypt master gate: 0 = default (on), 1 = off/clear, 2 = on.
+	                                  * Appended last so an old (shorter) MSGC block reads as 0 = default. */
 } dmrSmsCfg_t;
 
 static dmrSmsCfg_t s_cfg DMR_AES_CCM;
@@ -322,7 +325,9 @@ static uint8_t     s_cfgLoaded DMR_AES_CCM;
 static void cfg_load(void)
 {
 	s_cfgLoaded = 1;
-	if (codeplugGetOpenGD77CustomData(CODEPLUG_CUSTOM_DATA_TYPE_MSG_CONFIG, (uint8_t *)&s_cfg) &&
+	memset(&s_cfg, 0, sizeof s_cfg);   /* default any field a shorter/absent block omits (smsEncrypt=0) */
+	/* Bounded read: dataLength comes from flash — a corrupt/oversized block must not overrun s_cfg. */
+	if (codeplugGetOpenGD77CustomDataBounded(CODEPLUG_CUSTOM_DATA_TYPE_MSG_CONFIG, (uint8_t *)&s_cfg, (int)sizeof s_cfg) &&
 			(memcmp(s_cfg.magic, "MSGC", 4) == 0))
 	{
 		/* Force-terminate every preset row: dmrSmsPresetGet() returns these as C strings
@@ -367,6 +372,31 @@ int dmrSmsMaxLen(void)
 	int m = s_cfg.maxLen;
 	if (m <= 0 || m > DMR_SMS_TEXT_MAX) { m = DMR_SMS_TEXT_MAX; }
 	return m;
+}
+
+/* SMS-encrypt master gate (CHIRP "Encrypt SMS"): 1 = encrypt-per-channel-like-voice,
+ * 0 = always cleartext. Default (unset MSGC byte) = 1 to preserve the encrypted behaviour. */
+int dmrSmsEncryptEnabled(void)
+{
+	cfg_ensure();
+	return (s_cfg.smsEncrypt == 1) ? 0 : 1;   /* 1 = force clear; 0(default)/2 = encrypt */
+}
+
+/* AES TX key for the current channel — a mirror of hrc6000ResolveAesTxKeyId (HR-C6000.c) so
+ * SMS encryption follows the exact same per-channel logic as voice: the global TX selector,
+ * overridden by the channel encrypt byte (0xFF -> clear, 1..15 -> key slot, 0 -> inherit).
+ * Byte 41 is shared with optional-DMR-ID, which wins (then the channel isn't an encrypt slot). */
+static uint8_t smsResolveTxKeyId(void)
+{
+	uint8_t keyId = dmrAesTxKeyId();
+	if ((currentChannelData != NULL) &&
+			(codeplugChannelGetFlag(currentChannelData, CHANNEL_FLAG_OPTIONAL_DMRID) == 0))
+	{
+		uint8_t chEnc = currentChannelData->encrypt;
+		if (chEnc == 0xFF) { keyId = 0; }
+		else if ((chEnc >= 1) && (chEnc < DMR_AES_MAX_KEYS)) { keyId = chEnc; }
+	}
+	return keyId;
 }
 
 /* ============================ checksums / CRCs =========================== */
@@ -497,29 +527,26 @@ int dmrSmsSend(const char *text, uint32_t dst, int group, uint8_t keyId)
 	if (tlen > DMR_SMS_TEXT_MAX) { tlen = DMR_SMS_TEXT_MAX; }
 	if (dmrDataTxActive()) { return -2; }   /* a data call is already keyed */
 
-	/* Resolve the AES key: caller-supplied id, else the global TX selector, else any
-	 * loaded key (so per-channel-encryption radios with no global TX key still send —
-	 * e.g. KEY1 in slot 1). The ENC ext header signals this key id to the receiver. */
-	if (keyId == 0) { keyId = dmrAesTxKeyId(); }
-	if (dmr_aes_key_ptr(keyId) == NULL)
-	{
-		int fk = dmr_aes_first_keyid();
-		if (fk > 0) { keyId = (uint8_t)fk; }   /* slot 0 = "encryption off", never a usable key id */
-	}
-	const uint8_t *key = dmr_aes_key_ptr(keyId);
-	if (key == NULL) { return -3; }          /* no usable key loaded */
+	/* Decide encrypt-or-clear, following the VOICE key-selection logic gated by the CHIRP
+	 * "Encrypt SMS" master switch: gate OFF -> always cleartext (even on an encrypted channel);
+	 * ON -> the per-channel encrypt byte exactly like voice (0xFF or no loaded key -> clear,
+	 * 1..15 -> that key slot, 0 -> the global TX selector). An explicit caller keyId (CPS/bench)
+	 * overrides the gate. When encrypting, the ENC ext header signals the key id to the receiver. */
+	if (keyId == 0 && dmrSmsEncryptEnabled()) { keyId = smsResolveTxKeyId(); }
+	const uint8_t *key = (keyId != 0) ? dmr_aes_key_ptr(keyId) : NULL;
+	int encrypt = (key != NULL);             /* resolved to a loaded key -> encrypt; else cleartext */
 
 	uint32_t src = trxDMRID;
 
-	/* 1) plaintext -> ECB-encrypt the WHOLE 16-byte blocks only; the trailing partial block
-	 *    (< 16 B) stays CLEAR, exactly like a stock TYT (its receiver expects the last
-	 *    partial block unencrypted — short SMS carry their text there). Do NOT pad first. */
+	/* 1) plaintext. When encrypting, ECB-encrypt the WHOLE 16-byte blocks only; the trailing
+	 *    partial block (< 16 B) stays CLEAR, exactly like a stock TYT. Cleartext SMS skips the
+	 *    encryption (same IPv4/UDP/TMS structure, and no ENC header emitted below). Do NOT pad. */
 	uint8_t pt[360];   /* IPv4(20)+UDP(8)+TMS(10)+2*144 = 326 B max */
 	/* TMS type/seq byte = 0x90 (stock "text message" flag). With 0x00 a stock TYT starts
 	 * reading the text 4 bytes early and prepends the L+3 length field as a stray char. */
 	int ptLen = build_plaintext(text, tlen, src, dst, 0x90, 0x0001, pt);
-	for (int i = 0; i + 16 <= ptLen; i += 16) { aes256_ecb_encrypt(key, pt + i); }
-	int ctLen = ptLen;                       /* ct = whole enc blocks + clear partial tail */
+	if (encrypt) { for (int i = 0; i + 16 <= ptLen; i += 16) { aes256_ecb_encrypt(key, pt + i); } }
+	int ctLen = ptLen;                       /* ct = whole enc blocks + clear tail (or all clear) */
 
 	/* 2) pdu = ct + pad(poc) + crc32, padded so (ct+4) fills whole 12-byte blocks */
 	int totalData = (((ctLen + 4) + 11) / 12) * 12;
@@ -532,13 +559,13 @@ int dmrSmsSend(const char *text, uint32_t dst, int group, uint8_t keyId)
 	pdu[totalData - 4] = (uint8_t)(crc >> 24); pdu[totalData - 3] = (uint8_t)(crc >> 16);
 	pdu[totalData - 2] = (uint8_t)(crc >> 8);  pdu[totalData - 1] = (uint8_t)crc;
 	int nDataBlocks = totalData / 12;
-	int nblocks = 1 + nDataBlocks;           /* +1 ENC ext header block */
+	int nblocks = (encrypt ? 1 : 0) + nDataBlocks;  /* +1 ENC ext header block only when encrypting */
 
 	/* 3) build the burst queue: CSBK preamble + 2 headers + rate-1/2 blocks */
 	static uint8_t q[DMR_DATA_MAX_BURSTS * 13];
 	int n = 0;
 	int preamble = 6;
-	int tail = 2 + nDataBlocks;              /* headers + data blocks after the CSBKs */
+	int tail = (encrypt ? 2 : 1) + nDataBlocks;  /* headers (Unconfirmed [+ ENC]) + data blocks after CSBKs */
 	uint8_t g = group ? 0x80 : 0x00;
 	uint8_t gc = group ? 0xC0 : 0x80;
 	for (int i = 0; i < preamble; i++)
@@ -562,7 +589,8 @@ int dmrSmsSend(const char *text, uint32_t dst, int group, uint8_t keyId)
 		if (n >= DMR_DATA_MAX_BURSTS) { return -5; }
 		n = append_burst(q, n, DTB_DATA_HEADER, p12);
 	}
-	/* ENC extended header (SAP04 IP, MFID Moto, ALG05 AES256, key id, MI=0) */
+	/* ENC extended header (SAP04 IP, MFID Moto, ALG05 AES256, key id, MI=0) — encrypted SMS only */
+	if (encrypt)
 	{
 		uint8_t e[10] = { 0x4F, 0x10, 0x51, keyId, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
 		uint8_t p12[12]; memcpy(p12, e, 10); hdr_crc(e, 10, 0xCCCC, p12 + 10);
@@ -599,6 +627,7 @@ static volatile uint16_t s_rxPduLen DMR_AES_CCM;
 static volatile uint32_t s_rxPeer DMR_AES_CCM;
 static volatile uint8_t  s_rxPeerGroup DMR_AES_CCM;
 static volatile uint8_t  s_rxPeerKeyId DMR_AES_CCM;
+static volatile uint8_t  s_rxPeerEnc DMR_AES_CCM;   /* 1 = PDU carried the ENC header (decrypt); 0 = cleartext */
 /* diagnostic counters (visible on the Messages home screen) to localise RX failures */
 static volatile uint32_t s_diagData   DMR_AES_CCM; /* ALL data-sync-class bursts the chip delivered */
 static volatile uint32_t s_diagHdrOk  DMR_AES_CCM; /* type-6 data-header, CRC OK   */
@@ -704,8 +733,10 @@ void dmrSmsRxBurst(int rxDataType, const uint8_t *p)
 		 * Minimum is 2 blocks: a stock 1-char SMS is BLOCKS 05 = 4 rate-1/2 data blocks
 		 * (a hardcoded >=5 gate here silently dropped every short message — 5+ char msgs
 		 * have 5+ data blocks and worked, 1-char have 4 and never completed). CRC32 gates
-		 * correctness, so checking from 2 up is safe. */
-		if (s_rxHaveEnc && (s_rxCount >= 2) && !s_rxReady)
+		 * correctness, so checking from 2 up is safe. Gate on s_rxHaveHeader (not s_rxHaveEnc)
+		 * so a CLEARTEXT SMS (no ENC header) also completes; the IPv4/UDP check in the tick
+		 * rejects non-SMS data PDUs, and s_rxHaveEnc is carried through to pick decrypt vs clear. */
+		if (s_rxHaveHeader && (s_rxCount >= 2) && !s_rxReady)
 		{
 			int total = s_rxCount * 12;
 			if (total > (int)sizeof s_rxPdu) { return; }
@@ -723,7 +754,8 @@ void dmrSmsRxBurst(int rxDataType, const uint8_t *p)
 			s_rxPeer = s_rxSrc;
 			s_rxPeerGroup = s_rxGroup;
 			s_rxPeerKeyId = s_rxKeyId;
-			s_rxReady = 1;          /* main loop will decrypt + store */
+			s_rxPeerEnc = s_rxHaveEnc;   /* decrypt if the ENC header was seen, else read cleartext */
+			s_rxReady = 1;          /* main loop will decrypt (or read cleartext) + store */
 			s_diagPdu++;
 			/* snapshot raw (still-encrypted) PDU for USB inspection (clamped to the
 			 * snapshot buffer — the reported length must never exceed the bytes stored) */
@@ -747,6 +779,7 @@ void dmrSmsRxTick(void)
 	uint32_t peer = s_rxPeer;
 	uint8_t  group = s_rxPeerGroup;
 	uint8_t  keyId = s_rxPeerKeyId;
+	uint8_t  enc = s_rxPeerEnc;
 	if (pduLen > (int)sizeof pdu) { pduLen = (int)sizeof pdu; }
 	memcpy(pdu, s_rxPdu, pduLen);
 	s_rxReady = 0;
@@ -762,21 +795,29 @@ void dmrSmsRxTick(void)
 		if (crc32_dmr(pdu, pduLen) != want) { return; }   /* corrupted reassembly -> drop */
 	}
 
-	/* Try the signalled key id first, then every loaded key (decrypt is destructive,
-	 * so each attempt works on a fresh copy of the ciphertext). */
 	char text[DMR_SMS_TEXT_MAX + 1];
-	uint8_t tmp[384];
 	int got = -1;
 
-	for (int attempt = 0; attempt <= DMR_AES_MAX_KEYS && got < 0; attempt++)
+	if (enc)
 	{
-		uint8_t k = (attempt == 0) ? keyId : (uint8_t)attempt;
-		if (k == 0 || k >= DMR_AES_MAX_KEYS) { continue; }
-		memcpy(tmp, pdu, pduLen);
-		int r = dmr_aes_sms_decrypt(k, tmp, pduLen, text, sizeof text);
-		if (r > 0) { got = r; }
+		/* Encrypted: try the signalled key id first, then every loaded key (decrypt is
+		 * destructive, so each attempt works on a fresh copy of the ciphertext). */
+		uint8_t tmp[384];
+		for (int attempt = 0; attempt <= DMR_AES_MAX_KEYS && got < 0; attempt++)
+		{
+			uint8_t k = (attempt == 0) ? keyId : (uint8_t)attempt;
+			if (k == 0 || k >= DMR_AES_MAX_KEYS) { continue; }
+			memcpy(tmp, pdu, pduLen);
+			int r = dmr_aes_sms_decrypt(k, tmp, pduLen, text, sizeof text);
+			if (r > 0) { got = r; }
+		}
 	}
-	if (got <= 0) { return; }   /* wrong/no key, or not an SMS */
+	else
+	{
+		/* Cleartext SMS: the reassembled PDU IS the plaintext IPv4/UDP/TMS packet. */
+		got = dmr_sms_text_from_plaintext(pdu, pduLen, text, sizeof text);
+	}
+	if (got <= 0) { return; }   /* wrong/no key, not IPv4/UDP, or not an SMS */
 
 	store_add(DMR_SMS_FLAG_UNREAD | (group ? DMR_SMS_FLAG_GROUP : 0), peer, text, got);
 	s_diagMsg++;

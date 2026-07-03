@@ -493,28 +493,39 @@ void dmr_sms_ecb_decrypt(uint8_t *payload, int len, const uint8_t key[32]) {
  *  key      = 32-byte AES-256 key (KEY1 order, as in CPS).
  *  out/out_max = ASCII output buffer for the message text.
  * Returns text length, or -1 if not a valid IPv4/UDP packet (wrong key / not SMS). */
-int dmr_sms_rx_decrypt(uint8_t *pdu, int pdu_len, const uint8_t key[32],
-                       char *out, int out_max) {
-    int i, n = 0, iptot, enc, tend;
-    if (pdu_len < 32 || out_max <= 0) return -1;   /* need room for the NUL terminator write */
-    /* The stock AES-256-ECB-encrypts only WHOLE 16-byte plaintext blocks; a trailing
-     * partial block (< 16 B) is carried in the CLEAR (short SMS keep their text there).
-     * Decrypt block 0 to read the IPv4 total length, then decrypt only the whole encrypted
-     * blocks and leave the clear tail. The text is UTF-16LE from byte 38 to the IP packet
-     * end (byte iptot) — NOT a fixed length field, which varies by TMS layout. The full PDU
-     * (ct + clear tail + pad + crc32) is passed in; it need not be 16-aligned. */
-    dmr_sms_ecb_decrypt(pdu, 16, key);
+/* Extract the UTF-16LE message text from an already-PLAINTEXT IPv4/UDP/TMS SMS PDU
+ * (the cleartext path uses this directly; the decrypt path calls it after ECB-decrypting).
+ * Text runs from byte 38 to the IP total-length end. Returns text len, or -1 if not IPv4/UDP. */
+int dmr_sms_text_from_plaintext(const uint8_t *pdu, int pdu_len, char *out, int out_max) {
+    int i, n = 0, iptot, tend;
+    if (pdu_len < 32 || out_max <= 0) return -1;
     if ((pdu[0] >> 4) != 4 || pdu[9] != 0x11) return -1;   /* not IPv4/UDP */
-    iptot = ((int)pdu[2] << 8) | pdu[3];                   /* plaintext IP packet length */
+    iptot = ((int)pdu[2] << 8) | pdu[3];                   /* IP packet length */
     if (iptot > pdu_len) { iptot = pdu_len; }
-    enc = (iptot / 16) * 16;                               /* whole encrypted blocks only */
-    if (enc > 16) { dmr_sms_ecb_decrypt(pdu + 16, enc - 16, key); }
     tend = iptot;                                          /* text runs [38, IP packet end) */
     for (i = 38; i + 1 < tend && n < out_max - 1; i += 2) {
         if (pdu[i+1] == 0 && pdu[i] >= 0x20 && pdu[i] < 0x7f) out[n++] = (char)pdu[i];
     }
     out[n] = 0;
     return n;
+}
+
+int dmr_sms_rx_decrypt(uint8_t *pdu, int pdu_len, const uint8_t key[32],
+                       char *out, int out_max) {
+    int iptot, enc;
+    if (pdu_len < 32 || out_max <= 0) return -1;   /* need room for the NUL terminator write */
+    /* The stock AES-256-ECB-encrypts only WHOLE 16-byte plaintext blocks; a trailing
+     * partial block (< 16 B) is carried in the CLEAR (short SMS keep their text there).
+     * Decrypt block 0 to read the IPv4 total length, then decrypt only the whole encrypted
+     * blocks and leave the clear tail. The full PDU (ct + clear tail + pad + crc32) is passed
+     * in; it need not be 16-aligned. Text extraction is shared with the cleartext path. */
+    dmr_sms_ecb_decrypt(pdu, 16, key);
+    if ((pdu[0] >> 4) != 4 || pdu[9] != 0x11) return -1;   /* not IPv4/UDP */
+    iptot = ((int)pdu[2] << 8) | pdu[3];                   /* plaintext IP packet length */
+    if (iptot > pdu_len) { iptot = pdu_len; }
+    enc = (iptot / 16) * 16;                               /* whole encrypted blocks only */
+    if (enc > 16) { dmr_sms_ecb_decrypt(pdu + 16, enc - 16, key); }
+    return dmr_sms_text_from_plaintext(pdu, pdu_len, out, out_max);
 }
 
 /* On-device SMS decrypt test: decrypt ct with stored key slot, return text length. */

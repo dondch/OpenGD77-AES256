@@ -94,14 +94,17 @@ void dmrSmsDefaultRecipient(uint32_t *dst, int *group);
 /* CHIRP-configurable max compose length, clamped to [1, DMR_SMS_TEXT_MAX]; the MSGC
  * maxLen byte (0 or out-of-range -> DMR_SMS_TEXT_MAX). Limits on-radio composing only. */
 int  dmrSmsMaxLen(void);
+/* CHIRP "Encrypt SMS" master gate: 1 = encrypt per-channel like voice, 0 = always cleartext.
+ * Default (unset MSGC byte) = 1, preserving the encrypted behaviour. */
+int  dmrSmsEncryptEnabled(void);
 
 /* ---- TX ---------------------------------------------------------------- *
- * Build a stock-TYT-compatible AES-256-ECB encrypted SMS and key a data call.
+ * Build a stock-TYT-compatible SMS and key a data call. Encrypted (AES-256-ECB + ENC header)
+ * or cleartext per the CHIRP master gate and the channel's encrypt byte (voice logic).
  *   text  : ASCII message (encoded UTF-16LE on the wire)
  *   dst   : destination talkgroup (group!=0) or DMR ID (group==0)
- *   keyId : AES key slot 1..15 (0 -> use the global TX key)
- * Returns 0 on success, <0 on error (no key / busy / bad args). Also files the
- * message into the Sent folder. */
+ *   keyId : explicit AES key slot 1..15 (0 -> follow the gate + per-channel voice logic)
+ * Returns 0 on success, <0 on error (busy / bad args). Also files the message into Sent. */
 int  dmrSmsSend(const char *text, uint32_t dst, int group, uint8_t keyId);
 
 #endif /* ENABLE_DMR_DATA && ENABLE_AES */
