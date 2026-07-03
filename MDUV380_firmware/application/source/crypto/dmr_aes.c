@@ -217,16 +217,24 @@ size_t dmr_aes_voice_frame(dmr_aes_ctx_t *c, uint16_t *b49, size_t bitpos) {
     size_t lastoct = 16 + (bitpos + 48) / 8;
     int nblk = (int)((lastoct + 16) / 16);                    /* ceil((lastoct+1)/16) */
     uint8_t ks[16 * 18];
-    if (nblk > 18) { nblk = 18; }
+    if (nblk > 18) {
+        /* The keystream for this bit offset would exceed the buffer — only reachable if
+         * bitpos ran far past a normal superframe (a missed reset). FAIL CLOSED: on TX we
+         * must never emit these AMBE param bits in the clear, so mute the frame (zero the
+         * 49 params) instead of skipping the XOR and leaking plaintext. Harmless on RX
+         * (the frame couldn't be decrypted correctly anyway). */
+        for (int i = 0; i < 49; ++i) { b49[i] = 0; }
+        return bitpos + 56;
+    }
     aes256_ofb_keystream(c->iv, c->key, ks, nblk);
 
     for (int i = 0; i < 49; ++i) {
         size_t j   = bitpos + (size_t)i;
         size_t oct = 16 + j / 8;                              /* skip 16-byte discard */
-        if (oct < sizeof(ks)) {
-            uint8_t bit = (uint8_t)((ks[oct] >> (7 - (j & 7))) & 1u);
-            b49[i] ^= bit;
-        }
+        /* oct <= lastoct < nblk*16 <= sizeof(ks) here (nblk>18 handled above), so every
+         * param bit is always covered — no fail-open skip. */
+        uint8_t bit = (uint8_t)((ks[oct] >> (7 - (j & 7))) & 1u);
+        b49[i] ^= bit;
     }
     return bitpos + 56;
 }
