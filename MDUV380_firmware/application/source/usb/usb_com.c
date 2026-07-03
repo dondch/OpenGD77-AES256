@@ -685,7 +685,7 @@ static void cpsHandleCommand(void)
 		case 0x92: // DIAG: decrypt data-SMS [2]=keyId [3]=ctLen [4..]=ct -> [cmd, textLen|0xFF, text...]
 			{
 				int ctlen = com_requestbuffer[3];
-				char txt[80];
+				char txt[145];   /* DMR_SMS_TEXT_MAX(144) + NUL (macro not visible in AES-only builds) */
 				int tn = dmr_aes_sms_decrypt(com_requestbuffer[2], (uint8_t *)&com_requestbuffer[4], ctlen, txt, sizeof txt);
 				usbComSendBuf[0] = com_requestbuffer[0];
 				usbComSendBuf[1] = (tn < 0) ? 0xFF : (uint8_t)tn;

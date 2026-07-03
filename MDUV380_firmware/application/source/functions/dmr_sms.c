@@ -72,6 +72,25 @@ static void store_blank(void)
 	s_store.nextSeq = 1;
 }
 
+/* Walk the packed entry chain: every entry must lie fully inside used[] with a sane
+ * textLen, and the chain must tile data[] exactly up to used. Rejects a corrupted
+ * flash block whose lengths would otherwise index garbage entry boundaries. */
+static int store_chain_valid(void)
+{
+	int o = 0;
+	while (o < (int)s_store.used)
+	{
+		if ((o + SMS_ENTRY_HDR > (int)s_store.used) ||
+				(s_store.data[o + 1] > DMR_SMS_TEXT_MAX) ||
+				(o + entry_size(o) > (int)s_store.used))
+		{
+			return 0;
+		}
+		o += entry_size(o);
+	}
+	return 1;
+}
+
 void dmrSmsInit(void)
 {
 	uint8_t *blk = (uint8_t *)&s_store;
@@ -80,11 +99,11 @@ void dmrSmsInit(void)
 	dmrAesLoadKeys();   /* ensure the key store is populated for RX decrypt */
 	if (codeplugGetOpenGD77CustomData(CODEPLUG_CUSTOM_DATA_TYPE_MESSAGES, blk) &&
 			(memcmp(s_store.magic, "MSGV", 4) == 0) && (s_store.version == 2) &&
-			(s_store.used <= DMR_SMS_STORE_DATA))
+			(s_store.used <= DMR_SMS_STORE_DATA) && store_chain_valid())
 	{
 		return;   /* valid variable-length store loaded from flash */
 	}
-	store_blank();      /* fresh, or an old "MSGS" v1 block -> start empty */
+	store_blank();      /* fresh, corrupted, or an old "MSGS" v1 block -> start empty */
 }
 
 static void store_ensure(void) { if (!s_loaded) { dmrSmsInit(); } }
@@ -211,6 +230,40 @@ void dmrSmsDeleteAll(int outgoing)
 	if (changed) { store_save(); }
 }
 
+/* Renumber every entry's seq to 1..N preserving age order (oldest = 1). Called when the
+ * 16-bit nextSeq wraps, so "newest = highest seq" ordering and lowest-seq eviction stay
+ * correct across the wrap. Flag bit 0x80 is a transient "renumbered" marker (cleared
+ * before returning, never persisted set). */
+#define SMS_FLAG_TMP_MARK  0x80
+static void seq_renumber(void)
+{
+	int count = 0;
+	for (int o = 0; o + SMS_ENTRY_HDR <= (int)s_store.used; o += entry_size(o))
+	{
+		s_store.data[o] &= (uint8_t)~SMS_FLAG_TMP_MARK;
+		count++;
+	}
+	for (int newSeq = count; newSeq >= 1; newSeq--)
+	{
+		int bestOff = -1; uint16_t bestSq = 0;
+		for (int o = 0; o + SMS_ENTRY_HDR <= (int)s_store.used; o += entry_size(o))
+		{
+			if (s_store.data[o] & SMS_FLAG_TMP_MARK) { continue; }
+			uint16_t sq = entry_seq(o);
+			if (bestOff < 0 || sq >= bestSq) { bestSq = sq; bestOff = o; }
+		}
+		if (bestOff < 0) { break; }
+		s_store.data[bestOff + 2] = (uint8_t)(newSeq & 0xFF);
+		s_store.data[bestOff + 3] = (uint8_t)(newSeq >> 8);
+		s_store.data[bestOff] |= SMS_FLAG_TMP_MARK;
+	}
+	for (int o = 0; o + SMS_ENTRY_HDR <= (int)s_store.used; o += entry_size(o))
+	{
+		s_store.data[o] &= (uint8_t)~SMS_FLAG_TMP_MARK;
+	}
+	s_store.nextSeq = (uint16_t)(count + 1);
+}
+
 /* Insert a new message, evicting the globally-oldest (lowest seq) until it fits. */
 static void store_add(uint8_t flags, uint32_t peerId, const char *text, int textLen)
 {
@@ -233,6 +286,7 @@ static void store_add(uint8_t flags, uint32_t peerId, const char *text, int text
 	}
 
 	int o = s_store.used;
+	if (s_store.nextSeq == 0) { seq_renumber(); }   /* 16-bit seq wrapped -> renumber by age */
 	uint16_t seq = s_store.nextSeq++;
 	s_store.data[o + 0] = (uint8_t)(DMR_SMS_FLAG_USED | flags);
 	s_store.data[o + 1] = (uint8_t)textLen;
@@ -271,6 +325,10 @@ static void cfg_load(void)
 	if (codeplugGetOpenGD77CustomData(CODEPLUG_CUSTOM_DATA_TYPE_MSG_CONFIG, (uint8_t *)&s_cfg) &&
 			(memcmp(s_cfg.magic, "MSGC", 4) == 0))
 	{
+		/* Force-terminate every preset row: dmrSmsPresetGet() returns these as C strings
+		 * and the compose copy reads up to dmrSmsMaxLen() (144) chars, so an unterminated
+		 * 48-byte row written by CHIRP must not run into the next row / off the struct. */
+		for (int i = 0; i < DMR_SMS_NUM_PRESETS; i++) { s_cfg.preset[i][MSGC_PRESET_LEN - 1] = 0; }
 		return;
 	}
 	memset(&s_cfg, 0, sizeof s_cfg);
@@ -446,7 +504,7 @@ int dmrSmsSend(const char *text, uint32_t dst, int group, uint8_t keyId)
 	if (dmr_aes_key_ptr(keyId) == NULL)
 	{
 		int fk = dmr_aes_first_keyid();
-		if (fk > 0) { keyId = (uint8_t)fk; }
+		if (fk > 0) { keyId = (uint8_t)fk; }   /* slot 0 = "encryption off", never a usable key id */
 	}
 	const uint8_t *key = dmr_aes_key_ptr(keyId);
 	if (key == NULL) { return -3; }          /* no usable key loaded */
@@ -591,11 +649,13 @@ int dmrSmsRiDump(uint8_t *out, int maxlen)
 	return 7 + n;
 }
 
-/* Fill out with [pduLen_hi,pduLen_lo, keyId, expBlocks, peer(4 LE), rawPdu...]. Returns bytes. */
+/* Fill out with [pduLen_hi,pduLen_lo, keyId, expBlocks, peer(4 LE), rawPdu...]. Returns bytes.
+ * pduLen (and the raw bytes) are clamped to the snapshot buffer size: a PDU longer than
+ * sizeof s_diagLastPdu is stored truncated, so only that many bytes exist to dump. */
 int dmrSmsRxLastPdu(uint8_t *out, int maxlen)
 {
 	int n = s_diagLastPduLen;
-	if (n > 384) { n = 384; }
+	if (n > (int)sizeof s_diagLastPdu) { n = (int)sizeof s_diagLastPdu; }
 	if (maxlen < 8 + n) { n = maxlen - 8; if (n < 0) n = 0; }
 	out[0] = (uint8_t)(s_diagLastPduLen >> 8);
 	out[1] = (uint8_t)(s_diagLastPduLen);
@@ -700,8 +760,9 @@ void dmrSmsRxBurst(int rxDataType, const uint8_t *p)
 			s_rxPeerKeyId = s_rxKeyId;
 			s_rxReady = 1;          /* main loop will decrypt + store */
 			s_diagPdu++;
-			/* snapshot raw (still-encrypted) PDU for USB inspection */
-			s_diagLastPduLen = (uint16_t)total;
+			/* snapshot raw (still-encrypted) PDU for USB inspection (clamped to the
+			 * snapshot buffer — the reported length must never exceed the bytes stored) */
+			s_diagLastPduLen = (uint16_t)((total > (int)sizeof s_diagLastPdu) ? (int)sizeof s_diagLastPdu : total);
 			s_diagLastKeyId = s_rxKeyId;
 			s_diagLastExp = s_rxExpBlocks;
 			s_diagLastPeer = s_rxSrc;
