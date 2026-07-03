@@ -545,6 +545,11 @@ void applicationMainTask(void)
 	aprsBeaconingInit();
 	aprsBeaconingStart();
 
+#if defined(ENABLE_AES)
+	dmrAesLoadKeys();   // eager thread-context key load at boot: the HR-C6000 RX/TX ISRs must
+	                    // never trigger the (blocking, mutex-less) SPI-flash key load themselves.
+#endif
+
 #if defined(ENABLE_DMR_DATA) && defined(ENABLE_AES)
 	dmrSmsInit();   // load the encrypted-SMS store from flash
 #endif

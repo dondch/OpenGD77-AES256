@@ -248,7 +248,8 @@ void dmrAesLoadKeys(void)
 
 uint8_t dmrAesTxKeyId(void)
 {
-    if (!s_keysLoaded) { dmrAesLoadKeys(); }
+    /* Keys are eager-loaded at boot (applicationMain) and reloaded by the thread-context
+     * CPS/menu writers; never lazy-load here — this runs in the HR-C6000 timeslot ISR. */
     return s_txKeyId;
 }
 
@@ -354,7 +355,8 @@ uint16_t dmrAesGetKeyMask(void)
 void dmrAesRxPI(const uint8_t *pi, int len)
 {
     dmr_pi_t p;
-    if (!s_keysLoaded) { dmrAesLoadKeys(); }
+    /* ISR context (HR-C6000 sys-interrupt): never lazy-load keys here — they are
+     * eager-loaded at boot. An unloaded store simply yields clear passthrough. */
 #ifdef DMR_AES_DIAG_RX
     s_rxdMisc[0]++;   /* every CRC-valid LC handed to dmrAesRxPI (a seed/parse opportunity) */
 #endif
@@ -526,7 +528,8 @@ void dmrAesRxEnd(void) { s_rxActive = 0; s_rxBurstEnc = 0; }
 /* ---- TX (mirror of RX: encrypt the 49 AMBE params at the codec layer) ---- */
 void dmrAesTxStart(uint8_t keyId, uint32_t miSeed)
 {
-    if (!s_keysLoaded) { dmrAesLoadKeys(); }
+    /* ISR context (HR-C6000 timeslot interrupt): keys are eager-loaded at boot; never
+     * do the blocking SPI-flash load here. Unloaded -> dmr_aes_tx_init fails -> clear TX. */
     s_txActive = (dmr_aes_tx_init(&s_tx, DMR_ALG_AES256, keyId, miSeed) == 0); /* sets s_tx.mi = miSeed */
     s_txOff = 0;
     s_txPiMi = miSeed;     /* the call's CONSTANT initial MI: advertised for late entry, advanced by RX */
