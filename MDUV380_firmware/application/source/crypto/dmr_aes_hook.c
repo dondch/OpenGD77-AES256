@@ -409,6 +409,10 @@ void dmrAesRxBurst(int seq)
 #ifdef DMR_AES_DIAG_RX
     s_rxdMisc[2]++;   /* every RxBurst call, regardless of decrypt state */
 #endif
+    /* Guard the burst sequence (1..6 = A..F, raw rxDataType&7 from the chip). A stray 0
+     * fakes a superframe wrap (advancing the MI mid-stream); a 7 sets an out-of-range
+     * keystream base. Matches the same guard in dmrAesRxLateEntry. */
+    if (seq < 1 || seq > 6) { return; }
     int wrapped = (s_rxLastSeq >= 0 && seq < s_rxLastSeq);
 
     if (s_rxActive && !s_rxIvReady)
