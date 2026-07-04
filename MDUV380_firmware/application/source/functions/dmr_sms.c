@@ -578,10 +578,13 @@ int dmrSmsSend(const char *text, uint32_t dst, int group, uint8_t keyId)
 		if (n >= DMR_DATA_MAX_BURSTS) { return -5; }
 		n = append_burst(q, n, DTB_CSBK, p12);
 	}
-	/* Unconfirmed data header (SAP09 EXTD) */
+	/* Unconfirmed data header. SAP 09 [EXTD HDR] when encrypting (the ENC ext header is
+	 * the extended header that follows); SAP 04 [IP Based] for cleartext (no extended
+	 * header) — a stock TYT rejects SAP09-with-no-extended-header, decoded from a real
+	 * stock cleartext SMS capture (2026-07-04). */
 	{
 		uint8_t h[10];
-		h[0] = (uint8_t)(g | 0x02); h[1] = (uint8_t)((9 << 4) | (poc & 0x0F));
+		h[0] = (uint8_t)(g | 0x02); h[1] = (uint8_t)(((encrypt ? 9 : 4) << 4) | (poc & 0x0F));
 		h[2] = (uint8_t)(dst >> 16); h[3] = (uint8_t)(dst >> 8); h[4] = (uint8_t)dst;
 		h[5] = (uint8_t)(src >> 16); h[6] = (uint8_t)(src >> 8); h[7] = (uint8_t)src;
 		h[8] = (uint8_t)(0x80 | (nblocks & 0x7F)); h[9] = 0x00;
