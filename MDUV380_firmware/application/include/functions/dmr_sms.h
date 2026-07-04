@@ -107,5 +107,10 @@ int  dmrSmsEncryptEnabled(void);
  * Returns 0 on success, <0 on error (busy / bad args). Also files the message into Sent. */
 int  dmrSmsSend(const char *text, uint32_t dst, int group, uint8_t keyId);
 
+/* DIAGNOSTIC (USB 0x97 A/B): make the next dmrSmsSend calls skip the store_add() Sent-folder
+ * flash write, to isolate bug #3 (menu sends after the first fail; USB harness sends don't).
+ * The menu path never sets this; it is toggled only around the 0x97 handler call. */
+void dmrSmsDiagSetSkipStore(int skip);
+
 #endif /* ENABLE_DMR_DATA && ENABLE_AES */
 #endif /* _OPENGD77_DMR_SMS_H_ */

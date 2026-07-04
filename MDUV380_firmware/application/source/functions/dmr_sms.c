@@ -518,6 +518,50 @@ static int append_burst(uint8_t *q, int n, uint8_t typeByte, const uint8_t *p12)
 	return n + 1;
 }
 
+/* DIAGNOSTIC (USB 0x97): lets the host invoke the REAL dmrSmsSend() menu path directly,
+ * optionally skipping the Sent-folder flash write, to A/B-test TX behaviour without pushing
+ * radio buttons. This was used to hunt bug #3 (see below) -- the store_add() write turned out
+ * to be innocent, but the harness is kept as a general on-demand SMS-TX diagnostic. Plain .bss;
+ * the physical menu path never sets it. */
+static uint8_t s_diagSkipStore;
+void dmrSmsDiagSetSkipStore(int skip) { s_diagSkipStore = (skip != 0) ? 1 : 0; }
+
+/* ---- deferred Sent-folder persist (defensive hygiene, not the bug #3 fix) ---
+ * store_add() does a BLOCKING SPI-flash sector erase+write (~100s of ms). Investigating bug #3
+ * (see s_txMsgCounter below for the actual root cause) an A/B test initially looked like this
+ * write disrupted the on-air burst timing -- but a follow-up test with the write fully skipped
+ * STILL failed after the first send, which exonerated it. Kept anyway as good practice: doing a
+ * blocking flash op anywhere in the TX-keying window is fragile regardless, so dmrSmsSend stashes
+ * the outgoing message and dmrSmsRxTick() flushes it to flash only once the data call has fully
+ * un-keyed (dmrDataTxActive()==0 && !trxIsTransmitting). */
+static uint8_t  s_pendSent;                    /* 1 = a Sent-folder write is queued */
+static uint8_t  s_pendFlags;
+static uint32_t s_pendPeer;
+static int      s_pendTextLen;
+static char     s_pendText[DMR_SMS_TEXT_MAX + 1];
+
+/* Per-message IP-ID / TMS-sequence counter (bug #3 root cause). A stock TYT tracks these like a
+ * real SMS client and DROPS a message that repeats the previous IP-ID + TMS-seq as a duplicate
+ * retransmission. The firmware used to hardcode ipid=0x0001, seq=0x90 on EVERY send, so only the
+ * first of a run reached the stock inbox while every later (byte-identical) send was silently
+ * dropped -- HW root-caused: raw 0x91 sends with per-send-varied ipid/seq always landed; identical
+ * menu sends did not, though the frame was byte-perfect on air. Seed from the boot tick so the
+ * sequence doesn't restart at the same value each power-up and collide with a stock that still
+ * remembers the previous session's traffic. */
+static uint16_t s_txMsgCounter;
+static uint8_t  s_txMsgSeeded;
+
+/* Flush the deferred Sent-folder entry if one is queued and the radio has finished transmitting.
+ * Called from the main loop (dmrSmsRxTick). Safe to call every tick; a no-op when idle. */
+static void dmrSmsTxPersistTick(void)
+{
+	if (s_pendSent && !dmrDataTxActive() && !trxIsTransmitting)
+	{
+		store_add(s_pendFlags, s_pendPeer, s_pendText, s_pendTextLen);
+		s_pendSent = 0;
+	}
+}
+
 int dmrSmsSend(const char *text, uint32_t dst, int group, uint8_t keyId)
 {
 	store_ensure();
@@ -542,9 +586,16 @@ int dmrSmsSend(const char *text, uint32_t dst, int group, uint8_t keyId)
 	 *    partial block (< 16 B) stays CLEAR, exactly like a stock TYT. Cleartext SMS skips the
 	 *    encryption (same IPv4/UDP/TMS structure, and no ENC header emitted below). Do NOT pad. */
 	uint8_t pt[360];   /* IPv4(20)+UDP(8)+TMS(10)+2*144 = 326 B max */
-	/* TMS type/seq byte = 0x90 (stock "text message" flag). With 0x00 a stock TYT starts
-	 * reading the text 4 bytes early and prepends the L+3 length field as a stray char. */
-	int ptLen = build_plaintext(text, tlen, src, dst, 0x90, 0x0001, pt);
+	/* Advance the per-message counter and derive a unique IP-ID + TMS-seq so consecutive sends
+	 * aren't dropped by the stock radio as duplicate retransmissions (bug #3). The TMS byte keeps
+	 * the 0x9x "text message" high nibble (0x00 there makes a stock TYT read the text 4 bytes early
+	 * and prepend the length field as a stray char) and varies the low nibble; the 16-bit IP-ID
+	 * gives full per-datagram uniqueness (and changes the IP/UDP checksums + data CRC32 too). */
+	if (!s_txMsgSeeded) { s_txMsgCounter = (uint16_t)ticksGetMillis(); s_txMsgSeeded = 1; }
+	s_txMsgCounter++;
+	uint16_t ipid = s_txMsgCounter;
+	uint8_t  tmsSeq = (uint8_t)(0x90 | (s_txMsgCounter & 0x0F));
+	int ptLen = build_plaintext(text, tlen, src, dst, tmsSeq, ipid, pt);
 	if (encrypt) { for (int i = 0; i + 16 <= ptLen; i += 16) { aes256_ecb_encrypt(key, pt + i); } }
 	int ctLen = ptLen;                       /* ct = whole enc blocks + clear tail (or all clear) */
 
@@ -607,15 +658,26 @@ int dmrSmsSend(const char *text, uint32_t dst, int group, uint8_t keyId)
 		n = append_burst(q, n, DTB_RATE12_DATA, pdu + b * 12);
 	}
 
-	/* File the message to the Sent folder BEFORE keying the data call. store_add() does a
-	 * blocking flash sector erase+write (~100s of ms); dmrDataTxLoad() defers the keyup by
-	 * ~100 ms and then feeds rate-1/2 bursts to the HR-C6000 over SPI in real time. If the
-	 * flash write ran after (concurrently with) the keyup, it starved/disrupted the burst
-	 * emission and corrupted the on-air data — a stock radio synced the carrier (green LED)
-	 * but the rate-1/2 FEC/CRC failed, so nothing landed in its inbox (HW-diagnosed: host TX
-	 * with no flash write always decoded; menu TX with this write did not). Doing the flash
-	 * write first keeps it entirely off the TX-keying window. */
-	store_add(DMR_SMS_FLAG_OUTGOING | (group ? DMR_SMS_FLAG_GROUP : 0), dst, text, tlen);
+	/* Queue the Sent-folder write for AFTER the TX finishes (see s_pendSent / dmrSmsTxPersistTick)
+	 * -- keeps the blocking flash erase+write out of the TX-keying window on general principle
+	 * (see the comment above s_pendSent for why this turned out not to be bug #3 itself). */
+	if (!s_diagSkipStore)
+	{
+		/* A prior send not yet flushed? The guard above ensured no active data call, so persist it
+		 * now before reusing the single pending slot. In practice the main-loop tick already
+		 * flushed it (menu sends are seconds apart). */
+		if (s_pendSent)
+		{
+			store_add(s_pendFlags, s_pendPeer, s_pendText, s_pendTextLen);
+			s_pendSent = 0;
+		}
+		s_pendFlags = (uint8_t)(DMR_SMS_FLAG_OUTGOING | (group ? DMR_SMS_FLAG_GROUP : 0));
+		s_pendPeer = dst;
+		s_pendTextLen = tlen;
+		memcpy(s_pendText, text, tlen);
+		s_pendText[tlen] = 0;
+		s_pendSent = 1;
+	}
 	dmrDataTxLoad(q, (uint8_t)n);
 	return 0;
 }
@@ -782,6 +844,8 @@ void dmrSmsRxBurst(int rxDataType, const uint8_t *p)
 
 void dmrSmsRxTick(void)
 {
+	dmrSmsTxPersistTick();   /* flush any deferred Sent-folder write once the TX has fully un-keyed */
+
 	if (!s_rxReady) { return; }
 
 	/* snapshot the FULL pdu (incl. pad+crc32), then release the ISR buffer */

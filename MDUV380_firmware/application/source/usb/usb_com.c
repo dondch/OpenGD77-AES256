@@ -822,6 +822,28 @@ static void cpsHandleCommand(void)
 				replyLength = n + 3;
 				return; // bypass the trailing generic '-' reply
 			}
+		case 0x97: // DIAGNOSTIC: invoke the REAL menu SMS path (dmrSmsSend) from the host, to
+			   // A/B bug #3 without button pushing. [2]=flags (bit0: skip the store_add
+			   // Sent-folder flash write), [3..6]=dst (LE), [7]=group, [8..]=NUL text
+			   // (single USB packet -> text <= ~54 chars). Reply: [cmd, int8 result].
+			{
+				uint32_t dst = (uint32_t)com_requestbuffer[3] | ((uint32_t)com_requestbuffer[4] << 8) |
+				               ((uint32_t)com_requestbuffer[5] << 16) | ((uint32_t)com_requestbuffer[6] << 24);
+				com_requestbuffer[COM_REQUESTBUFFER_SIZE - 1] = 0; // bound the strlen in dmrSmsSend
+				dmrSmsDiagSetSkipStore(com_requestbuffer[2] & 0x01);
+				// dmrSmsSend can flash-write (store_add -> SPI_Flash osDelay) and this handler
+				// runs inside TASK_LOCK_WRITE() (interrupts off): bracket like 0x80/0x82.
+				TASK_UNLOCK_WRITE();
+				int r = dmrSmsSend((const char *)&com_requestbuffer[8], dst,
+				                   (com_requestbuffer[7] != 0) ? 1 : 0, 0);
+				TASK_LOCK_WRITE();
+				dmrSmsDiagSetSkipStore(0);
+				usbComSendBuf[0] = com_requestbuffer[0];
+				usbComSendBuf[1] = (uint8_t)(int8_t)r;
+				hasToReply = true;
+				replyLength = 2;
+				return; // bypass the trailing generic '-' reply
+			}
 #endif
 #endif
 		case 0:
