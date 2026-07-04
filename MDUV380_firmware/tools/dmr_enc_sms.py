@@ -166,6 +166,32 @@ def build_encrypted_sms(text, dst, src, key, group=True, mi=0, seq=0x90, ipid=0,
     bursts+=[bytes([DT_RATE12_DATA])+b for b in data_blocks]
     return bursts
 
+def build_clear_sms(text, dst, src, group=True, seq=0x90, ipid=0, preamble=6):
+    """Return list of (type+12B) bursts for a CLEARTEXT SMS — mirrors the firmware
+    dmrSmsSend clear path: same IPv4/UDP/TMS plaintext, NO ECB, NO ENC ext header, the
+    Unconfirmed data header's block count excludes the +1 (no ENC block), and the blocks
+    carry the plaintext directly."""
+    pt=build_tms_plaintext(text,src,dst,seq,ipid)
+    data_no_crc=pt                                        # plaintext, unencrypted
+    total_data=(((len(data_no_crc)+4)+11)//12)*12         # round up to 12 incl. CRC
+    poc=total_data-len(data_no_crc)-4                      # pad octets
+    pdu=data_no_crc+bytes(poc)+bytes(4)                    # placeholder CRC
+    crc=_crc32_dmr(pdu)
+    pdu=data_no_crc+bytes(poc)+crc
+    data_blocks=[pdu[i:i+12] for i in range(0,len(pdu),12)]
+    nblocks=len(data_blocks)                              # NO +1 (no ENC header)
+    g=0x80 if group else 0x00
+    # SAP 04 [IP Based] for cleartext (no extended header) — stock rejects SAP09 EXTD with
+    # no extended header (confirmed from a real stock cleartext SMS capture).
+    h=bytes([g|0x02, (4<<4)|(poc&0x0F),
+             (dst>>16)&0xFF,(dst>>8)&0xFF,dst&0xFF,(src>>16)&0xFF,(src>>8)&0xFF,src&0xFF,
+             0x80|(nblocks&0x7F), 0x00])
+    hdr1=bytes([DT_DATA_HEADER])+h+_hdr_crc(h,0xCCCC)
+    tail=1+len(data_blocks)                               # 1 header + data blocks
+    bursts=_csbk_preamble(dst,src,group,preamble,tail)+[hdr1]
+    bursts+=[bytes([DT_RATE12_DATA])+b for b in data_blocks]
+    return bursts
+
 if __name__=="__main__":
     KEY=bytes.fromhex('8AFB6A024607F07D1E6EDEC791ABCE09806DA31CBE26DD293F297CE88AA3F2E3')
     b=build_encrypted_sms("Hello",9661,12341,KEY,group=True,mi=0xAB5C8269,seq=0x90,ipid=2,preamble=6)
