@@ -607,8 +607,16 @@ int dmrSmsSend(const char *text, uint32_t dst, int group, uint8_t keyId)
 		n = append_burst(q, n, DTB_RATE12_DATA, pdu + b * 12);
 	}
 
-	dmrDataTxLoad(q, (uint8_t)n);
+	/* File the message to the Sent folder BEFORE keying the data call. store_add() does a
+	 * blocking flash sector erase+write (~100s of ms); dmrDataTxLoad() defers the keyup by
+	 * ~100 ms and then feeds rate-1/2 bursts to the HR-C6000 over SPI in real time. If the
+	 * flash write ran after (concurrently with) the keyup, it starved/disrupted the burst
+	 * emission and corrupted the on-air data — a stock radio synced the carrier (green LED)
+	 * but the rate-1/2 FEC/CRC failed, so nothing landed in its inbox (HW-diagnosed: host TX
+	 * with no flash write always decoded; menu TX with this write did not). Doing the flash
+	 * write first keeps it entirely off the TX-keying window. */
 	store_add(DMR_SMS_FLAG_OUTGOING | (group ? DMR_SMS_FLAG_GROUP : 0), dst, text, tlen);
+	dmrDataTxLoad(q, (uint8_t)n);
 	return 0;
 }
 
