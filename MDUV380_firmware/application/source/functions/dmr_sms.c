@@ -473,8 +473,11 @@ static int build_plaintext(const char *text, int tlen, uint32_t src, uint32_t ds
 	for (int i = 0; i < tlen; i++) { tms[ti++] = (uint8_t)text[i]; tms[ti++] = 0x00; }
 
 	int udpLen = 8 + ti;
-	uint8_t srcIp[4] = { 0x0C, 0x00, (uint8_t)(src >> 8), (uint8_t)src };
-	uint8_t dstIp[4] = { 0xE1, 0x00, (uint8_t)(dst >> 8), (uint8_t)dst };
+	/* MotoTRBO CAI IP = prefix.<id[23:16]>.<id[15:8]>.<id[7:0]> — the FULL 24-bit DMR ID/TG.
+	 * (Byte 1 was hardcoded 0x00, truncating to 16 bits; correct only for ids <= 65535, wrong
+	 * for real 7-digit DMR ids.) src = individual radio (12.x.x.x), group dst = 225.x.x.x. */
+	uint8_t srcIp[4] = { 0x0C, (uint8_t)(src >> 16), (uint8_t)(src >> 8), (uint8_t)src };
+	uint8_t dstIp[4] = { 0xE1, (uint8_t)(dst >> 16), (uint8_t)(dst >> 8), (uint8_t)dst };
 
 	uint8_t udp[8 + 16 + 2 * DMR_SMS_TEXT_MAX];
 	udp[0] = UDP_SMS_PORT >> 8; udp[1] = UDP_SMS_PORT & 0xFF;

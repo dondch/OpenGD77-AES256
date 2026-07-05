@@ -118,7 +118,8 @@ def build_tms_plaintext(text, src, dst, seq=0, ipid=0):
     tb=text.encode('utf-16-le'); L=len(tb)
     tms=bytes([((8+L)>>8)&0xFF,(8+L)&0xFF, 0xA0,0x00,seq&0xFF,0x04, 0x0D,0x00, 0x0A,0x00])+tb   # b28-29 = 2-byte len 8+L; b34/36 fixed 0d/0a (CRLF)
     udp=bytes([0x0F,0xA7,0x0F,0xA7,((8+len(tms))>>8)&0xFF,(8+len(tms))&0xFF,0,0])+tms
-    src_ip=bytes([0x0C,0x00,(src>>8)&0xFF,src&0xFF]); dst_ip=bytes([0xE1,0x00,(dst>>8)&0xFF,dst&0xFF])
+    # MotoTRBO CAI IP = prefix.<id[23:16]>.<id[15:8]>.<id[7:0]> — full 24-bit DMR ID/TG (was 16-bit).
+    src_ip=bytes([0x0C,(src>>16)&0xFF,(src>>8)&0xFF,src&0xFF]); dst_ip=bytes([0xE1,(dst>>16)&0xFF,(dst>>8)&0xFF,dst&0xFF])
     uc=_udpcksum(src_ip,dst_ip,udp); udp=udp[:6]+bytes([(uc>>8)&0xFF,uc&0xFF])+udp[8:]
     tot=20+len(udp)
     ip=bytes([0x45,0,(tot>>8)&0xFF,tot&0xFF,(ipid>>8)&0xFF,ipid&0xFF,0,0,0x40,0x11,0,0])+src_ip+dst_ip
