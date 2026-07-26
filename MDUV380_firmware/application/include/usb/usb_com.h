@@ -72,4 +72,11 @@ bool USB_DeviceIsResetting(void);
 void USB_DEBUG_PRINT(const char *str);
 void USB_DEBUG_printf(const char *format, ...) __attribute__((format(__printf__, 1, 2)));
 
+#if defined(ENABLE_KEY_INJECTION)
+/* Dev-only USB remote keypad. usbKeyInjectTick() is called once per main-loop
+ * iteration; when a USB-injected key is pending (and no real key is active) it
+ * fills *outEvent (keyboardCode_t.event bits) + *outKey and returns true. */
+bool usbKeyInjectTick(uint8_t *outEvent, char *outKey);
+#endif
+
 #endif /* _OPENGD77_USB_COM_H_ */

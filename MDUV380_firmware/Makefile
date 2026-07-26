@@ -41,6 +41,13 @@ ifeq ($(DMR_AES_DIAG_RX),1)
 DEFS += -DDMR_AES_DIAG_RX
 endif
 
+# Dev-only: USB display mirror + remote key injection (fbmirror.py / rkey.py).
+# Lets a PC drive the UI and read the framebuffer over USB. Never enable in a
+# release build. Independent of ENABLE_AES.
+ifeq ($(ENABLE_KEY_INJECTION),1)
+DEFS += -DENABLE_KEY_INJECTION
+endif
+
 CFLAGS  = $(CPU) $(DEFS) $(INCS) -Os -g3 -ffunction-sections -fdata-sections -Wall -MMD -MP
 LDSCRIPT = STM32F405VGTX_FLASH.ld
 LDFLAGS = $(CPU) -T$(LDSCRIPT) --specs=nano.specs -Wl,--gc-sections -Wl,-Map=$(BUILD)/$(TARGET).map -lc -lm -lnosys

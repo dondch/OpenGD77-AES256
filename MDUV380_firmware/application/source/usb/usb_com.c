@@ -105,6 +105,294 @@ volatile static uint32_t replyLength = 0;
 
 volatile bool usbIsResetting = false;
 
+#if defined(ENABLE_KEY_INJECTION)
+/* ---- DEV: USB remote keypad --------------------------------------------------
+ * A small ring of keys pushed by CPS command 0x96 and replayed into the NORMAL UI
+ * by usbKeyInjectTick() (called from the main loop). Each key is delivered as a
+ * two-phase tap -- DOWN on one iteration, then UP (SHORTUP) on the next -- which is
+ * what the menu handlers expect from a real key press. Push and pop both run on the
+ * main task, so no locking is needed. Event bits mirror keyboard.h (kept as literals
+ * so this stays include-independent): DOWN=0x01, UP=0x02, LONG=0x04. */
+#define INJ_MOD_DOWN  0x01
+#define INJ_MOD_UP    0x02
+#define INJ_MOD_LONG  0x04
+#define INJ_MOD_PRESS 0x08
+#define INJ_RING     16
+static volatile uint8_t s_injKey[INJ_RING];
+static volatile uint8_t s_injFlags[INJ_RING];   /* bit0 = long press */
+static volatile uint8_t s_injHead = 0, s_injTail = 0;   /* head = write, tail = read */
+static volatile uint8_t s_injPhase = 0;         /* 0 = emit DOWN next, 1 = emit UP next */
+
+static void usbKeyInjectPush(uint8_t key, uint8_t flags)
+{
+	uint8_t next = (uint8_t)((s_injHead + 1) % INJ_RING);
+	if (next == s_injTail) { return; }          /* ring full -> drop */
+	s_injKey[s_injHead] = key;
+	s_injFlags[s_injHead] = flags;
+	s_injHead = next;
+}
+
+/* Reboot into DFU with no button combo.
+ *
+ * This radio does NOT flash via the ST ROM loader at 0x1FFF0000 -- it uses TYT's own
+ * DFU bootloader at 0x08000000 (its DFU alt-settings read "@Internal Flash
+ * /0x0800C000/..." and "@SPI Flash Memory /0x00000000/...", which the ROM loader has
+ * no notion of). Jumping to 0x1FFF0000 is therefore the wrong target and just wedges
+ * USB. Disassembly of that bootloader's boot decision (at 0x08004400) shows it stays
+ * in DFU on exactly two conditions, with NO magic value, backup register or reset-flag
+ * check anywhere:
+ *   1. PTT + top button held  (GPIOE bits 10|11 read 0, active low), or
+ *   2. the application's initial-SP word at 0x0800C000 fails
+ *        (SP & 0x2FFE0000) == 0x20000000.
+ * So the only software route is (2): make that word fail the test. Clearing bit 29
+ * (0x2001FFFC -> 0x0001FFFC) is a 1->0 only change, which STM32 flash accepts as a
+ * plain word program -- NO sector erase, so the rest of the vector table and the whole
+ * app stay intact. NVIC_SystemReset() then performs a REAL reset, which resets the USB
+ * peripheral and drops the D+ pull-up: exactly the clean disconnect/re-enumerate that a
+ * software jump could never produce (that was why the earlier attempts enumerated as
+ * "Device Descriptor Request Failed").
+ *
+ * The firmware loader rewrites 0x0800C000 when it flashes the app, so the word repairs
+ * itself on the very next flash. NOTE: between the trigger and that flash the radio
+ * boots ONLY to DFU -- which is the intent, and is always recoverable by flashing. */
+#define INJ_APP_VECTOR_ADDR  0x0800C000U   /* app vector table (initial SP word) */
+#define INJ_APP_SP_VALID_BIT 0x20000000U   /* clearing this fails the bootloader's test */
+#define INJ_BOOTLOADER_ADDR  0x08000000U   /* TYT/AnyRoad DFU bootloader vector table */
+/* A word in sector 11 (0x080E0000..0x080FFFFF), which is ERASED on this radio: the app
+ * ends around 0x080C0000 and the loader never writes up here. Verified 0xFFFFFFFF by
+ * reading it over USB (CPS 'R' area 5). Programming it is inert either way. */
+#define INJ_FLASH_PROBE_ADDR 0x080FFFF0U
+/* Mark the app invalid. Returns the HAL status; fills diag[0..2] with
+ * HAL_FLASH_GetError(), FLASH->SR and the SP word read back after the write, so a
+ * failure can be diagnosed from the host instead of guessed at. */
+static uint8_t usbInjectInvalidateApp(uint32_t *diag)
+{
+	uint32_t sp = *(volatile uint32_t *)INJ_APP_VECTOR_ADDR;
+	HAL_StatusTypeDef st = HAL_OK;
+
+	if ((sp & INJ_APP_SP_VALID_BIT) != 0U)   /* only if still marked valid */
+	{
+		HAL_FLASH_Unlock();
+		/* A stale error flag (WRPERR/PGSERR/...) left set by any earlier flash access
+		 * makes HAL_FLASH_Program bail out immediately, which is the most likely reason
+		 * a word program silently does nothing. Clear them first. */
+		__HAL_FLASH_CLEAR_FLAG(FLASH_FLAG_EOP | FLASH_FLAG_OPERR | FLASH_FLAG_WRPERR |
+				FLASH_FLAG_PGAERR | FLASH_FLAG_PGPERR | FLASH_FLAG_PGSERR);
+		st = HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD, INJ_APP_VECTOR_ADDR,
+				(uint32_t)(sp & ~INJ_APP_SP_VALID_BIT));
+		HAL_FLASH_Lock();
+	}
+
+	diag[0] = HAL_FLASH_GetError();
+	diag[1] = FLASH->SR;
+	diag[2] = *(volatile uint32_t *)INJ_APP_VECTOR_ADDR;
+	return (uint8_t)st;
+}
+
+static void usbInjectRebootToBootloader(void)
+{
+	NVIC_SystemReset();
+
+	while (1) { }   /* unreachable */
+}
+
+/* Probe whether this firmware can program internal flash AT ALL.
+ *
+ * Nothing in OpenGD77 ever writes internal flash (every persistent store lives in the
+ * external SPI flash), so the internal-flash path above is entirely untested code and
+ * its silent failure could be generic rather than specific to 0x0800C000. This writes
+ * one word into a known-ERASED location and reports what the hardware said, so the two
+ * cases can be told apart. Returns the HAL status; diag = { HAL error, FLASH->SR,
+ * FLASH->CR, word read back }. The data cache is flushed before the read-back, because
+ * DCEN is on and HAL_FLASH_Program does not flush it (only the erase path does). */
+static uint8_t usbInjectFlashProbe(uint32_t addr, uint32_t value, uint32_t *diag)
+{
+	HAL_StatusTypeDef st;
+
+	HAL_FLASH_Unlock();
+	__HAL_FLASH_CLEAR_FLAG(FLASH_FLAG_EOP | FLASH_FLAG_OPERR | FLASH_FLAG_WRPERR |
+			FLASH_FLAG_PGAERR | FLASH_FLAG_PGPERR | FLASH_FLAG_PGSERR);
+	st = HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD, addr, value);
+	diag[0] = HAL_FLASH_GetError();
+	diag[1] = FLASH->SR;
+	diag[2] = FLASH->CR;
+	HAL_FLASH_Lock();
+
+	__HAL_FLASH_DATA_CACHE_DISABLE();
+	__HAL_FLASH_DATA_CACHE_RESET();
+	__HAL_FLASH_DATA_CACHE_ENABLE();
+	diag[3] = *(volatile uint32_t *)addr;
+
+	return (uint8_t)st;
+}
+
+/* Enter DFU by ERASING the app's first sector, then resetting.
+ *
+ * The bootloader stays in DFU when the word at 0x0800C000 fails
+ * (SP & 0x2FFE0000) == 0x20000000. Clearing bit 29 of the live value (0x2001FFFC) is
+ * the only 1->0 way to fail that test, and it does not work: this STM32F405 silently
+ * refuses to re-program an already-programmed word -- HAL returns HAL_OK with no error
+ * flag and the word is unchanged (measured; an ERASED word in the same firmware
+ * programs perfectly). So the word has to be ERASED instead: 0xFFFFFFFF gives
+ * 0x2FFE0000 != 0x20000000, which fails the test outright.
+ *
+ * Sector 3 (0x0800C000..0x0800FFFF) is the app's first 16 KB, i.e. its vector table.
+ * That means:
+ *   - this routine must run from RAM (.data is copied to RAM at startup and SRAM is
+ *     executable), because the whole flash bank stalls for the duration of the erase;
+ *   - interrupts must be off, since VTOR still points into the sector being erased;
+ *   - it must touch nothing in flash -- no HAL, no library calls -- hence the raw
+ *     register sequence below;
+ *   - it must never return. It resets, and the bootloader then finds an invalid app.
+ * The firmware loader erases and rewrites exactly this sector on every flash, so the
+ * radio repairs itself on the next flash. It cannot be bricked: sectors 0-2 hold the
+ * bootloader, are untouched, and always come up in DFU. */
+__attribute__((section(".data.ramfunc"), noinline, used))
+static void usbInjectEraseAppSector(void)
+{
+	__disable_irq();
+
+	while ((FLASH->SR & FLASH_SR_BSY) != 0U) { }
+
+	FLASH->KEYR = 0x45670123U;                  /* FLASH_KEY1 */
+	FLASH->KEYR = 0xCDEF89ABU;                  /* FLASH_KEY2 */
+
+	FLASH->SR = (FLASH_SR_EOP | FLASH_SR_SOP | FLASH_SR_WRPERR |
+			FLASH_SR_PGAERR | FLASH_SR_PGPERR | FLASH_SR_PGSERR);
+
+	FLASH->CR = FLASH_CR_SER | (3UL << FLASH_CR_SNB_Pos) | FLASH_PSIZE_WORD;
+	FLASH->CR |= FLASH_CR_STRT;
+
+	while ((FLASH->SR & FLASH_SR_BSY) != 0U) { }
+
+	FLASH->CR &= ~FLASH_CR_SER;
+	FLASH->CR |= FLASH_CR_LOCK;
+
+	__DSB();
+	SCB->AIRCR = (0x5FAUL << SCB_AIRCR_VECTKEY_Pos) | SCB_AIRCR_SYSRESETREQ_Msk;
+	__DSB();
+
+	while (1) { }   /* the reset lands before this matters */
+}
+
+/* Enter DFU by JUMPING into TYT's bootloader with the button combo spoofed.
+ *
+ * The bootloader's boot decision (0x08004400) stays in DFU when GPIOE bits 10|11 both
+ * read 0 -- PTT (PE11) and the top button, which shares PE10 with LCD_D7. A reset can
+ * never help there, because a reset also returns the GPIO block to its input default;
+ * a JUMP keeps whatever the app configured. Disassembly of the whole 48 KB bootloader
+ * shows GPIOE is referenced in exactly two places -- the two ReadPin calls in the
+ * decision and the LED WritePins in the DFU loop -- so it never re-initialises those
+ * pins and cannot undo the spoof.
+ *
+ * So: drive PE10/PE11 low as outputs, put the clock tree back to its post-reset state
+ * (HAL_RCC_DeInit -> HSI, which is what the bootloader's SystemInit at 0x08004A20
+ * expects to find), then jump to the bootloader's reset vector. USB is soft-
+ * disconnected first: the OTG_FS D+ pull-up IS internal to the STM32F405, so the host
+ * sees a real disconnect and re-enumerates the DFU device.
+ *
+ * Unlike the SP-invalidation route this changes NOTHING persistent -- if it fails, a
+ * power cycle boots the app as usual. */
+static void usbInjectJumpToBootloader(void)
+{
+	uint32_t sp;
+	uint32_t entry;
+	uint32_t guard;
+
+	/* Hard-reset the USB peripheral rather than MX_USB_DEVICE_DeInit(): a peripheral
+	 * reset is what the bootloader expects to find, it drops the D+ pull-up (which IS
+	 * internal on the STM32F405) so the host sees a real disconnect, and it avoids
+	 * USBD_Stop()'s Error_Handler(), which is an infinite loop. Nothing else is
+	 * reset -- in particular not the GPIO ports, because PWR_SW lives on one of them. */
+	__HAL_RCC_USB_OTG_FS_FORCE_RESET();
+	__HAL_RCC_USB_OTG_FS_RELEASE_RESET();
+	__HAL_RCC_USB_OTG_FS_CLK_DISABLE();
+	HAL_Delay(200);                    /* let the host see the disconnect */
+
+	__disable_irq();
+	SysTick->CTRL = 0;
+	SysTick->LOAD = 0;
+	SysTick->VAL = 0;
+	for (int i = 0; i < 8; i++)
+	{
+		NVIC->ICER[i] = 0xFFFFFFFFU;
+		NVIC->ICPR[i] = 0xFFFFFFFFU;
+	}
+
+	/* Clock tree back to its post-reset state, by hand. HAL_RCC_DeInit() must NOT be
+	 * used here: its waits are driven by HAL_GetTick(), which cannot advance with
+	 * interrupts masked, and this project routes HAL_InitTick onto a TIM timebase --
+	 * that is the most likely reason the first version of this routine hung. Every
+	 * poll below is bounded, so a stuck flag costs a bad jump, never a lockup. */
+	RCC->CIR = 0x00000000U;
+	RCC->CR |= RCC_CR_HSION;
+	guard = 1000000U;
+	while (((RCC->CR & RCC_CR_HSIRDY) == 0U) && (guard-- != 0U)) { }
+	RCC->CFGR = 0x00000000U;                       /* SYSCLK = HSI */
+	guard = 1000000U;
+	while (((RCC->CFGR & RCC_CFGR_SWS) != RCC_CFGR_SWS_HSI) && (guard-- != 0U)) { }
+	RCC->CR &= ~(RCC_CR_HSEON | RCC_CR_CSSON | RCC_CR_PLLON | RCC_CR_PLLI2SON);
+	guard = 1000000U;
+	while (((RCC->CR & RCC_CR_PLLRDY) != 0U) && (guard-- != 0U)) { }
+	RCC->PLLCFGR = 0x24003010U;                    /* reset value */
+	RCC->CR &= ~RCC_CR_HSEBYP;
+
+	/* Spoof the combo LAST, so nothing above can undo it. Direct register writes: no
+	 * HAL calls once the clocks have been torn down. PE11 = PTT, PE10 = the second
+	 * combo line (shared with LCD_D7). Push-pull outputs driven low = "both held". */
+	RCC->AHB1ENR |= RCC_AHB1ENR_GPIOEEN;
+	GPIOE->BSRR = (1UL << (10 + 16)) | (1UL << (11 + 16));
+	GPIOE->OTYPER &= ~((1UL << 10) | (1UL << 11));
+	GPIOE->MODER = (GPIOE->MODER & ~((3UL << 20) | (3UL << 22))) | (1UL << 20) | (1UL << 22);
+
+	SCB->VTOR = INJ_BOOTLOADER_ADDR;
+	__DSB();
+	__ISB();
+	/* The bootloader runs from reset with interrupts enabled and will never issue its
+	 * own cpsie, so PRIMASK has to be cleared here or its USB IRQ can never fire.
+	 * Safe because every NVIC source was just disabled and un-pended. */
+	__enable_irq();
+
+	sp = *(volatile uint32_t *)INJ_BOOTLOADER_ADDR;
+	entry = *(volatile uint32_t *)(INJ_BOOTLOADER_ADDR + 4U);
+
+	/* Done in one asm block: FreeRTOS runs this on the process stack, so CONTROL has
+	 * to select MSP before MSP is loaded, and no compiler-inserted stack access may
+	 * happen in between. */
+	__asm volatile (
+			"msr control, %2\n"
+			"isb\n"
+			"msr msp, %0\n"
+			"bx  %1\n"
+			: : "r" (sp), "r" (entry), "r" (0U) : );
+
+	while (1) { }   /* unreachable */
+}
+
+bool usbKeyInjectTick(uint8_t *outEvent, char *outKey)
+{
+	if (s_injTail == s_injHead) { return false; }   /* nothing queued */
+	uint8_t key = s_injKey[s_injTail];
+	uint8_t lng = (s_injFlags[s_injTail] & 0x01) ? INJ_MOD_LONG : 0;
+	*outKey = (char)key;
+	if (s_injPhase == 0)
+	{
+		/* DOWN carries PRESS too: menu list scrolling tests KEYCHECK_PRESS (the PRESS
+		 * bit), while GREEN/select tests KEYCHECK_SHORTUP (the UP bit) -- a real key
+		 * press reports both across its lifetime, so emit both to drive either style. */
+		*outEvent = (uint8_t)(INJ_MOD_DOWN | INJ_MOD_PRESS | lng);
+		s_injPhase = 1;
+	}
+	else
+	{
+		*outEvent = (uint8_t)(INJ_MOD_UP | lng);
+		s_injPhase = 0;
+		s_injTail = (uint8_t)((s_injTail + 1) % INJ_RING);   /* key consumed */
+	}
+	return true;
+}
+#endif
+
 /*
 static void hexDump2(uint8_t *ptr, int len,char *msg)
 {
@@ -657,6 +945,107 @@ static void cpsHandleCommand(void)
 	int command = com_requestbuffer[1];
 	switch(command)
 	{
+#ifdef ENABLE_KEY_INJECTION
+		case 0x96: // DEV: inject a keypad key: [2]=keycode, [3]=flags (bit0 = long press).
+			//        Queued here; usbKeyInjectTick() feeds it to the normal UI (DOWN then UP)
+			//        from the main loop. Pairs with the USB display mirror (fbmirror.py).
+			usbKeyInjectPush(com_requestbuffer[2], com_requestbuffer[3]);
+			usbComSendBuf[0] = com_requestbuffer[0];
+			hasToReply = true;
+			replyLength = 1;
+			break;
+		case 0x9F: // DEV: reboot into DFU (button-free dev flashing) by marking the app
+			//        invalid, then resetting. Replies [cmd, halStatus, err(4), SR(4),
+			//        spAfter(4)] so a failed flash write is diagnosable from the host.
+			//        The reset is deferred ~500 ms so this reply gets out first, and is
+			//        only scheduled when the SP word actually changed.
+			{
+				uint32_t diag[3];
+				uint8_t st = usbInjectInvalidateApp(diag);
+				usbComSendBuf[0] = com_requestbuffer[0];
+				usbComSendBuf[1] = st;
+				for (int i = 0; i < 3; i++)
+				{
+					usbComSendBuf[2 + i * 4] = (uint8_t)(diag[i] & 0xFF);
+					usbComSendBuf[3 + i * 4] = (uint8_t)((diag[i] >> 8) & 0xFF);
+					usbComSendBuf[4 + i * 4] = (uint8_t)((diag[i] >> 16) & 0xFF);
+					usbComSendBuf[5 + i * 4] = (uint8_t)((diag[i] >> 24) & 0xFF);
+				}
+				hasToReply = true;
+				replyLength = 14;
+				if ((diag[2] & INJ_APP_SP_VALID_BIT) == 0U)   /* invalidated -> reboot */
+				{
+					addTimerCallback(usbInjectRebootToBootloader, 500, MENU_ANY, false);
+				}
+			}
+			return;   /* NOT break: the generic '-' reply below would clobber the diags */
+		case 0x9E: // DEV: program one word of internal flash: [2..5]=address (BE),
+			//        [6..9]=value (BE). Both default to the erased scratch word when
+			//        the address is 0. Replies [cmd, halStatus, err(4), SR(4), CR(4),
+			//        readback(4)]. Never reboots.
+			{
+				uint32_t diag[4];
+				uint8_t st;
+				uint32_t addr = (com_requestbuffer[2] << 24) | (com_requestbuffer[3] << 16) |
+						(com_requestbuffer[4] << 8) | com_requestbuffer[5];
+				uint32_t val = (com_requestbuffer[6] << 24) | (com_requestbuffer[7] << 16) |
+						(com_requestbuffer[8] << 8) | com_requestbuffer[9];
+
+				if (addr == 0U)
+				{
+					addr = INJ_FLASH_PROBE_ADDR;
+					val = 0xA5A5A5A5U;
+				}
+
+				/* Never let a typo reach the bootloader (sectors 0-2): losing that
+				 * really would be unrecoverable, since it is what provides DFU. */
+				if ((addr < INJ_APP_VECTOR_ADDR) || (addr > 0x080FFFFCU) || ((addr & 3U) != 0U))
+				{
+					usbComSendBuf[0] = com_requestbuffer[0];
+					usbComSendBuf[1] = 0xFF;   /* refused */
+					memset((uint8_t *)&usbComSendBuf[2], 0, 16);
+					hasToReply = true;
+					replyLength = 18;
+					return;
+				}
+
+				/* Outside the CPS critical section: HAL_FLASH_Program waits on
+				 * HAL_GetTick(), which cannot advance with interrupts masked. */
+				TASK_UNLOCK_WRITE();
+				st = usbInjectFlashProbe(addr, val, diag);
+				TASK_LOCK_WRITE();
+
+				usbComSendBuf[0] = com_requestbuffer[0];
+				usbComSendBuf[1] = st;
+				for (int i = 0; i < 4; i++)
+				{
+					usbComSendBuf[2 + i * 4] = (uint8_t)(diag[i] & 0xFF);
+					usbComSendBuf[3 + i * 4] = (uint8_t)((diag[i] >> 8) & 0xFF);
+					usbComSendBuf[4 + i * 4] = (uint8_t)((diag[i] >> 16) & 0xFF);
+					usbComSendBuf[5 + i * 4] = (uint8_t)((diag[i] >> 24) & 0xFF);
+				}
+				hasToReply = true;
+				replyLength = 18;
+			}
+			return;   /* NOT break -- see above */
+		case 0x9C: // DEV: enter DFU by erasing the app's first sector, then resetting.
+			//        Persistent BY DESIGN -- the radio then boots only to DFU until the
+			//        next flash, which rewrites that sector anyway. Deferred so this
+			//        ACK gets out first.
+			addTimerCallback(usbInjectEraseAppSector, 500, MENU_ANY, false);
+			usbComSendBuf[0] = com_requestbuffer[0];
+			hasToReply = true;
+			replyLength = 1;
+			break;
+		case 0x9D: // DEV: enter DFU by jumping into the bootloader with the PTT + top
+			//        button combo spoofed on GPIOE. Changes nothing persistent;
+			//        a power cycle undoes it. Deferred so this ACK gets out first.
+			addTimerCallback(usbInjectJumpToBootloader, 500, MENU_ANY, false);
+			usbComSendBuf[0] = com_requestbuffer[0];
+			hasToReply = true;
+			replyLength = 1;
+			break;
+#endif
 #ifdef ENABLE_AES
 		case 0x80: // SUB set AES key: [2]=keyId, [3..34]=32-byte key (persistent flash store)
 			// dmrAesStoreKey writes flash (SPI_Flash_write -> osDelay), which must NOT run inside

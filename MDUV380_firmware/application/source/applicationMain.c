@@ -593,6 +593,22 @@ void applicationMainTask(void)
 			}
 		}
 
+#if defined(ENABLE_KEY_INJECTION)
+		// DEV: replay a USB-injected key (CPS 0x96) as if physically pressed, but only
+		// when no real key is active, so the remote keypad never fights the real one.
+		if ((key_event == EVENT_KEY_NONE) && (keys.key == 0))
+		{
+			uint8_t injEvent;
+			char injKey;
+			if (usbKeyInjectTick(&injEvent, &injKey))
+			{
+				keys.event = injEvent;
+				keys.key = injKey;
+				key_event = EVENT_KEY_CHANGE;
+			}
+		}
+#endif
+
 		// Clear PTT button event when TX Inhibit is turned on.
 		if (settingsIsOptionBitSet(BIT_TX_INHIBIT) && (buttons & BUTTON_PTT))
 		{
