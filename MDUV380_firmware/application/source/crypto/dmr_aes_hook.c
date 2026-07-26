@@ -8,11 +8,58 @@
 
 #define DMR_AMBE_BURST 27
 
-/* AES key store block: see dmrAesLoadKeys. */
+/* AES key store.
+ *
+ * Key MATERIAL lives in the STOCK TYT MD-UV390 AES key table in SPI flash, so keys
+ * survive a fork<->stock firmware swap on the same radio and the regular CHIRP
+ * Read/Write carries them (no separate key path). The table + wrap were reverse-
+ * engineered from the stock firmware and verified byte-exact against a real KEY1
+ * capture (see the stock-tyt-aes-key-storage note).
+ *   - table base 0xD9F9C, 100-byte entries, entry keyId = base + 0x64*keyId;
+ *   - entry = [type:4][name UTF-16LE:32][wrapped key:32][pad:32];
+ *   - type 0x04 (or 0x07) = AES-256; keyId 0 slot is unused; fork uses keyId 1..15.
+ *   - WRAP a 32-byte key to store it: byte-reverse it, then AES-256-ECB-ENCRYPT the
+ *     two 16-byte halves under keyA (bytes 0..15) and keyB (bytes 16..31). READ =
+ *     inverse (ECB-DECRYPT halves under keyA/keyB, then un-reverse).
+ *   - a stock "unset" slot carries type 0x04 + default name + the wrapped BLANK key
+ *     (unwraps to 00..0001), which we treat as empty.
+ *
+ * The global TX-key selector (a fork-only setting with no stock equivalent) stays in
+ * the fork's OpenGD77 custom-data AESK header (below); its block size is unchanged. */
 #define AESK_HDR_LEN   8
 #define AESK_ENTRY_LEN 36
 #define AESK_SLOTS     DMR_AES_MAX_KEYS
 #define AESK_BLOCK_LEN (AESK_HDR_LEN + AESK_SLOTS * AESK_ENTRY_LEN)
+
+/* Stock key-table geometry (raw SPI-flash addresses; SPI_Flash_read/write take them
+ * verbatim, and SPI_Flash_write does a full sector read-modify-erase-write so a
+ * 100-byte entry write preserves the rest of the table). keyId 1..15 all fall inside
+ * the single 4 KB sector at 0xDA000, so no entry write ever crosses a sector. */
+#define STOCK_KEY_TABLE_BASE   0xD9F9Cu
+#define STOCK_KEY_ENTRY_LEN    0x64        /* 100 bytes */
+#define STOCK_KEY_TYPE_OFF     0
+#define STOCK_KEY_NAME_OFF     4           /* UTF-16LE, 32 bytes */
+#define STOCK_KEY_KEY_OFF      36          /* wrapped 32-byte key */
+#define STOCK_KEY_TYPE_AES256  0x04
+#define STOCK_KEY_TYPE_AES256B 0x07        /* also AES-256 per the RE */
+#define STOCK_KEY_MIN_ID       1
+#define STOCK_KEY_MAX_ID       15          /* fork menu exposes keyId 1..15 */
+#define stockKeyEntryAddr(id)  (STOCK_KEY_TABLE_BASE + STOCK_KEY_ENTRY_LEN * (uint32_t)(id))
+
+/* Fixed GLOBAL wrap constants (identical on every radio; NOT device/UID-derived).
+ * These are const -> .rodata (flash); do NOT place them in .aes_ccmram, which the
+ * startup code does not initialize (see dmrAesInit) so their initializers would be
+ * lost. Only write-before-read RAM state belongs in CCM. */
+static const uint8_t s_stockKeyA[32] = {
+    0x01,0x23,0x45,0x67,0x89,0xab,0xcd,0xef, 0x23,0x45,0x67,0x89,0xab,0xcd,0xef,0x01,
+    0x45,0x67,0x89,0xab,0xcd,0xef,0x01,0x23, 0x67,0x89,0xab,0xcd,0xef,0x01,0x23,0x45 };
+static const uint8_t s_stockKeyB[32] = {
+    0x45,0x67,0x89,0xab,0xcd,0xef,0x01,0x23, 0x67,0x89,0xab,0xcd,0xef,0x01,0x23,0x45,
+    0x15,0x32,0x3a,0x3c,0x3f,0x48,0x60,0x62, 0x65,0x66,0x7f,0x06,0x07,0x08,0x09,0x0a };
+/* Stock's "unset slot" key (a wrapped copy of this is what stock writes for a blank
+ * slot; it unwraps to this). We both write it on clear and treat it as empty on read. */
+static const uint8_t s_stockBlankKey[32] = {
+    0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0x01 };
 
 static dmr_aes_ctx_t s_rx DMR_AES_CCM, s_tx DMR_AES_CCM;
 static size_t        s_rxOff DMR_AES_CCM, s_txOff DMR_AES_CCM;
@@ -220,6 +267,83 @@ void dmrAesInit(void)
     dmr_aes_clear_keys();   /* zeroes the s_keys/s_have store in dmr_aes.c */
 }
 
+/* ---- stock key-table wrap + entry access (foreground/main-loop only) --------
+ * All of these run in the UI/main-loop or CPS thread context (never an ISR): they
+ * touch SPI flash (SPI_Flash_write uses osDelay) and reuse the shared s_aesBlk
+ * scratch, matching the existing non-reentrant key-store helpers. */
+
+/* Byte-reverse key32 then AES-256-ECB-ENCRYPT the two halves under keyA/keyB. */
+static void stockWrapKey(const uint8_t *key32, uint8_t *wrapped32)
+{
+    for (int i = 0; i < 32; i++) { wrapped32[i] = key32[31 - i]; }
+    aes256_ecb_encrypt(s_stockKeyA, wrapped32);
+    aes256_ecb_encrypt(s_stockKeyB, wrapped32 + 16);
+}
+
+/* Inverse of stockWrapKey: ECB-DECRYPT the halves under keyA/keyB, then un-reverse. */
+static void stockUnwrapKey(const uint8_t *wrapped32, uint8_t *key32)
+{
+    uint8_t tmp[32];
+    memcpy(tmp, wrapped32, 16);
+    memcpy(tmp + 16, wrapped32 + 16, 16);
+    aes256_ecb_decrypt(s_stockKeyA, tmp);
+    aes256_ecb_decrypt(s_stockKeyB, tmp + 16);
+    for (int i = 0; i < 32; i++) { key32[i] = tmp[31 - i]; }
+}
+
+/* A key is "present" (a real, usable key) unless it is all-zero or the stock BLANK
+ * sentinel — both of which a stock radio leaves in an unset slot. */
+static int stockKeyIsPresent(const uint8_t *key32)
+{
+    static const uint8_t zero[32] = { 0 };
+    if (memcmp(key32, zero, 32) == 0) { return 0; }
+    if (memcmp(key32, s_stockBlankKey, 32) == 0) { return 0; }
+    return 1;
+}
+
+/* Default UTF-16LE slot name = decimal keyId ("1".."15"), matching stock defaults. */
+static void stockDefaultName(uint8_t keyId, uint8_t *name32)
+{
+    char dec[4];
+    int n = 0;
+    if (keyId >= 10) { dec[n++] = (char)('0' + keyId / 10); }
+    dec[n++] = (char)('0' + keyId % 10);
+    memset(name32, 0, 32);
+    for (int i = 0; i < n; i++) { name32[i * 2] = (uint8_t)dec[i]; name32[i * 2 + 1] = 0; }
+}
+
+/* Read + unwrap one stock table entry into keyOut[32]. Returns 1 iff the slot holds
+ * a present (non-blank) AES-256 key. Uses s_aesBlk as the entry scratch. */
+static int stockKeyRead(uint8_t keyId, uint8_t *keyOut)
+{
+    uint8_t *e = s_aesBlk;
+    if (!SPI_Flash_read(stockKeyEntryAddr(keyId), e, STOCK_KEY_ENTRY_LEN)) { return 0; }
+    if ((e[STOCK_KEY_TYPE_OFF] != STOCK_KEY_TYPE_AES256) &&
+        (e[STOCK_KEY_TYPE_OFF] != STOCK_KEY_TYPE_AES256B)) { return 0; }
+    stockUnwrapKey(e + STOCK_KEY_KEY_OFF, keyOut);
+    return stockKeyIsPresent(keyOut);
+}
+
+/* Write one stock table entry: type = AES-256, name (preserved if the slot already
+ * had one, else default), the wrapped key, pad = 0. Returns 1 on success. */
+static int stockKeyWrite(uint8_t keyId, const uint8_t *key32)
+{
+    uint8_t *e = s_aesBlk;
+    uint8_t  name[32];
+    int      haveName;
+    if (!SPI_Flash_read(stockKeyEntryAddr(keyId), e, STOCK_KEY_ENTRY_LEN)) { return 0; }
+    haveName = ((e[STOCK_KEY_TYPE_OFF] == STOCK_KEY_TYPE_AES256) ||
+                (e[STOCK_KEY_TYPE_OFF] == STOCK_KEY_TYPE_AES256B)) &&
+               (e[STOCK_KEY_NAME_OFF] != 0x00) && (e[STOCK_KEY_NAME_OFF] != 0xFF);
+    memcpy(name, e + STOCK_KEY_NAME_OFF, 32);
+    memset(e, 0, STOCK_KEY_ENTRY_LEN);
+    e[STOCK_KEY_TYPE_OFF] = STOCK_KEY_TYPE_AES256;
+    if (haveName) { memcpy(e + STOCK_KEY_NAME_OFF, name, 32); }
+    else          { stockDefaultName(keyId, e + STOCK_KEY_NAME_OFF); }
+    stockWrapKey(key32, e + STOCK_KEY_KEY_OFF);
+    return SPI_Flash_write(stockKeyEntryAddr(keyId), e, STOCK_KEY_ENTRY_LEN) ? 1 : 0;
+}
+
 /* Load a key straight into RAM (bypasses the flash custom-data store). Marks keys
  * as loaded so the lazy flash-load in dmrAesRxPI won't clear it. For bench use. */
 void dmrAesSetKeyRam(uint8_t keyId, const uint8_t *key32)
@@ -228,21 +352,25 @@ void dmrAesSetKeyRam(uint8_t keyId, const uint8_t *key32)
     s_keysLoaded = 1;
 }
 
-/* Load keys from the OpenGD77 custom-data AES_KEYS block (written by the CPS / the
- * aes_key_store tool). Lazy: called on first PI when keys aren't loaded yet. */
+/* Load keys into the RAM store. Key MATERIAL comes from the stock TYT key table in
+ * SPI flash (unwrapped per entry); the global TX-key selector comes from the fork's
+ * OpenGD77 custom-data AESK header. Called at boot (eager) and after every key edit. */
 void dmrAesLoadKeys(void)
 {
-    uint8_t *blk = s_aesBlk;
+    uint8_t key[DMR_AES_KEY_BYTES];
     s_keysLoaded = 1;
     dmr_aes_clear_keys();
     s_txKeyId = 0;
-    if (!codeplugGetOpenGD77CustomDataBounded(CODEPLUG_CUSTOM_DATA_TYPE_AES_KEYS, blk, AESK_BLOCK_LEN)) { return; }
-    if (memcmp(blk, "AESK", 4) != 0) { return; }
-    s_txKeyId = blk[5];   /* active TX key selector (0 = encrypted TX disabled) */
-    for (int i = 0; i < AESK_SLOTS; i++)
+    /* TX-key selector (fork-only; no stock equivalent). Read it before the loop below
+     * reuses s_aesBlk. Absent block -> selector stays 0 (encrypted TX disabled). */
+    if (codeplugGetOpenGD77CustomDataBounded(CODEPLUG_CUSTOM_DATA_TYPE_AES_KEYS, s_aesBlk, AESK_BLOCK_LEN) &&
+        (memcmp(s_aesBlk, "AESK", 4) == 0))
     {
-        uint8_t *e = blk + AESK_HDR_LEN + i * AESK_ENTRY_LEN;
-        if (e[0] == 1) { dmr_aes_set_key(e[1], e + 4); }
+        s_txKeyId = s_aesBlk[5];
+    }
+    for (uint8_t id = STOCK_KEY_MIN_ID; id <= STOCK_KEY_MAX_ID; id++)
+    {
+        if (stockKeyRead(id, key)) { dmr_aes_set_key(id, key); }
     }
 }
 
@@ -268,32 +396,18 @@ int dmrAesSetTxKeyId(uint8_t keyId)
 
 int dmrAesStoreKey(uint8_t keyId, const uint8_t *key32)
 {
-    uint8_t *blk = s_aesBlk;
-    int slot = -1, freeSlot = -1;
-    if (!codeplugGetOpenGD77CustomDataBounded(CODEPLUG_CUSTOM_DATA_TYPE_AES_KEYS, blk, AESK_BLOCK_LEN) || memcmp(blk, "AESK", 4) != 0)
-    {
-        memset(blk, 0, AESK_BLOCK_LEN); memcpy(blk, "AESK", 4); blk[4] = 1;
-    }
-    for (int i = 0; i < AESK_SLOTS; i++)
-    {
-        uint8_t *e = blk + AESK_HDR_LEN + i * AESK_ENTRY_LEN;
-        if ((e[0] == 1) && (e[1] == keyId)) { slot = i; break; }
-        if ((freeSlot < 0) && (e[0] == 0))  { freeSlot = i; }
-    }
-    if (slot < 0) { slot = freeSlot; }
-    if (slot < 0) { return 0; }
-    uint8_t *e = blk + AESK_HDR_LEN + slot * AESK_ENTRY_LEN;
-    e[0] = 1; e[1] = keyId; memcpy(e + 4, key32, 32);
-    int ok = codeplugSetOpenGD77CustomData(CODEPLUG_CUSTOM_DATA_TYPE_AES_KEYS, blk, AESK_BLOCK_LEN) ? 1 : 0;
+    if ((keyId < STOCK_KEY_MIN_ID) || (keyId > STOCK_KEY_MAX_ID)) { return 0; }
+    int ok = stockKeyWrite(keyId, key32);
     dmrAesLoadKeys();
     return ok;
 }
 
 /* Ensure the OpenGD77 custom-data region carries its "OpenGD77" magic, so the
- * codeplugSet/GetOpenGD77CustomData block chain works. On a radio whose region
- * was never initialized it reads all-0xFF (no magic) and dmrAesStoreKey/SetTxKeyId
- * silently fail (the host aes_key_store.py creates the magic; the on-radio menu
- * must be able to do it too). Writing the 12-byte magic leaves offset 12 onward
+ * codeplugSet/GetOpenGD77CustomData block chain works. Only the TX-key selector
+ * (dmrAesSetTxKeyId, AESK header) needs this now — key material lives in the stock
+ * table and no longer depends on the OpenGD77 magic. On a radio whose region was
+ * never initialized it reads all-0xFF (no magic) and dmrAesSetTxKeyId would
+ * silently fail. Writing the 12-byte magic leaves offset 12 onward
  * as a CODEPLUG_CUSTOM_DATA_TYPE_EMPTY (0xFFFFFFFF) block, which the append path
  * then fills. SPI_Flash_write does a read-modify-write of the whole 4 KB sector,
  * so the rest of the region is preserved. MUST run in the UI/main-loop task
@@ -308,22 +422,13 @@ int dmrAesEnsureCustomDataRegion(void)
     return SPI_Flash_write(FLASH_ADDRESS_OFFSET + 0, hdr, 12) ? 1 : 0;
 }
 
-/* Clear the stored key(s) for keyId. Returns 1 on success (incl. nothing to do). */
+/* Clear the stored key for keyId by writing the stock "unset slot" marker (type
+ * AES-256, default name, wrapped BLANK key), so a stock radio sees a normal empty
+ * slot. Returns 1 on success (incl. nothing to do). */
 int dmrAesClearKey(uint8_t keyId)
 {
-    uint8_t *blk = s_aesBlk;
-    int changed = 0;
-    if (!codeplugGetOpenGD77CustomDataBounded(CODEPLUG_CUSTOM_DATA_TYPE_AES_KEYS, blk, AESK_BLOCK_LEN) || memcmp(blk, "AESK", 4) != 0)
-    {
-        return 1;   /* no block -> nothing stored for any keyId */
-    }
-    for (int i = 0; i < AESK_SLOTS; i++)
-    {
-        uint8_t *e = blk + AESK_HDR_LEN + i * AESK_ENTRY_LEN;
-        if ((e[0] == 1) && (e[1] == keyId)) { memset(e, 0, AESK_ENTRY_LEN); changed = 1; }
-    }
-    if (!changed) { return 1; }
-    int ok = codeplugSetOpenGD77CustomData(CODEPLUG_CUSTOM_DATA_TYPE_AES_KEYS, blk, AESK_BLOCK_LEN) ? 1 : 0;
+    if ((keyId < STOCK_KEY_MIN_ID) || (keyId > STOCK_KEY_MAX_ID)) { return 1; }
+    int ok = stockKeyWrite(keyId, s_stockBlankKey);
     dmrAesLoadKeys();
     return ok;
 }
@@ -332,16 +437,11 @@ int dmrAesClearKey(uint8_t keyId)
  * set/empty display. Never returns key material. keyId 0 is the "off" sentinel. */
 uint16_t dmrAesGetKeyMask(void)
 {
-    uint8_t *blk = s_aesBlk;
+    uint8_t  key[DMR_AES_KEY_BYTES];
     uint16_t mask = 0;
-    if (!codeplugGetOpenGD77CustomDataBounded(CODEPLUG_CUSTOM_DATA_TYPE_AES_KEYS, blk, AESK_BLOCK_LEN) || memcmp(blk, "AESK", 4) != 0)
+    for (uint8_t id = STOCK_KEY_MIN_ID; id <= STOCK_KEY_MAX_ID; id++)
     {
-        return 0;
-    }
-    for (int i = 0; i < AESK_SLOTS; i++)
-    {
-        uint8_t *e = blk + AESK_HDR_LEN + i * AESK_ENTRY_LEN;
-        if ((e[0] == 1) && (e[1] < 16)) { mask |= (uint16_t)(1u << e[1]); }
+        if (stockKeyRead(id, key)) { mask |= (uint16_t)(1u << id); }
     }
     return mask;
 }
