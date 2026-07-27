@@ -66,6 +66,50 @@ void displayWriteCmds(uint8_t cmd, size_t len, uint8_t opts[])
 	}
 }
 
+/* Read `n` bytes from HX8353E register `cmd` over the FSMC (RD/NOE is a wired FSMC
+ * AF pin, so a memory-mapped read strobes the controller). Read commands (RDDID
+ * 0x04, RDDST 0x09, RDDPM 0x0a, RDID1/2/3 0xDA/DB/DC) do NOT touch GRAM, so this is
+ * a safe display self-test. Most read commands emit a DUMMY byte first, so out[0]
+ * is typically the dummy and out[1..] the payload.
+ *
+ * `pullUp` selects the data-bus pull resistor DURING the read: a controller that is
+ * NOT driving the bus reads back the pull level (0x00 pulldown / 0xFF pullup), while
+ * a controller that IS driving reads the same bytes regardless of the pull. So a
+ * caller that reads both ways can tell "bus un-driven" (values follow the pull) from
+ * "controller alive" (values independent of the pull) -- disambiguating a dead/
+ * disconnected controller from a too-fast read that merely latched the pull level.
+ *
+ * Runs in the CPS/main-loop context; leaves the pins as the render path expects. */
+static void displaySetDataPull(uint32_t pull)
+{
+	GPIO_InitTypeDef g = {0};
+	g.Mode = GPIO_MODE_AF_PP;
+	g.Pull = pull;
+	g.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
+	g.Alternate = GPIO_AF12_FSMC;
+	g.Pin = LCD_D0_Pin | LCD_D1_Pin | LCD_D2_Pin | LCD_D3_Pin;
+	HAL_GPIO_Init(GPIOD, &g);
+	g.Pin = LCD_D4_Pin | LCD_D5_Pin | LCD_D6_Pin | LCD_D7_Pin;
+	HAL_GPIO_Init(GPIOE, &g);
+}
+
+int displayReadReg(uint8_t cmd, uint8_t *out, int n, int pullUp)
+{
+	displaySetDataPull(pullUp ? GPIO_PULLUP : GPIO_PULLDOWN);          // pull DURING read
+	HAL_GPIO_WritePin(LCD_CS_GPIO_Port, LCD_CS_Pin, GPIO_PIN_RESET);   // CS low
+	*((volatile uint8_t*) LCD_FSMC_ADDR_COMMAND) = cmd;                // write command (RS=0)
+	for (volatile int d = 0; d < 32; d++);                             // settle before first read
+	for (int i = 0; i < n; i++)
+	{
+		out[i] = *((volatile uint8_t*) LCD_FSMC_ADDR_DATA);           // FSMC read (RS=1, NOE strobed)
+		for (volatile int d = 0; d < 8; d++);
+	}
+	HAL_GPIO_WritePin(LCD_CS_GPIO_Port, LCD_CS_Pin, GPIO_PIN_SET);     // CS high
+	displaySetDataPull(GPIO_NOPULL);                                   // restore render-path state
+	*((volatile uint8_t*) LCD_FSMC_ADDR_DATA) = 0;                     // pull pins low for the keypad
+	return n;
+}
+
 void displaySetInvertedState(bool isInverted)
 {
 	if (displayIsInverseVideo != isInverted)

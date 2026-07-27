@@ -53,6 +53,9 @@
 #include "interfaces/adc.h"
 #include "functions/rxPowerSaving.h"
 #include "functions/dmr_sms.h"
+/* Unconditional: the header compiles to nothing without ENABLE_SPECTRUM apart from the
+ * no-op SCANPROF_* macros, which the main loop uses whether or not the flag is set. */
+#include "functions/spectrum.h"   /* spectrumTick(), SCANPROF_* profiler macros */
 
 #if defined(USING_EXTERNAL_DEBUGGER)
 #include "SeggerRTT/RTT/SEGGER_RTT.h"
@@ -560,6 +563,12 @@ void applicationMainTask(void)
 		uint32_t startTime = ticksGetMillis();
 		bool syntheticEvent = false; // used to not trigger the backlight on faked key/button events
 
+		/* LOOP_PERIOD is the real iteration rate; LOOP_BODY is the same thing minus the
+		 * pad below. The scan dwell counts iterations, not milliseconds, so if the body
+		 * ever exceeds 1 ms the dwell silently stretches -- these two say whether it does. */
+		SCANPROF_PERIOD(SCANPROF_LOOP_PERIOD);
+		SCANPROF_START(tLoopBody);
+
 		mainIsRunning = true;
 		keyOrButtonChanged = false;
 
@@ -607,6 +616,12 @@ void applicationMainTask(void)
 				key_event = EVENT_KEY_CHANGE;
 			}
 		}
+#endif
+
+#if defined(ENABLE_SPECTRUM)
+		// DEV: a sweep session parks the radio off its channel, so close it if the host
+		// that opened it has stopped asking for sweeps.
+		spectrumTick();
 #endif
 
 		// Clear PTT button event when TX Inhibit is turned on.
@@ -1278,6 +1293,21 @@ void applicationMainTask(void)
 			}
 #endif
 		}
+#if defined(ENABLE_KEY_INJECTION)
+		// DEV: a USB-injected FUNCTION event (CPS 0x97), delivered the same way a
+		// quick-key delivers one. Only when nothing else is happening this iteration, so
+		// it can never mask a real key or button.
+		if ((function_event == NO_EVENT) && (key_event == EVENT_KEY_NONE) &&
+				(button_event == EVENT_BUTTON_NONE))
+		{
+			uint16_t injFunction;
+			if (usbFuncInjectTick(&injFunction))
+			{
+				ev.function = injFunction;
+				function_event = FUNCTION_EVENT;
+			}
+		}
+#endif
 		ev.buttons = buttons;
 		ev.keys = keys;
 		ev.rotary = rotary;
@@ -1311,7 +1341,11 @@ void applicationMainTask(void)
 			ev.hasEvent = false;
 		}
 
-		menuSystemCallCurrentMenuTick(&ev);
+		{
+			SCANPROF_START(tMenuTick);
+			menuSystemCallCurrentMenuTick(&ev);
+			SCANPROF_END(SCANPROF_MENUTICK, tMenuTick);
+		}
 
 		// Restore the beep built when a menu was pushed by the quickkey above.
 		if (quickkeyPushedMenuMelody)
@@ -1456,6 +1490,8 @@ void applicationMainTask(void)
 			volumeIsStillChanging = false;
 			updateVolumeGain(currentMenu);
 		}
+
+		SCANPROF_END(SCANPROF_LOOP_BODY, tLoopBody);
 
 		while(ticksGetMillis() < startTime + 1)				// ensure this Task runs at 1ms intervals. Regardless of clock speed.
 		{

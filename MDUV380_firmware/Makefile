@@ -48,6 +48,22 @@ ifeq ($(ENABLE_KEY_INJECTION),1)
 DEFS += -DENABLE_KEY_INJECTION
 endif
 
+# Dev-only: swept-RSSI receiver driven over USB (tools/sweep.py). NOT an SDR --
+# the AT1846S has no IQ output, only an RSSI register. Never enable in a release
+# build. Independent of ENABLE_AES / ENABLE_DMR_DATA / ENABLE_KEY_INJECTION.
+ifeq ($(ENABLE_SPECTRUM),1)
+DEFS += -DENABLE_SPECTRUM
+endif
+
+# Faster ANALOG scanning: adds sub-30 ms steps (20/15/10/6 ms) to the existing
+# "Scan dwell time" setting, selectable on the radio and via CHIRP. Digital scanning is
+# unchanged (it takes the larger of this and its own DMR timeslot minimum). Unlike
+# ENABLE_SPECTRUM this is a user-facing feature flag, not a dev one -- but it is still a
+# flag so that a build without it stays byte-identical to stock.
+ifeq ($(ENABLE_FAST_SCAN),1)
+DEFS += -DENABLE_FAST_SCAN
+endif
+
 CFLAGS  = $(CPU) $(DEFS) $(INCS) -Os -g3 -ffunction-sections -fdata-sections -Wall -MMD -MP
 LDSCRIPT = STM32F405VGTX_FLASH.ld
 LDFLAGS = $(CPU) -T$(LDSCRIPT) --specs=nano.specs -Wl,--gc-sections -Wl,-Map=$(BUILD)/$(TARGET).map -lc -lm -lnosys

@@ -47,5 +47,8 @@ bool displayIsBacklightLit(void);
 void displayWriteCmd(uint8_t cmd);
 void displayWriteData(uint8_t val);
 void displayWriteCmds(uint8_t cmd, size_t len, uint8_t opts[]);
+/* Display self-test: read `n` bytes from HX8353E register `cmd` (ID/status).
+ * pullUp selects the data-bus pull during the read (0 = pulldown, 1 = pullup). */
+int  displayReadReg(uint8_t cmd, uint8_t *out, int n, int pullUp);
 
 #endif /* _OPENGD77_DISPLAY_H_ */

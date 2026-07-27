@@ -40,11 +40,18 @@
 #include "hardware/HR-C6000.h"
 #include "functions/sound.h"
 #include "hardware/SPI_Flash.h"
+#include "io/display.h"   /* displayReadReg (HX8353E self-test, CPS 0x8A) */
 #include "user_interface/uiLocalisation.h"
 #include "functions/rxPowerSaving.h"
 #include "main.h"
 #include <interfaces/clockManager.h>
 #include "interfaces/settingsStorage.h"
+#if defined(ENABLE_KEY_INJECTION)
+#include "usb_device.h"   /* MX_USB_DEVICE_DeInit() for the DFU jump */
+#endif
+#if defined(ENABLE_SPECTRUM)
+#include "functions/spectrum.h"   /* swept-RSSI receiver (CPS 0xA0 / 0xA1) */
+#endif
 #include "interfaces/gps.h"
 
 //#define DEBUG_POSITION 1
@@ -122,6 +129,26 @@ static volatile uint8_t s_injKey[INJ_RING];
 static volatile uint8_t s_injFlags[INJ_RING];   /* bit0 = long press */
 static volatile uint8_t s_injHead = 0, s_injTail = 0;   /* head = write, tail = read */
 static volatile uint8_t s_injPhase = 0;         /* 0 = emit DOWN next, 1 = emit UP next */
+static volatile uint32_t s_injPhaseTime = 0;    /* when the current phase was emitted */
+
+/* How long to "hold" an injected long press between the DOWN and the LONG event.
+ *
+ * The event SEQUENCE alone is not enough -- the timing is load-bearing. A UI handler can
+ * sit behind state that only clears while the key is held: uiVFOMode's sweep hotkey
+ * (long-press #) is gated on FreqEnter.index == 0, and the DOWN|PRESS that starts every
+ * press is also what menuGetKeypadKeyValue() turns into the first digit of a frequency
+ * entry. On real hardware the ~300 ms pending-entry timeout fires during the hold and
+ * clears it, so the LONG event lands with the gate open. Emitting DOWN and LONG on
+ * consecutive main-loop iterations (microseconds apart) never let that timeout run, so
+ * those handlers were unreachable from USB while apparently-identical ones worked.
+ *
+ * 600 ms comfortably exceeds that 300 ms timeout and is a realistic hold. */
+#define INJ_LONG_HOLD_MS  600U
+
+/* Pending injected FUNCTION event (see usb_com.h). 0 = none, which is safe because every
+ * FUNC_* code is non-zero. 16 bits, not 8: the codes are QUICKKEY_MENUVALUE() encodings
+ * that set bit 15 (e.g. FUNC_START_SCANNING = (QUICKKEY_MENU << 15) | 1). */
+static volatile uint16_t s_injFunction = 0;
 
 static void usbKeyInjectPush(uint8_t key, uint8_t flags)
 {
@@ -373,22 +400,81 @@ bool usbKeyInjectTick(uint8_t *outEvent, char *outKey)
 {
 	if (s_injTail == s_injHead) { return false; }   /* nothing queued */
 	uint8_t key = s_injKey[s_injTail];
-	uint8_t lng = (s_injFlags[s_injTail] & 0x01) ? INJ_MOD_LONG : 0;
+	bool isLong = ((s_injFlags[s_injTail] & 0x01) != 0);
+	bool isHold = ((s_injFlags[s_injTail] & 0x02) != 0);
 	*outKey = (char)key;
-	if (s_injPhase == 0)
+
+	/* Replay the SAME event sequence the real keypad driver produces (the state machine
+	 * in keyboard.c), because the UI is written against it:
+	 *
+	 *   short press : DOWN|PRESS                  then UP
+	 *   long press  : DOWN|PRESS  ->  LONG|DOWN   then LONG|UP
+	 *
+	 * The middle event is the one that matters and the one this used to get wrong. A
+	 * long press is a SEQUENCE spread over time, not one richer event: the driver emits
+	 * DOWN|PRESS as the key goes down (KEY_PRESS), and only later, when the long-press
+	 * timer expires (KEY_WAITLONG -> KEY_REPEAT), emits LONG|DOWN -- which carries NO
+	 * PRESS bit. Emitting DOWN|PRESS|LONG as a single event, as this did before, is a
+	 * combination the hardware never generates: KEYCHECK_PRESS matched it first and
+	 * consumed it, so KEYCHECK_LONGDOWN handlers were unreachable from USB on any key
+	 * with more than one action (FRONT UP is next-channel AND start-scanning).
+	 *
+	 * Emitting the honest sequence makes both styles work with no special flags, and a
+	 * long press correctly does NOT also fire the key's short-press action -- exactly as
+	 * on the real keypad, where the release after a long press reports LONG|UP and so
+	 * never satisfies KEYCHECK_SHORTUP. */
+	switch (s_injPhase)
 	{
-		/* DOWN carries PRESS too: menu list scrolling tests KEYCHECK_PRESS (the PRESS
-		 * bit), while GREEN/select tests KEYCHECK_SHORTUP (the UP bit) -- a real key
-		 * press reports both across its lifetime, so emit both to drive either style. */
-		*outEvent = (uint8_t)(INJ_MOD_DOWN | INJ_MOD_PRESS | lng);
-		s_injPhase = 1;
+		case 0:
+			*outEvent = (uint8_t)(INJ_MOD_DOWN | INJ_MOD_PRESS);
+			s_injPhase = (uint8_t)(isLong ? 1 : 2);
+			s_injPhaseTime = ticksGetMillis();
+			break;
+
+		case 1:   /* long presses only: hold before the LONG event -- see INJ_LONG_HOLD_MS */
+			if ((ticksGetMillis() - s_injPhaseTime) < INJ_LONG_HOLD_MS)
+			{
+				return false;   /* still "holding"; nothing to deliver this iteration */
+			}
+			*outEvent = (uint8_t)(INJ_MOD_LONG | INJ_MOD_DOWN);
+			s_injPhase = 2;
+			break;
+
+		default:  /* release */
+			s_injPhase = 0;
+			s_injTail = (uint8_t)((s_injTail + 1) % INJ_RING);   /* key consumed */
+
+			/* flags bit1 = HOLD: deliver the long press with no release event.
+			 *
+			 * Needed for "press and hold to enter a mode" handlers. uiVFOMode's sweep is
+			 * the example: sweepScanInit() sets Scan.active, and handleEvent() then stops
+			 * scanning on ANY key event whose key is not in a small exempt list -- which
+			 * does not include the very key used to enter it. So the release tears the
+			 * mode straight back down, one iteration after entering it. Holding leaves
+			 * the mode up; the caller sends a separate key later to leave it. */
+			if (isLong && isHold)
+			{
+				return false;
+			}
+			*outEvent = (uint8_t)(isLong ? (INJ_MOD_LONG | INJ_MOD_UP) : INJ_MOD_UP);
+			break;
 	}
-	else
+	return true;
+}
+
+void usbFuncInjectPush(uint16_t function)
+{
+	s_injFunction = function;
+}
+
+bool usbFuncInjectTick(uint16_t *outFunction)
+{
+	if (s_injFunction == 0)
 	{
-		*outEvent = (uint8_t)(INJ_MOD_UP | lng);
-		s_injPhase = 0;
-		s_injTail = (uint8_t)((s_injTail + 1) % INJ_RING);   /* key consumed */
+		return false;
 	}
+	*outFunction = s_injFunction;
+	s_injFunction = 0;
 	return true;
 }
 #endif
@@ -945,6 +1031,248 @@ static void cpsHandleCommand(void)
 	int command = com_requestbuffer[1];
 	switch(command)
 	{
+#if defined(ENABLE_SPECTRUM)
+		case 0xA0: // DEV: swept-RSSI sweep. Request (15 B):
+			//   [2..5]=start freq BE, [6..9]=step BE (both in 10 Hz units),
+			//   [10..11]=point count BE, [12..13]=dwell us BE, [14]=mode (see spectrum.h).
+			// Reply: [cmd, 0xA0, points BE(2), elapsedMs BE(2), points * (rssi, noise)].
+			// `points` may come back short of what was asked for -- the firmware caps how
+			// long it holds the CPS critical section, so the host just asks for the rest.
+			// A count of 0 means refused (a sweep may not straddle two bands: the per-point
+			// retune only moves the PLL, it does not re-select the RX front end).
+			{
+				uint32_t fStart = (com_requestbuffer[2] << 24) | (com_requestbuffer[3] << 16) |
+						(com_requestbuffer[4] << 8) | com_requestbuffer[5];
+				uint32_t step = (com_requestbuffer[6] << 24) | (com_requestbuffer[7] << 16) |
+						(com_requestbuffer[8] << 8) | com_requestbuffer[9];
+				uint16_t nPoints = (com_requestbuffer[10] << 8) | com_requestbuffer[11];
+				uint16_t dwellUs = (com_requestbuffer[12] << 8) | com_requestbuffer[13];
+				uint8_t mode = com_requestbuffer[14];
+				uint16_t elapsedMs = 0;
+				uint32_t fEnd;
+				int n = 0;
+
+				if (nPoints > SPECTRUM_SWEEP_MAX_POINTS)
+				{
+					nPoints = SPECTRUM_SWEEP_MAX_POINTS;
+				}
+
+				fEnd = fStart + ((uint32_t)(nPoints ? (nPoints - 1) : 0) * step);
+
+				if ((nPoints > 0) && (trxGetBandFromFrequency(fStart) != FREQUENCY_OUT_OF_BAND) &&
+						(trxGetBandFromFrequency(fStart) == trxGetBandFromFrequency(fEnd)))
+				{
+					n = spectrumSweep(fStart, step, nPoints, dwellUs, mode,
+							(uint8_t *)&usbComSendBuf[6], &elapsedMs);
+				}
+
+				usbComSendBuf[0] = com_requestbuffer[0];
+				usbComSendBuf[1] = 0xA0;
+				usbComSendBuf[2] = (uint8_t)((n >> 8) & 0xFF);
+				usbComSendBuf[3] = (uint8_t)(n & 0xFF);
+				usbComSendBuf[4] = (uint8_t)((elapsedMs >> 8) & 0xFF);
+				usbComSendBuf[5] = (uint8_t)(elapsedMs & 0xFF);
+				hasToReply = true;
+				replyLength = 6 + (n * 2);
+			}
+			return;   /* NOT break: the generic '-' reply below would clobber the data */
+		case 0xA1: // DEV: retune -> settle -> RSSI timing probe (Stage 0). Request (14 B):
+			//   [2..5]=freq A BE, [6..9]=freq B BE (10 Hz units), [10]=mode,
+			//   [11]=sample count, [12..13]=sample interval us BE (0 = as fast as I2C allows).
+			// Reply: [cmd, 0xA1, count, mode, retuneUs BE(2), readUs BE(2),
+			//         count * (tUs BE(2), rssi, noise)].
+			{
+				uint32_t fA = (com_requestbuffer[2] << 24) | (com_requestbuffer[3] << 16) |
+						(com_requestbuffer[4] << 8) | com_requestbuffer[5];
+				uint32_t fB = (com_requestbuffer[6] << 24) | (com_requestbuffer[7] << 16) |
+						(com_requestbuffer[8] << 8) | com_requestbuffer[9];
+				uint8_t mode = com_requestbuffer[10];
+				uint8_t nSamples = com_requestbuffer[11];
+				uint16_t intervalUs = (com_requestbuffer[12] << 8) | com_requestbuffer[13];
+				static spectrumSample_t samples[SPECTRUM_PROBE_MAX_SAMPLES];
+				spectrumProbeInfo_t info = { 0, 0, 0 };
+				int n = 0;
+
+				if ((trxGetBandFromFrequency(fA) != FREQUENCY_OUT_OF_BAND) &&
+						(trxGetBandFromFrequency(fB) != FREQUENCY_OUT_OF_BAND))
+				{
+					n = spectrumSettleProbe(fA, fB, mode, intervalUs, nSamples, samples, &info);
+				}
+
+				usbComSendBuf[0] = com_requestbuffer[0];
+				usbComSendBuf[1] = 0xA1;
+				usbComSendBuf[2] = (uint8_t)n;
+				usbComSendBuf[3] = mode;
+				usbComSendBuf[4] = (uint8_t)((info.retuneUs >> 8) & 0xFF);
+				usbComSendBuf[5] = (uint8_t)(info.retuneUs & 0xFF);
+				usbComSendBuf[6] = (uint8_t)((info.readUs >> 8) & 0xFF);
+				usbComSendBuf[7] = (uint8_t)(info.readUs & 0xFF);
+				for (int i = 0; i < n; i++)
+				{
+					usbComSendBuf[8 + (i * 4)] = (uint8_t)((samples[i].tUs >> 8) & 0xFF);
+					usbComSendBuf[9 + (i * 4)] = (uint8_t)(samples[i].tUs & 0xFF);
+					usbComSendBuf[10 + (i * 4)] = samples[i].rssi;
+					usbComSendBuf[11 + (i * 4)] = samples[i].noise;
+				}
+				hasToReply = true;
+				replyLength = 8 + (n * 4);
+			}
+			return;   /* NOT break -- see above */
+		case 0xA2: // DEV: open a sweep session: [2..5]=anchor freq BE, [6]=mode.
+			//        Configures the receiver ONCE and leaves it running, so the 0xA0
+			//        sweeps that follow only move the PLL and skip the ~30 ms
+			//        receiver-restart settle. The session self-closes after
+			//        SPECTRUM_SESSION_TIMEOUT_MS without a sweep.
+			{
+				uint32_t anchor = (com_requestbuffer[2] << 24) | (com_requestbuffer[3] << 16) |
+						(com_requestbuffer[4] << 8) | com_requestbuffer[5];
+
+				if (trxGetBandFromFrequency(anchor) != FREQUENCY_OUT_OF_BAND)
+				{
+					spectrumSessionBegin(anchor, com_requestbuffer[6]);
+				}
+
+				usbComSendBuf[0] = com_requestbuffer[0];
+				usbComSendBuf[1] = 0xA2;
+				usbComSendBuf[2] = (uint8_t)(spectrumSessionIsActive() ? 1 : 0);
+				hasToReply = true;
+				replyLength = 3;
+			}
+			return;   /* NOT break -- see above */
+		case 0xA3: // DEV: close a sweep session and put the radio back on its channel.
+			spectrumSessionEnd();
+			usbComSendBuf[0] = com_requestbuffer[0];
+			usbComSendBuf[1] = 0xA3;
+			usbComSendBuf[2] = 0;
+			hasToReply = true;
+			replyLength = 3;
+			return;   /* NOT break -- see above */
+		case 0xA4: // DEV: set the AT1846S register overrides re-applied after every
+			//        retune: [2]=count, then count * [reg, hi, lo]. Count 0 clears them.
+			//        Lets the settle-time search try a candidate register setting per
+			//        second instead of per flash cycle.
+			{
+				int count = com_requestbuffer[2];
+
+				if (count > SPECTRUM_MAX_OVERRIDES)
+				{
+					count = SPECTRUM_MAX_OVERRIDES;
+				}
+				spectrumSetOverrides(count, (const uint8_t *)&com_requestbuffer[3]);
+
+				usbComSendBuf[0] = com_requestbuffer[0];
+				usbComSendBuf[1] = 0xA4;
+				usbComSendBuf[2] = (uint8_t)spectrumGetOverrideCount();
+				hasToReply = true;
+				replyLength = 3;
+			}
+			return;   /* NOT break -- see above */
+		case 0xA6: // DEV: set the analog-scan dwell override in ms: [2..3] BE. 0 restores
+			//        stock behaviour. Runtime rather than compile-time so stock and
+			//        modified scanning can be compared on one firmware image.
+			//        Takes effect at the next scanStart().
+			spectrumScanAnalogDwellMs = (uint16_t)((com_requestbuffer[2] << 8) |
+					com_requestbuffer[3]);
+			usbComSendBuf[0] = com_requestbuffer[0];
+			usbComSendBuf[1] = 0xA6;
+			usbComSendBuf[2] = (uint8_t)((spectrumScanAnalogDwellMs >> 8) & 0xFF);
+			usbComSendBuf[3] = (uint8_t)(spectrumScanAnalogDwellMs & 0xFF);
+			hasToReply = true;
+			replyLength = 4;
+			return;   /* NOT break -- see above */
+		case 0xA8: // DEV: set the built-in VFO sweep step time in ms: [2..3] BE.
+			//        0 restores the stock 25 ms. Takes effect on the next sweep sample,
+			//        so 25 ms and a faster value can be compared live without reflashing.
+			spectrumSweepStepTimeMs = (uint16_t)((com_requestbuffer[2] << 8) |
+					com_requestbuffer[3]);
+			usbComSendBuf[0] = com_requestbuffer[0];
+			usbComSendBuf[1] = 0xA8;
+			usbComSendBuf[2] = (uint8_t)((spectrumSweepStepTimeMs >> 8) & 0xFF);
+			usbComSendBuf[3] = (uint8_t)(spectrumSweepStepTimeMs & 0xFF);
+			hasToReply = true;
+			replyLength = 4;
+			return;   /* NOT break -- see above */
+		case 0xAA: // DEV: set the scan settling interval in main-loop ticks: [2..3] BE.
+			//        0 restores the stock SCAN_FREQ_CHANGE_SETTLING_INTERVAL of 1.
+			//        Takes effect on the next scan step, so the detection threshold can be
+			//        measured against several values without reflashing. See spectrum.h.
+			spectrumScanSettleTicks = (uint16_t)((com_requestbuffer[2] << 8) |
+					com_requestbuffer[3]);
+			usbComSendBuf[0] = com_requestbuffer[0];
+			usbComSendBuf[1] = 0xAA;
+			usbComSendBuf[2] = (uint8_t)((spectrumScanSettleTicks >> 8) & 0xFF);
+			usbComSendBuf[3] = (uint8_t)(spectrumScanSettleTicks & 0xFF);
+			hasToReply = true;
+			replyLength = 4;
+			return;   /* NOT break -- see above */
+		case 0xA9: // DEV: read the scan-step profiler table. [2] = action:
+			//        bit0 = zero the table after reading, bit1 = zero it and return nothing
+			//        useful (arm before a run). Reply:
+			//        [cmd, 0xA9, nSlots, cyclesPerUs BE(2),
+			//         then per slot: count BE(2), lastUs BE(2), minUs BE(2), maxUs BE(2),
+			//                        meanUs BE(2)].
+			//        Microseconds are saturated at 65535 (65 ms); nothing being measured
+			//        here should come close, and a slot that does is broken anyway.
+			{
+				uint32_t cpu = scanProfCyclesPerUs();
+				uint8_t *p = (uint8_t *)&usbComSendBuf[0];
+				int n = 0;
+
+				p[n++] = com_requestbuffer[0];
+				p[n++] = 0xA9;
+				p[n++] = (uint8_t)SCANPROF_SLOTS;
+				p[n++] = (uint8_t)((cpu >> 8) & 0xFF);
+				p[n++] = (uint8_t)(cpu & 0xFF);
+
+				if ((com_requestbuffer[2] & 0x02) == 0)
+				{
+					for (int i = 0; i < SCANPROF_SLOTS; i++)
+					{
+						const scanProfSlot_t *s = &scanProfSlots[i];
+						uint32_t vals[5];
+
+						vals[0] = ((s->count > 65535U) ? 65535U : s->count);
+						vals[1] = (s->lastCycles / cpu);
+						vals[2] = ((s->count != 0) ? (s->minCycles / cpu) : 0U);
+						vals[3] = (s->maxCycles / cpu);
+						vals[4] = ((s->count != 0) ? (uint32_t)((s->sumCycles / s->count) / cpu) : 0U);
+
+						for (int k = 0; k < 5; k++)
+						{
+							uint32_t v = ((vals[k] > 65535U) ? 65535U : vals[k]);
+
+							p[n++] = (uint8_t)((v >> 8) & 0xFF);
+							p[n++] = (uint8_t)(v & 0xFF);
+						}
+					}
+				}
+
+				if (com_requestbuffer[2] & 0x03)
+				{
+					scanProfReset();
+				}
+
+				hasToReply = true;
+				replyLength = n;
+			}
+			return;   /* NOT break -- see above */
+		case 0xA5: // DEV: read one AT1846S register: [2]=reg -> [cmd, 0xA5, reg, hi, lo, ok].
+			//        Reads the chip, not the driver's value cache.
+			{
+				uint8_t hi = 0, lo = 0;
+				bool ok = spectrumReadReg(com_requestbuffer[2], &hi, &lo);
+
+				usbComSendBuf[0] = com_requestbuffer[0];
+				usbComSendBuf[1] = 0xA5;
+				usbComSendBuf[2] = com_requestbuffer[2];
+				usbComSendBuf[3] = hi;
+				usbComSendBuf[4] = lo;
+				usbComSendBuf[5] = (uint8_t)(ok ? 1 : 0);
+				hasToReply = true;
+				replyLength = 6;
+			}
+			return;   /* NOT break -- see above */
+#endif
 #ifdef ENABLE_KEY_INJECTION
 		case 0x96: // DEV: inject a keypad key: [2]=keycode, [3]=flags (bit0 = long press).
 			//        Queued here; usbKeyInjectTick() feeds it to the normal UI (DOWN then UP)
@@ -954,6 +1282,19 @@ static void cpsHandleCommand(void)
 			hasToReply = true;
 			replyLength = 1;
 			break;
+		case 0xA7: // DEV: inject a UI FUNCTION event: [2..3] = FUNC_* code BE
+			//        (menuSystem.h; 16-bit QUICKKEY_MENUVALUE encoding). Addresses a
+			//        handler directly rather than hoping a key event survives the UI's
+			//        else-if chain. FUNC_START_SCANNING = 0x8001 is what this was added
+			//        for. Delivered from the main loop by usbFuncInjectTick().
+			usbFuncInjectPush((uint16_t)((com_requestbuffer[2] << 8) | com_requestbuffer[3]));
+			usbComSendBuf[0] = com_requestbuffer[0];
+			usbComSendBuf[1] = 0xA7;
+			usbComSendBuf[2] = com_requestbuffer[2];
+			usbComSendBuf[3] = com_requestbuffer[3];
+			hasToReply = true;
+			replyLength = 4;
+			return;   /* NOT break -- the generic '-' reply would clobber this */
 		case 0x9F: // DEV: reboot into DFU (button-free dev flashing) by marking the app
 			//        invalid, then resetting. Replies [cmd, halStatus, err(4), SR(4),
 			//        spAfter(4)] so a failed flash write is diagnosable from the host.
@@ -1071,6 +1412,36 @@ static void cpsHandleCommand(void)
 			hasToReply = true;
 			replyLength = 1;
 			break;
+		case 0x8A: // DIAG: read HX8353E display register [2]=cmd [3]=count [4]=pullUp -> [cmd, count, bytes...]
+			{          // display self-test: probes whether the LCD controller responds
+				int cnt = com_requestbuffer[3];
+				uint8_t regbuf[40];
+				if (cnt < 0) { cnt = 0; }
+				if (cnt > (int)sizeof(regbuf)) { cnt = sizeof(regbuf); }
+				displayReadReg(com_requestbuffer[2], regbuf, cnt, com_requestbuffer[4]);
+				usbComSendBuf[0] = com_requestbuffer[0];
+				usbComSendBuf[1] = (uint8_t)cnt;
+				if (cnt > 0) { memcpy((uint8_t *)&usbComSendBuf[2], regbuf, cnt); }
+				hasToReply = true;
+				replyLength = 2 + cnt;
+				return;   // bypass the trailing generic '-' reply (it overwrites usbComSendBuf)
+			}
+		case 0x8B: // DIAG: re-run display init to WAKE the panel. [2]=lcdType (0=keep, 2/3=run the
+			{      // booster/power-control init path). reply [cmd, lcdType, rddpm_before(2), rddpm_after(2)]
+				uint8_t before[2] = {0}, after[2] = {0};
+				uint8_t t = com_requestbuffer[2];
+				displayReadReg(0x0A, before, 2, 0);               /* RDDPM = power mode */
+				if ((t == 2) || (t == 3)) { displayLCD_Type = t; } /* type 2/3 => booster init runs */
+				displayInit(false, true);                         // RST, (booster if 2/3), SLPOUT, DISPON
+				displayReadReg(0x0A, after, 2, 0);
+				usbComSendBuf[0] = com_requestbuffer[0];
+				usbComSendBuf[1] = displayLCD_Type;
+				usbComSendBuf[2] = before[0]; usbComSendBuf[3] = before[1];
+				usbComSendBuf[4] = after[0];  usbComSendBuf[5] = after[1];
+				hasToReply = true;
+				replyLength = 6;
+				return;   // bypass the trailing generic '-' reply
+			}
 		case 0x92: // DIAG: decrypt data-SMS [2]=keyId [3]=ctLen [4..]=ct -> [cmd, textLen|0xFF, text...]
 			{
 				int ctlen = com_requestbuffer[3];

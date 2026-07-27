@@ -77,6 +77,15 @@ void USB_DEBUG_printf(const char *format, ...) __attribute__((format(__printf__,
  * iteration; when a USB-injected key is pending (and no real key is active) it
  * fills *outEvent (keyboardCode_t.event bits) + *outKey and returns true. */
 bool usbKeyInjectTick(uint8_t *outEvent, char *outKey);
+
+/* Inject a UI FUNCTION event (menuSystem.h FUNC_*), the same mechanism a quick-key
+ * uses. Injecting a KEY event cannot reliably reach every handler: the UI tests keys in
+ * long else-if chains, so a key that has several actions (FRONT UP is next-channel,
+ * power-up and start-scanning depending on modifiers) gets consumed by whichever branch
+ * matches first. A function event addresses the handler directly and is unambiguous.
+ * Returns true and consumes the pending function when there is one. */
+void usbFuncInjectPush(uint16_t function);
+bool usbFuncInjectTick(uint16_t *outFunction);
 #endif
 
 #endif /* _OPENGD77_USB_COM_H_ */

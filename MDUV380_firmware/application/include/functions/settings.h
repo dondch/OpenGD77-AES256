@@ -420,6 +420,23 @@ void settingsEraseCustomContent(void);
 //void settingsInitVFOChannel(int vfoNumber);
 void enableVoicePromptsIfLoaded(bool enableFullPrompts);
 int settingsGetScanStepTimeMilliseconds(void);
+
+#if defined(ENABLE_FAST_SCAN)
+/* Faster analog scanning. scanStepTime 0..15 keeps its original meaning (30..480 ms, i.e.
+ * TIMESLOT_DURATION multiples); 16..19 are new sub-30 ms steps for ANALOG channels only.
+ * Digital scanning is unchanged because every digital path already takes the larger of
+ * this value and its own DMR timeslot minimum.
+ *
+ * The fastest offered step is 6 ms, and that limit is measured, not chosen for comfort --
+ * see the comment on SCAN_STEP_FAST_MS in settings.c for the cliff below 4 ms. */
+#define SCAN_STEP_TIME_SLOWEST_INDEX  15   // last of the original 30..480 ms values
+#define SCAN_STEP_TIME_NUM_FAST        4   // indices 16..19
+#define SCAN_STEP_TIME_MAX_INDEX      (SCAN_STEP_TIME_SLOWEST_INDEX + SCAN_STEP_TIME_NUM_FAST)
+
+extern const uint16_t SCAN_STEP_FAST_MS[SCAN_STEP_TIME_NUM_FAST];
+
+uint8_t settingsGetAdjacentScanStepTime(uint8_t current, bool slower);
+#endif
 bool settingsLocationIsValid(void);
 double settingsLocationGetLatitude(void);
 double settingsLocationGetLongitude(void);

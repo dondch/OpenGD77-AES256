@@ -34,6 +34,7 @@
 #include "functions/settings.h"
 #include "functions/trx.h"
 #include "functions/rxPowerSaving.h"
+#include "functions/spectrum.h"   /* SCANPROF_*: dev-only scan-step profiler, no-ops otherwise */
 #include "functions/aprs.h"
 #include "user_interface/menuSystem.h"
 #include "user_interface/uiUtilities.h"
@@ -961,19 +962,23 @@ void trxCalcBandAndFrequencyOffset(CalibrationBand_t *calibrationBand, uint32_t 
 
 static void trxUpdateC6000Calibration(void)
 {
+	SCANPROF_START(tC6000Cal);
 	int8_t cal = calibrationGetMod2Offset(currentRadioDevice->trxCurrentBand[trxTransmissionEnabled ? TRX_TX_FREQ_BAND : TRX_RX_FREQ_BAND]);
 	SPI0WritePageRegByte(0x04, 0x47, cal);			// Set the reference tuning offset
 	SPI0WritePageRegByte(0x04, 0x48, ((cal < 0) ? 0x03 : 0x00));
 	SPI0WritePageRegByte(0x04, 0x04, cal);									//Set MOD 2 Offset (Cal Value)
+	SCANPROF_END(SCANPROF_C6000CAL, tC6000Cal);
 }
 
 static void trxUpdateRadioCalibration(void)
 {
+	SCANPROF_START(tRadioCal);
 	analogIGain = calibrationGetAnalogIGainForFrequency(currentRadioDevice->currentTxFrequency);
 	analogQGain = calibrationGetAnalogQGainForFrequency(currentRadioDevice->currentTxFrequency);
 	digitalIGain = calibrationGetDigitalIGainForFrequency(currentRadioDevice->currentTxFrequency);
 	digitalQGain = calibrationGetDigitalQGainForFrequency(currentRadioDevice->currentTxFrequency);
 	Mod2Offset = calibrationGetMod2Offset(currentRadioDevice->trxCurrentBand[trxTransmissionEnabled ? TRX_TX_FREQ_BAND : TRX_RX_FREQ_BAND]);
+	SCANPROF_END(SCANPROF_RADIOCAL, tRadioCal);
 }
 
 void trxSetDMRColourCode(uint8_t colourCode)

@@ -411,10 +411,22 @@ static void handleEvent(uiEvent_t *ev)
 					}
 					break;
 				case RADIO_OPTIONS_MENU_SCAN_STEP_TIME:
+#if defined(ENABLE_FAST_SCAN)
+					// Walk the display order (6, 10, 15, 20, 30, 60 ... 480 ms) rather
+					// than the raw stored value, whose fast entries live above 15.
+					{
+						uint8_t next = settingsGetAdjacentScanStepTime(nonVolatileSettings.scanStepTime, true);
+						if (next != nonVolatileSettings.scanStepTime)
+						{
+							settingsSet(nonVolatileSettings.scanStepTime, next);
+						}
+					}
+#else
 					if (nonVolatileSettings.scanStepTime < 15)  // <30> + (15 * 30ms) MAX
 					{
 						settingsIncrement(nonVolatileSettings.scanStepTime, 1);
 					}
+#endif
 					break;
 				case RADIO_OPTIONS_MENU_SCAN_MODE:
 					if (nonVolatileSettings.scanModePause < SCAN_MODE_STOP)
@@ -524,10 +536,20 @@ static void handleEvent(uiEvent_t *ev)
 					}
 					break;
 				case RADIO_OPTIONS_MENU_SCAN_STEP_TIME:
+#if defined(ENABLE_FAST_SCAN)
+					{
+						uint8_t prev = settingsGetAdjacentScanStepTime(nonVolatileSettings.scanStepTime, false);
+						if (prev != nonVolatileSettings.scanStepTime)
+						{
+							settingsSet(nonVolatileSettings.scanStepTime, prev);
+						}
+					}
+#else
 					if (nonVolatileSettings.scanStepTime > 0)
 					{
 						settingsDecrement(nonVolatileSettings.scanStepTime, 1);
 					}
+#endif
 					break;
 				case RADIO_OPTIONS_MENU_SCAN_MODE:
 					if (nonVolatileSettings.scanModePause > SCAN_MODE_HOLD)

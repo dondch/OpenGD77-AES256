@@ -28,6 +28,7 @@
 #include "functions/settings.h"
 #include "functions/trx.h"
 #include "functions/rxPowerSaving.h"
+#include "functions/spectrum.h"   /* SCANPROF_*: dev-only scan-step profiler, no-ops otherwise */
 #include "hardware/HR-C6000.h"
 #include "hardware/AT1846S.h"
 #if defined(USING_EXTERNAL_DEBUGGER)
@@ -204,6 +205,7 @@ static void trxUpdateAT1846SCalibration(void)
 
 void radioSetFrequency(uint32_t f_in, bool Tx)
 {
+	SCANPROF_START(tSetFreq);
 	// G4EML.  Hack to fix the -3KHz offset on transmit on the MDUV380
 	// Believed to be caused by something in the AT1846S configuration.
 	// If we ever fix what is causing it then this hack can be removed.
@@ -284,13 +286,17 @@ void radioSetFrequency(uint32_t f_in, bool Tx)
 	{
 		dacOut(1, 0);
 	}
+
+	SCANPROF_END(SCANPROF_RADIOSETFREQ, tSetFreq);
 }
 
 void radioSetIF(int band, bool wide)
 {
+	SCANPROF_START(tSetIF);
 	UNUSED_PARAMETER(band);
 
 	radioSetBandwidth(wide);
+	SCANPROF_END(SCANPROF_RADIOSETIF, tSetIF);
 }
 
 void radioSetTx(uint8_t band)
@@ -374,6 +380,7 @@ void radioFastTx(bool tx)
 
 void radioSetRx(uint8_t band)
 {
+	SCANPROF_START(tSetRx);
 	//Turn off the power control circuit
 	//HAL_GPIO_WritePin(RF_APC_SW_GPIO_Port, RF_APC_SW_Pin, GPIO_PIN_RESET);
 
@@ -400,12 +407,16 @@ void radioSetRx(uint8_t band)
 
 	if (trxGetMode() == RADIO_MODE_ANALOG)
 	{
+		SCANPROF_START(tFMRx);
 		HRC6000SetFMRx();
+		SCANPROF_END(SCANPROF_HRC6000FMRX, tFMRx);
 	}
 	else
 	{
 		HRC6000SetDMR();
 	}
+
+	SCANPROF_END(SCANPROF_RADIOSETRX, tSetRx);
 }
 
 void radioReadRSSIAndNoiseForBand(uint8_t band)

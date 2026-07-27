@@ -35,6 +35,9 @@
 #include "user_interface/uiLocalisation.h"
 #include "functions/ticks.h"
 #include "functions/rxPowerSaving.h"
+#if defined(ENABLE_SPECTRUM)
+#include "functions/spectrum.h"   /* spectrumScanAnalogDwellMs (split-dwell experiment) */
+#endif
 #if defined(HAS_GPS)
 #include "interfaces/gps.h"
 #endif
@@ -638,8 +641,82 @@ void settingsSaveIfNeeded(bool immediately)
 
 int settingsGetScanStepTimeMilliseconds(void)
 {
+#if defined(ENABLE_SPECTRUM)
+	// DEV experiment: the scan step time is floored at TIMESLOT_DURATION (30 ms) because
+	// a DIGITAL step has to sit through a DMR timeslot to catch a burst. An ANALOG step
+	// has no such constraint -- measured on this radio, a latching retune needs ~2.6 ms
+	// before a carrier is detectable and ~4.7 ms before the level is accurate.
+	//
+	// Overriding here rather than at the call sites is deliberate: every scan path (VFO
+	// and channel mode, and the scan tick that recomputes the dwell on every step) derives
+	// its dwell from this one function, so patching the individual sites left the tick
+	// free to put the 30 ms back. The digital paths compare this value against their own
+	// DMR minimums and take the larger, so they are unaffected by a smaller value here.
+	if ((spectrumScanAnalogDwellMs != 0) && (trxGetMode() != RADIO_MODE_DIGITAL))
+	{
+		return spectrumScanAnalogDwellMs;
+	}
+#endif
+#if defined(ENABLE_FAST_SCAN)
+	if (nonVolatileSettings.scanStepTime > SCAN_STEP_TIME_SLOWEST_INDEX)
+	{
+		return SCAN_STEP_FAST_MS[nonVolatileSettings.scanStepTime - (SCAN_STEP_TIME_SLOWEST_INDEX + 1)];
+	}
+#endif
 	return TIMESLOT_DURATION + (nonVolatileSettings.scanStepTime * TIMESLOT_DURATION);
 }
+
+#if defined(ENABLE_FAST_SCAN)
+/* Sub-30 ms analog scan steps, in the order the stored indices 16..19 encode them.
+ *
+ * 6 ms is the floor ON PURPOSE and must not be lowered. Measured on this radio against a
+ * level-controlled carrier, the detection threshold degrades gently down to 4 ms (1 dB at
+ * 6 ms, 2 dB at 4 ms) and then falls off a CLIFF: at 3 ms and below the scanner never
+ * stops at ANY signal level, however strong. The scanner samples RSSI 1 ms after the
+ * retune and stops on `trxRxNoise < squelch`; below ~4 ms the noise reading has not
+ * recovered from the receiver restart, so that comparison can never be satisfied. 4 ms
+ * works but sits one millisecond from total failure, which is no margin for temperature,
+ * band or unit-to-unit spread -- hence 6 ms as the fastest offered value.
+ *
+ * Digital scanning is unaffected whatever is chosen here: every digital path takes
+ * max(this value, its own DMR timeslot minimum), so a fast step silently becomes the DMR
+ * minimum on a digital channel. */
+const uint16_t SCAN_STEP_FAST_MS[SCAN_STEP_TIME_NUM_FAST] = { 20, 15, 10, 6 };
+
+/* Menu/CHIRP navigation order, fastest first, then the original 0..15 (30..480 ms).
+ * Stored values 0..15 keep their original meaning so existing codeplugs, saved settings
+ * and CHIRP images are unaffected; only 16..19 are new. Navigating by this table rather
+ * than by the raw stored value is what makes the menu read monotonically
+ * 6, 10, 15, 20, 30, 60 ... 480 ms instead of jumping from 480 back to 20. */
+static const uint8_t SCAN_STEP_ORDER[] =
+{
+	19, 18, 17, 16,                                     // 6, 10, 15, 20 ms
+	0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 // 30 .. 480 ms
+};
+
+/* Step to the next/previous scan step time in display order. `slower` follows the
+ * existing menu convention that the increment key lengthens the dwell. Returns the value
+ * unchanged at either end. */
+uint8_t settingsGetAdjacentScanStepTime(uint8_t current, bool slower)
+{
+	for (uint8_t i = 0; i < ARRAY_SIZE(SCAN_STEP_ORDER); i++)
+	{
+		if (SCAN_STEP_ORDER[i] == current)
+		{
+			if (slower && ((i + 1) < ARRAY_SIZE(SCAN_STEP_ORDER)))
+			{
+				return SCAN_STEP_ORDER[i + 1];
+			}
+			if ((slower == false) && (i > 0))
+			{
+				return SCAN_STEP_ORDER[i - 1];
+			}
+			return current;
+		}
+	}
+	return 0;   // stored value out of range (older firmware / bad image): snap to 30 ms
+}
+#endif
 
 #if !defined(PLATFORM_GD77S)
 static void settingsVFOSanityCheck(CodeplugChannel_t *vfo, Channel_t vfoNumber)
