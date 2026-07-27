@@ -32,6 +32,7 @@
 #endif
 #include "functions/trx.h"
 #include "functions/rxPowerSaving.h"
+#include "functions/spectrum.h"   /* SCANPROF_*: dev-only scan-step profiler, no-ops otherwise */
 #include "user_interface/menuSystem.h"
 #include "user_interface/uiUtilities.h"
 #include "user_interface/uiLocalisation.h"
@@ -94,6 +95,44 @@ static menuStatus_t menuQuickVFOExitStatus = MENU_STATUS_SUCCESS;
 static bool quickmenuNewChannelHandled = false; // Quickmenu new channel confirmation window
 
 static const int VFO_SWEEP_STEP_TIME  = 25;// 25ms
+
+#if defined(ENABLE_SPECTRUM)
+// DEV: let the sweep step time be overridden at runtime so 25 ms and a faster value can
+// be compared on one image. 160 samples x 25 ms = a 4.0 s sweep; the measured settle
+// requirement is ~4.4 ms. See spectrum.h (included unconditionally at the top of this
+// file, for the SCANPROF_* profiler macros).
+#define VFO_SWEEP_STEP_TIME_ACTIVE \
+	((spectrumSweepStepTimeMs != 0) ? (int)spectrumSweepStepTimeMs : VFO_SWEEP_STEP_TIME)
+#else
+#define VFO_SWEEP_STEP_TIME_ACTIVE  VFO_SWEEP_STEP_TIME
+#endif
+
+#if defined(ENABLE_SPECTRUM)
+// DEV: sweep the settling interval at runtime instead of reflashing per candidate.
+// See spectrum.h. 0 = the stock SCAN_FREQ_CHANGE_SETTLING_INTERVAL.
+#define SCAN_SETTLING_INTERVAL_ACTIVE \
+	((spectrumScanSettleTicks != 0) ? (int)spectrumScanSettleTicks : SCAN_FREQ_CHANGE_SETTLING_INTERVAL)
+#else
+#define SCAN_SETTLING_INTERVAL_ACTIVE  SCAN_FREQ_CHANGE_SETTLING_INTERVAL
+#endif
+
+#if defined(ENABLE_FAST_SCAN)
+// MEASURED on an MD-UV390 (DWT cycle counter, CPS 0xA9): one full VFO screen redraw costs
+// ~15.8 ms -- about 3.3 ms drawing into the frame buffer and ~12.5 ms blitting all 40 KB
+// of it to the LCD over the FSMC. Doing that once per frequency-scan step is what made a
+// scan step cost `dwell + 18 ms` regardless of the dwell (the other ~2.2 ms is
+// trxSetFrequency), so at the 6 ms dwell the display was two thirds of the scan.
+//
+// It is also far more often than anyone can read. During a frequency scan the readout is
+// therefore refreshed on a wall clock instead of once per step. 100 ms is 10 fps, which
+// still reads as continuous, and cuts the redraw to roughly every twelfth step at 6 ms.
+//
+// Scan.refreshOnEveryStep (set by scanInit() when the scan range is one step wide) still
+// forces a redraw every step: there the frequency is not moving, so the readout is the
+// only thing showing that anything is happening at all.
+#define VFO_SCAN_DISPLAY_INTERVAL_MS  100
+static ticksTimer_t vfoScanDisplayTimer = { 0, 0 };
+#endif
 
 #if defined(PLATFORM_RD5R)
 #define VFO_SWEEP_GRAPH_START_Y     8
@@ -411,7 +450,9 @@ menuStatus_t uiVFOMode(uiEvent_t *ev, bool isFirstRun)
 		{
 			if (screenOperationMode[nonVolatileSettings.currentVFONumber] != VFO_SCREEN_OPERATION_SWEEP)
 			{
+				SCANPROF_START(tScan);
 				scanning();
+				SCANPROF_END(SCANPROF_SCANNING, tScan);
 			}
 			else
 			{
@@ -2174,10 +2215,31 @@ static void handleUpKey(uiEvent_t *ev)
 			}
 			else
 			{
+				SCANPROF_START(tStep);
 				stepFrequency(VFO_FREQ_STEP_TABLE[(currentChannelData->VFOflag5 >> 4)] * uiDataGlobal.Scan.direction);
+				SCANPROF_END(SCANPROF_STEPFREQ, tStep);
+
 				uiDataGlobal.Scan.timer.timeout = 500;
 				uiDataGlobal.Scan.state = SCAN_STATE_SCANNING;
-				uiVFOModeUpdateScreen(0);
+
+#if defined(ENABLE_FAST_SCAN)
+				if (uiDataGlobal.Scan.refreshOnEveryStep || ticksTimerHasExpired(&vfoScanDisplayTimer))
+				{
+					ticksTimerStart(&vfoScanDisplayTimer, VFO_SCAN_DISPLAY_INTERVAL_MS);
+#endif
+					SCANPROF_START(tDraw);
+					uiVFOModeUpdateScreen(0);
+					SCANPROF_END(SCANPROF_UPDSCREEN, tDraw);
+#if defined(ENABLE_FAST_SCAN)
+				}
+				else
+				{
+					// handleUpKey() set this on entry and uiVFOModeUpdateScreen() is what
+					// normally clears it. Left set, the next uiVFOModeTick() would perform
+					// exactly the redraw that was just skipped, and nothing would be saved.
+					uiDataGlobal.displayQSOState = QSO_DISPLAY_IDLE;
+				}
+#endif
 			}
 		}
 		else
@@ -2327,7 +2389,7 @@ static void vfoSweepUpdateSamples(int offset, bool forceRedraw, int bandwidthRes
 	{
 		uiDataGlobal.Scan.scanSweepCurrentFreq = currentChannelData->rxFreq + (VFO_SWEEP_SCAN_RANGE_SAMPLE_STEP_TABLE[uiDataGlobal.Scan.sweepStepSizeIndex] * (uiDataGlobal.Scan.sweepSampleIndex - (VFO_SWEEP_NUM_SAMPLES / 2))) / VFO_SWEEP_PIXELS_PER_STEP;
 		trxSetFrequency(uiDataGlobal.Scan.scanSweepCurrentFreq, currentChannelData->txFreq, (((currentChannelData->chMode == RADIO_MODE_DIGITAL) && codeplugChannelGetFlag(currentChannelData, CHANNEL_FLAG_FORCE_DMO)) ? DMR_MODE_DMO : DMR_MODE_AUTO));
-		ticksTimerStart(&uiDataGlobal.Scan.timer, VFO_SWEEP_STEP_TIME);
+		ticksTimerStart(&uiDataGlobal.Scan.timer, VFO_SWEEP_STEP_TIME_ACTIVE);
 	}
 }
 
@@ -2469,7 +2531,11 @@ static void stepFrequency(int increment)
 		currentChannelData->txFreq = newTxFreq;
 		currentChannelData->rxFreq = newRxFreq;
 
-		trxSetFrequency(currentChannelData->rxFreq, currentChannelData->txFreq, (((currentChannelData->chMode == RADIO_MODE_DIGITAL) && codeplugChannelGetFlag(currentChannelData, CHANNEL_FLAG_FORCE_DMO)) ? DMR_MODE_DMO : DMR_MODE_AUTO));
+		{
+			SCANPROF_START(tTrx);
+			trxSetFrequency(currentChannelData->rxFreq, currentChannelData->txFreq, (((currentChannelData->chMode == RADIO_MODE_DIGITAL) && codeplugChannelGetFlag(currentChannelData, CHANNEL_FLAG_FORCE_DMO)) ? DMR_MODE_DMO : DMR_MODE_AUTO));
+			SCANPROF_END(SCANPROF_TRXSETFREQ, tTrx);
+		}
 
 		if (screenOperationMode[nonVolatileSettings.currentVFONumber] != VFO_SCREEN_OPERATION_SWEEP)
 		{
@@ -3493,7 +3559,7 @@ static void sweepScanStep(void)
 
 	if (ticksTimerHasExpired(&uiDataGlobal.Scan.timer))
 	{
-		ticksTimerStart(&uiDataGlobal.Scan.timer, VFO_SWEEP_STEP_TIME);
+		ticksTimerStart(&uiDataGlobal.Scan.timer, VFO_SWEEP_STEP_TIME_ACTIVE);
 
 		if (uiDataGlobal.Scan.sweepSampleIndex < VFO_SWEEP_NUM_SAMPLES)
 		{
@@ -3506,6 +3572,13 @@ static void sweepScanStep(void)
 			vfoSweepSamples[uiDataGlobal.Scan.sweepSampleIndex] = radioDevices[RADIO_DEVICE_PRIMARY].trxRxSignal;// Need to save the samples so for when the freq is changed and we need to scroll the display
 
 			vfoSweepDrawSample(uiDataGlobal.Scan.sweepSampleIndex);
+
+#if defined(ENABLE_FAST_SCAN)
+			// The three columns this sample touches: the one just drawn and the two-wide
+			// cursor ahead of it. Only these change, so only these need blitting.
+			int16_t colLo = uiDataGlobal.Scan.sweepSampleIndex;
+			int16_t colHi = colLo;
+#endif
 
 			uiDataGlobal.Scan.sweepSampleIndex += uiDataGlobal.Scan.sweepSampleIndexIncrement;
 
@@ -3520,7 +3593,25 @@ static void sweepScanStep(void)
 			}
 			else
 			{
+#if defined(ENABLE_FAST_SCAN)
+				// MEASURED: the full-width blit below moves 25600 bytes and costs ~7.8 ms,
+				// which is most of the ~10.75 ms/sample floor the sweep saturates at --
+				// the sweep is display-bound, not RF-bound. A strip covering just the
+				// changed columns is ~50x less data. displayRenderColumns() falls back to
+				// the full-width blit itself when the span is too wide or wraps round the
+				// right edge, so no case is left unpainted.
+				{
+					int16_t c1 = (uiDataGlobal.Scan.sweepSampleIndex % VFO_SWEEP_NUM_SAMPLES);
+					int16_t c2 = ((uiDataGlobal.Scan.sweepSampleIndex + uiDataGlobal.Scan.sweepSampleIndexIncrement) % VFO_SWEEP_NUM_SAMPLES);
+
+					colLo = SAFE_MIN(colLo, SAFE_MIN(c1, c2));
+					colHi = SAFE_MAX(colHi, SAFE_MAX(c1, c2));
+
+					displayRenderColumns(colLo, (colHi + 1), 1, ((8 + VFO_SWEEP_GRAPH_HEIGHT_Y) / 8) + 1);
+				}
+#else
 				displayRenderRows(1, ((8 + VFO_SWEEP_GRAPH_HEIGHT_Y) / 8) + 1);
+#endif
 			}
 		}
 		else
@@ -3625,7 +3716,7 @@ static void scanning(void)
 	}
 
 	//After initial settling time
-	if((uiDataGlobal.Scan.state == SCAN_STATE_SCANNING) && (uiDataGlobal.Scan.timer.timeout > SCAN_SKIP_CHANNEL_INTERVAL) && (uiDataGlobal.Scan.timer.timeout < (uiDataGlobal.Scan.dwellTime - SCAN_FREQ_CHANGE_SETTLING_INTERVAL)))
+	if((uiDataGlobal.Scan.state == SCAN_STATE_SCANNING) && (uiDataGlobal.Scan.timer.timeout > SCAN_SKIP_CHANNEL_INTERVAL) && (uiDataGlobal.Scan.timer.timeout < (uiDataGlobal.Scan.dwellTime - SCAN_SETTLING_INTERVAL_ACTIVE)))
 	{
 		// Test for presence of RF Carrier.
 
@@ -3773,6 +3864,13 @@ static void scanning(void)
 	}
 	else
 	{
+		/* Step boundary. STEP_PERIOD is the interval between successive boundaries --
+		 * i.e. the thing that measures dwell + 18 ms -- and STEP_TOTAL is the work done
+		 * inside the boundary itself. Whatever STEP_PERIOD has that STEP_TOTAL does not
+		 * is being spent in the dwell loop, not here. */
+		SCANPROF_PERIOD(SCANPROF_STEP_PERIOD);
+		SCANPROF_START(tStepTotal);
+
 		// We are in Dual Watch scanning mode
 		if (screenOperationMode[nonVolatileSettings.currentVFONumber] == VFO_SCREEN_OPERATION_DUAL_SCAN)
 		{
@@ -3844,7 +3942,9 @@ static void scanning(void)
 			{
 				if(currentChannelData->rxFreq + fStep <= nonVolatileSettings.vfoScanHigh[nonVolatileSettings.currentVFONumber])
 				{
+					SCANPROF_START(tUp);
 					handleUpKey(&tmpEvent);
+					SCANPROF_END(SCANPROF_HANDLEUP, tUp);
 				}
 				else
 				{
@@ -3860,7 +3960,9 @@ static void scanning(void)
 			{
 				if(currentChannelData->rxFreq + fStep >= nonVolatileSettings.vfoScanLow[nonVolatileSettings.currentVFONumber])
 				{
+					SCANPROF_START(tUp);
 					handleUpKey(&tmpEvent);
+					SCANPROF_END(SCANPROF_HANDLEUP, tUp);
 				}
 				else
 				{
@@ -3900,6 +4002,8 @@ static void scanning(void)
 				}
 			}
 		}
+
+		SCANPROF_END(SCANPROF_STEP_TOTAL, tStepTotal);
 	}
 }
 

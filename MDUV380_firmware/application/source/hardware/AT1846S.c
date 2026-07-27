@@ -63,6 +63,16 @@ typedef struct
 } RegCache_t;
 
 static RegCache_t registerCache[RADIO_DEVICE_MAX][127];// all values will be initialised to false,0,0 because its a global
+
+#if defined(ENABLE_FAST_SCAN)
+// Last bandwidth actually written to each chip. See AT1846sSetBandWidth(). Lives here, and
+// is cleared by AT1846sInit() alongside registerCache, so the two can never disagree.
+// Per device for the same reason registerCache is: platforms with two AT1846S parts
+// switch currentRadioDeviceId between calls, and one shared flag would let a switch skip
+// a bandwidth write the other chip has never had.
+static bool bandwidthCached[RADIO_DEVICE_MAX];
+static bool cachedIs25K[RADIO_DEVICE_MAX];
+#endif
 static uint8_t currentRegisterBank[RADIO_DEVICE_MAX] = { 0 }; // offset in cached page array
 
 //
@@ -229,6 +239,9 @@ const uint8_t AT1846DMRSettings[][AT1846_BYTES_PER_COMMAND] = {
 void AT1846sInit(void)
 {
 	memset(&registerCache[currentRadioDeviceId], 0, sizeof(registerCache[currentRadioDeviceId]));
+#if defined(ENABLE_FAST_SCAN)
+	bandwidthCached[currentRadioDeviceId] = false;
+#endif
 
 	I2C_AT1846S_send_Settings(AT1846InitSettings, sizeof(AT1846InitSettings) / AT1846_BYTES_PER_COMMAND);
 
@@ -256,6 +269,33 @@ void AT1846sSetMode(int mode)
 
 void AT1846sSetBandWidth(bool Is25K)
 {
+#if defined(ENABLE_FAST_SCAN)
+	// MEASURED (CPS 0xA9, 621 analog VFO scan steps): trxSetFrequency() costs 2.20 ms and
+	// reaches radioSetIF() -> here TWICE per retune -- once directly and once via
+	// trxSetRX() -> trxActivateRx(). At 0.68 ms each that is 1.36 ms, 62% of
+	// trxSetFrequency and the single largest term left in a scan step.
+	//
+	// None of it is needed: the bandwidth does not change between steps of a scan. It is
+	// not free despite radioWriteReg2byte()'s per-register value cache, because register
+	// 0x3A appears twice in the table with different values (so both writes always miss),
+	// the two 0x7F page switches bypass the cache by design, and the RX off/on bracket
+	// below is a read-modify-write on the chip.
+	//
+	// Cached on the value, so a genuine bandwidth change still applies. Deliberately in
+	// this file and cleared by AT1846sInit() beside the register cache memset, so it has
+	// exactly the same lifetime and invalidation as the cache it complements -- a copy in
+	// radioHardwareInterface.c could outlive an AT1846S re-init and silently skip a real
+	// bandwidth change.
+	if (bandwidthCached[currentRadioDeviceId] && (cachedIs25K[currentRadioDeviceId] == Is25K))
+	{
+		// RX is already on: both radioSetRx() and radioSetFrequency() end with an RX-on
+		// write, and they run before this on every path that reaches here.
+		return;
+	}
+	bandwidthCached[currentRadioDeviceId] = true;
+	cachedIs25K[currentRadioDeviceId] = Is25K;
+#endif
+
 	if (Is25K)
 	{
 		// 25 kHz settings

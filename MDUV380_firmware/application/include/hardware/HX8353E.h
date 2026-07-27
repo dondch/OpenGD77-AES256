@@ -202,6 +202,12 @@ void displayClearRows(int16_t startRow, int16_t endRow, bool isInverted);
 void displayRenderWithoutNotification(void);
 void displayRender(void);
 void displayRenderRows(int16_t startRow, int16_t endRow);
+#if defined(ENABLE_FAST_SCAN)
+// Blit a narrow vertical strip instead of full-width rows. See the implementation for
+// why: the VFO sweep changes three columns per sample and pays for 160 of them.
+// startCol/endCol are pixel columns, endCol exclusive; rows are 8-pixel rows as above.
+void displayRenderColumns(int16_t startCol, int16_t endCol, int16_t startRow, int16_t endRow);
+#endif
 void displayPrintCentered(uint16_t y, const char *text, ucFont_t fontSize);
 void displayPrintCenteredDoubleHeight(uint16_t y, const char *text, ucFont_t fontSize, bool doubleHeight);
 void displayPrintAt(uint16_t x, uint16_t y, const  char *text, ucFont_t fontSize);

@@ -36,6 +36,7 @@
 #include <hardware/HX8353E_charset.h>
 #endif
 #include "functions/settings.h"
+#include "functions/spectrum.h"   /* SCANPROF_*: dev-only scan-step profiler, no-ops otherwise */
 #include "user_interface/uiLocalisation.h"
 #include "user_interface/menuSystem.h"
 #include "utils.h"
@@ -1261,6 +1262,7 @@ static void dmaCompleteCallback(DMA_HandleTypeDef *hdma)
 void displayRenderRows(int16_t startRow, int16_t endRow)
 {
 	GPIO_InitTypeDef GPIO_InitStruct = {0};
+	SCANPROF_START(tRender);
 
 	// GD77 display controller has 8 lines per row.
 	startRow *= 8;
@@ -1317,7 +1319,124 @@ void displayRenderRows(int16_t startRow, int16_t endRow)
 	HAL_GPIO_WritePin(LCD_CS_GPIO_Port, LCD_CS_Pin, GPIO_PIN_SET);
 
 	*((volatile uint8_t*) LCD_FSMC_ADDR_DATA) = 0;// write 0 to the display pins , to pull them all low, so keyboard reads don't need to
+
+	SCANPROF_END(SCANPROF_DISPRENDER, tRender);
 }
+
+#if defined(ENABLE_FAST_SCAN)
+/* Blit a narrow vertical strip.
+ *
+ * MEASURED on an MD-UV390 (CPS 0xA9): a full-screen displayRenderRows() costs 12.5 ms --
+ * 40960 bytes at ~306 ns each, so it is entirely FSMC bus time, not CPU time. The only
+ * way to make it cheaper is to send fewer bytes.
+ *
+ * The VFO sweep repaints one sample column plus a two-column cursor, then blits the whole
+ * 160-pixel-wide graph area: 25600 bytes for 480 bytes of actual change, and at ~7.8 ms
+ * that is most of the 10.75 ms/sample floor the sweep saturates at.
+ *
+ * The controller can address a column window (CASET), but the frame buffer is row-major,
+ * so a strip is not contiguous and cannot be DMA'd in place. It is gathered into a small
+ * staging buffer first; at a few hundred bytes that costs microseconds against the
+ * milliseconds of bus time it saves.
+ *
+ * CASET is restored to full width on the way out. Leaving it narrowed would silently
+ * corrupt every later displayRenderRows(), which does not set CASET itself. */
+// 4 is what the sweep needs (a sample column plus a two-column cursor, worst case four
+// wide) and RAM is tight on this target -- 8 columns overflowed the linker's RAM region.
+#define DISPLAY_STRIP_MAX_COLS  4
+static uint16_t stripBuf[DISPLAY_STRIP_MAX_COLS * DISPLAY_SIZE_Y];
+
+void displayRenderColumns(int16_t startCol, int16_t endCol, int16_t startRow, int16_t endRow)
+{
+	GPIO_InitTypeDef GPIO_InitStruct = {0};
+	int16_t nCols, y0, y1, nRows;
+	uint16_t *dst;
+	SCANPROF_START(tRender);
+
+	if (startCol < 0)
+	{
+		startCol = 0;
+	}
+	if (endCol > DISPLAY_SIZE_X)
+	{
+		endCol = DISPLAY_SIZE_X;
+	}
+
+	nCols = (endCol - startCol);
+	y0 = (startRow * 8);
+	y1 = (endRow * 8);
+	nRows = (y1 - y0);
+
+	if ((nCols <= 0) || (nCols > DISPLAY_STRIP_MAX_COLS) || (nRows <= 0) ||
+			(y1 > DISPLAY_SIZE_Y))
+	{
+		// Out of what the staging buffer can hold: fall back rather than truncate the
+		// picture, which would be a silently wrong display instead of a slow one.
+		displayRenderRows(startRow, endRow);
+		return;
+	}
+
+	dst = stripBuf;
+	for (int16_t y = y0; y < y1; y++)
+	{
+		const uint16_t *src = &screenBuf[(y * DISPLAY_SIZE_X) + startCol];
+
+		for (int16_t x = 0; x < nCols; x++)
+		{
+			*dst++ = *src++;
+		}
+	}
+
+	// Display shares its pins with the keypad, so they need to be in alternate mode for the FSMC
+	GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+	GPIO_InitStruct.Pull = GPIO_NOPULL;
+	GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
+	GPIO_InitStruct.Alternate = GPIO_AF12_FSMC;
+
+	GPIO_InitStruct.Pin = LCD_D0_Pin | LCD_D1_Pin | LCD_D2_Pin | LCD_D3_Pin;
+	HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
+
+	GPIO_InitStruct.Pin = LCD_D4_Pin | LCD_D5_Pin | LCD_D6_Pin | LCD_D7_Pin;
+	HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
+
+	HAL_GPIO_WritePin(LCD_CS_GPIO_Port, LCD_CS_Pin, GPIO_PIN_RESET);
+
+	{
+		uint8_t opts[] = { 0x00, (uint8_t)startCol, 0x00, (uint8_t)(endCol - 1) };
+		displayWriteCmds(HX8583_CMD_CASET, sizeof(opts), opts);
+	}
+
+	{
+		uint8_t opts[] = { 0x00, (uint8_t)(y0 + DISPLAY_Y_OFFSET),
+				0x00, (uint8_t)((y1 - 1) + DISPLAY_Y_OFFSET) };
+		displayWriteCmds(HX8583_CMD_RASET, sizeof(opts), opts);
+	}
+
+	displayWriteCmd(HX8583_CMD_RAMWR);
+
+	{
+		HAL_StatusTypeDef status = HAL_DMA_Start(&hdma_memtomem_dma2_stream0,
+				(uint32_t)stripBuf, LCD_FSMC_ADDR_DATA,
+				(uint32_t)(nCols * nRows * sizeof(uint16_t)));
+		if (status == HAL_OK)
+		{
+			HAL_DMA_PollForTransfer(&hdma_memtomem_dma2_stream0, HAL_DMA_FULL_TRANSFER, HAL_MAX_DELAY);
+		}
+	}
+
+	// Put the column window back to full width for everything else.
+	{
+		uint8_t opts[] = { 0x00, 0x00, 0x00, (uint8_t)(DISPLAY_SIZE_X - 1) };
+		displayWriteCmds(HX8583_CMD_CASET, sizeof(opts), opts);
+	}
+
+	HAL_GPIO_WritePin(LCD_CS_GPIO_Port, LCD_CS_Pin, GPIO_PIN_SET);
+
+	*((volatile uint8_t*) LCD_FSMC_ADDR_DATA) = 0;// write 0 to the display pins , to pull them all low, so keyboard reads don't need to
+
+	SCANPROF_END(SCANPROF_DISPRENDER, tRender);
+}
+#endif // ENABLE_FAST_SCAN
 
 void displaySetInverseVideo(bool isInverted)
 {
