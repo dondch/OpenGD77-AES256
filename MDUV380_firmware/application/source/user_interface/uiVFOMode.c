@@ -1561,6 +1561,16 @@ static void handleEvent(uiEvent_t *ev)
 						setCurrentFreqToScanLimits();
 						if (uiDataGlobal.Scan.active == false)
 						{
+#if defined(ENABLE_SPECTRUM)
+							// Re-derive the step time here, not only in scanInit(). This is
+							// the path taken on every long press after the first (once the
+							// VFO scan screen is already up), and it computed dwellTime from
+							// a Scan.stepTimeMilliseconds latched by the last scanInit() --
+							// so any change to the scan step time since then was silently
+							// ignored. Guarded to keep stock byte-identical, but this looks
+							// like a real upstream bug worth fixing there too.
+							uiDataGlobal.Scan.stepTimeMilliseconds = settingsGetScanStepTimeMilliseconds();
+#endif
 							// User maybe has change the mode, update.
 							// In DIGITAL mode, we need at least 120ms to see the HR-C6000 to start the TS ISR.
 							if (trxGetMode() == RADIO_MODE_DIGITAL)
