@@ -147,6 +147,46 @@ static ticksTimer_t vfoScanDisplayTimer = { 0, 0 };
 
 
 static uint8_t vfoSweepSamples[VFO_SWEEP_NUM_SAMPLES];
+
+#if defined(ENABLE_FAST_SCAN)
+// Peak tracking. The sweep could show a spike but never say what frequency it was on --
+// you had to eyeball its column, leave the sweep, and tune around until you found it.
+// fagci's UV-K5 mod marks the peak and prints its frequency, and that is most of why its
+// spectrum screen is usable and ours was not.
+//
+// The peak is latched at the end of each pass rather than tracked live, so the marker and
+// the label stay put while the trace redraws under them instead of chasing every sample.
+static uint8_t vfoSweepPeakLevel = 0;        // running max within the pass in progress
+static int16_t vfoSweepPeakIndex = -1;
+static uint8_t vfoSweepShownPeakLevel = 0;   // latched at the end of the last pass
+static int16_t vfoSweepShownPeakIndex = -1;
+static bool    vfoSweepPassComplete = false; // set when a pass wraps; drives the full blit
+
+// How far above the noise floor a sample has to be before it is called a peak rather
+// than the loudest noise. In the same counts as the samples and the floor setting.
+#define VFO_SWEEP_PEAK_MARGIN  6
+
+// A band across the top of the graph that the trace never draws into, reserved for the
+// peak marker and its label.
+//
+// It has to be reserved rather than just drawn over. vfoSweepDrawSample() clears the full
+// column height above each sample it draws, so anything painted into the graph is wiped
+// as the sweep passes under it -- the marker appeared at the end of a pass and was eaten
+// column by column during the next one. Redrawing it per sample instead would mean a
+// full-width blit per sample, which is exactly the cost the strip blit just removed.
+//
+// Costs 8 of 78 pixels of vertical range. Worth it: an unlabelled spike tells you
+// something is there but not what frequency it is on, which was the whole complaint.
+#define VFO_SWEEP_LABEL_BAND_H   8
+#endif
+
+#if defined(ENABLE_FAST_SCAN)
+#define VFO_SWEEP_TRACE_START_Y   (VFO_SWEEP_GRAPH_START_Y + VFO_SWEEP_LABEL_BAND_H)
+#define VFO_SWEEP_TRACE_HEIGHT_Y  (VFO_SWEEP_GRAPH_HEIGHT_Y - VFO_SWEEP_LABEL_BAND_H)
+#else
+#define VFO_SWEEP_TRACE_START_Y   VFO_SWEEP_GRAPH_START_Y
+#define VFO_SWEEP_TRACE_HEIGHT_Y  VFO_SWEEP_GRAPH_HEIGHT_Y
+#endif
 static uint8_t vfoSweepRssiNoiseFloor = VFO_SWEEP_RSSI_NOISE_FLOOR_DEFAULT;
 static uint8_t vfoSweepGain = VFO_SWEEP_GAIN_DEFAULT;
 static bool vfoSweepSavedBandwidth;
@@ -181,8 +221,8 @@ menuStatus_t uiVFOMode(uiEvent_t *ev, bool isFirstRun)
 					vfoSweepDrawSample(i);
 				}
 
-				displayDrawFastVLine((uiDataGlobal.Scan.sweepSampleIndex) % VFO_SWEEP_NUM_SAMPLES, VFO_SWEEP_GRAPH_START_Y, VFO_SWEEP_GRAPH_HEIGHT_Y, true);// draw solid line in the next location
-				displayDrawFastVLine((uiDataGlobal.Scan.sweepSampleIndex + uiDataGlobal.Scan.sweepSampleIndexIncrement) % VFO_SWEEP_NUM_SAMPLES, VFO_SWEEP_GRAPH_START_Y, VFO_SWEEP_GRAPH_HEIGHT_Y, true);// draw solid line in the next location
+				displayDrawFastVLine((uiDataGlobal.Scan.sweepSampleIndex) % VFO_SWEEP_NUM_SAMPLES, VFO_SWEEP_TRACE_START_Y, VFO_SWEEP_TRACE_HEIGHT_Y, true);// draw solid line in the next location
+				displayDrawFastVLine((uiDataGlobal.Scan.sweepSampleIndex + uiDataGlobal.Scan.sweepSampleIndexIncrement) % VFO_SWEEP_NUM_SAMPLES, VFO_SWEEP_TRACE_START_Y, VFO_SWEEP_TRACE_HEIGHT_Y, true);// draw solid line in the next location
 
 				displayRenderRows(1, ((8 + VFO_SWEEP_GRAPH_HEIGHT_Y) / 8) + 1);
 			}
@@ -2286,25 +2326,101 @@ static void handleDownKey(uiEvent_t *ev)
 	}
 }
 
+#if defined(ENABLE_FAST_SCAN)
+/* Frequency of sweep sample `index`, in OpenGD77's 10 Hz units. Same arithmetic
+ * sweepScanStep() uses to tune each sample -- kept in one place so the marker can never
+ * disagree with where the receiver actually was. */
+static uint32_t vfoSweepFreqForSample(int16_t index)
+{
+	return currentChannelData->rxFreq +
+			((VFO_SWEEP_SCAN_RANGE_SAMPLE_STEP_TABLE[uiDataGlobal.Scan.sweepStepSizeIndex] *
+					(index - (VFO_SWEEP_NUM_SAMPLES / 2))) / VFO_SWEEP_PIXELS_PER_STEP);
+}
+
+/* Marker over the strongest sample of the last completed pass, with its frequency.
+ *
+ * Drawn at the top of the graph rather than on the trace: the trace is what moves, and a
+ * marker sitting on it is unreadable at a glance. The label goes on whichever side of the
+ * screen the peak is not, so it never covers its own marker. */
+static void vfoSweepDrawPeakMarker(void)
+{
+	char buffer[SCREEN_LINE_BUFFER_SIZE];
+	uint32_t f;
+	int16_t x;
+
+	// Nothing else writes into the band, so nothing else will erase the previous marker
+	// and label when the peak moves. Clear it here, unconditionally, before deciding
+	// whether there is anything to draw -- a peak that drops back into the noise has to
+	// take its label with it.
+	// ★ `true` clears here. displayFillRect() takes isInverted literally --
+	// `isInverted ? backgroundColour : foregroundColour` -- while the line helpers
+	// (displayDrawFastVLine/HLine, and displayFillTriangle through them) invert it before
+	// passing it down, so for those `true` DRAWS. The two conventions are opposite. Getting
+	// this backwards fills the band solid instead of clearing it, which looks like the
+	// marker never being drawn rather than like a colour mistake.
+	displayFillRect(0, VFO_SWEEP_GRAPH_START_Y, DISPLAY_SIZE_X, VFO_SWEEP_LABEL_BAND_H, true);
+
+	if ((vfoSweepShownPeakIndex < 0) || (vfoSweepShownPeakIndex >= VFO_SWEEP_NUM_SAMPLES))
+	{
+		return;
+	}
+
+	// Nothing above the noise floor is not a peak, it is just the loudest noise. Saying
+	// so would be worse than saying nothing: it invites chasing a frequency that has
+	// nothing on it.
+	if (vfoSweepShownPeakLevel <= (vfoSweepRssiNoiseFloor + VFO_SWEEP_PEAK_MARGIN))
+	{
+		return;
+	}
+
+	x = vfoSweepShownPeakIndex;
+
+	displayThemeApply(THEME_ITEM_FG_DECORATION, THEME_ITEM_BG);
+	// A small downward wedge whose tip is on the peak column. Clamped so a peak in the
+	// first or last few columns still draws a whole marker rather than half of one off
+	// the edge; the tip stays on the true column either way.
+	displayFillTriangle(SAFE_MAX(0, (x - 3)), VFO_SWEEP_GRAPH_START_Y,
+			SAFE_MIN((DISPLAY_SIZE_X - 1), (x + 3)), VFO_SWEEP_GRAPH_START_Y,
+			x, (VFO_SWEEP_GRAPH_START_Y + (VFO_SWEEP_LABEL_BAND_H - 2)), true);
+
+	f = vfoSweepFreqForSample(vfoSweepShownPeakIndex);
+	snprintf(buffer, SCREEN_LINE_BUFFER_SIZE, "%u.%04u", (f / 100000), ((f % 100000) / 10));
+
+	// 8 px per character in FONT_SIZE_1; keep the label clear of the marker.
+	if (x < (DISPLAY_SIZE_X / 2))
+	{
+		x = (DISPLAY_SIZE_X - (strlen(buffer) * 8) - 1);
+	}
+	else
+	{
+		x = 1;
+	}
+
+	displayThemeApply(THEME_ITEM_FG_RX_FREQ, THEME_ITEM_BG);
+	displayPrintAt(x, VFO_SWEEP_GRAPH_START_Y, buffer, FONT_SIZE_1);
+	displayThemeResetToDefault();
+}
+#endif
+
 static void vfoSweepDrawSample(int offset)
 {
 	int16_t graphHeight = MAX(vfoSweepSamples[offset] - vfoSweepRssiNoiseFloor, 0);
-	graphHeight = (graphHeight * VFO_SWEEP_GRAPH_HEIGHT_Y) / vfoSweepGain;
-	graphHeight = MIN(VFO_SWEEP_GRAPH_HEIGHT_Y, graphHeight);
+	graphHeight = (graphHeight * VFO_SWEEP_TRACE_HEIGHT_Y) / vfoSweepGain;
+	graphHeight = MIN(VFO_SWEEP_TRACE_HEIGHT_Y, graphHeight);
 
-	int16_t levelTop = ((VFO_SWEEP_GRAPH_START_Y + VFO_SWEEP_GRAPH_HEIGHT_Y) - graphHeight);
+	int16_t levelTop = ((VFO_SWEEP_TRACE_START_Y + VFO_SWEEP_TRACE_HEIGHT_Y) - graphHeight);
 
 	// Draw the level
 	displayThemeApply(THEME_ITEM_FG_RSSI_BAR, THEME_ITEM_BG);
-	displayDrawFastVLine(offset, VFO_SWEEP_GRAPH_START_Y, (VFO_SWEEP_GRAPH_HEIGHT_Y - graphHeight), false); // Clear
+	displayDrawFastVLine(offset, VFO_SWEEP_TRACE_START_Y, (VFO_SWEEP_TRACE_HEIGHT_Y - graphHeight), false); // Clear
 	displayDrawFastVLine(offset, levelTop, graphHeight, true); // Level
 
 	// center freq marker
 	if (offset == (DISPLAY_SIZE_X >> 1))
 	{
-		bool markerTopPosition = (graphHeight < ((VFO_SWEEP_GRAPH_HEIGHT_Y / 3) << 1));
-		int16_t markerStarts = (markerTopPosition ? VFO_SWEEP_GRAPH_START_Y : ((VFO_SWEEP_GRAPH_START_Y + VFO_SWEEP_GRAPH_HEIGHT_Y) - (VFO_SWEEP_GRAPH_HEIGHT_Y / 3)));
-		int16_t markerEnds = (markerTopPosition ? levelTop : (VFO_SWEEP_GRAPH_START_Y + VFO_SWEEP_GRAPH_HEIGHT_Y));
+		bool markerTopPosition = (graphHeight < ((VFO_SWEEP_TRACE_HEIGHT_Y / 3) << 1));
+		int16_t markerStarts = (markerTopPosition ? VFO_SWEEP_TRACE_START_Y : ((VFO_SWEEP_TRACE_START_Y + VFO_SWEEP_TRACE_HEIGHT_Y) - (VFO_SWEEP_TRACE_HEIGHT_Y / 3)));
+		int16_t markerEnds = (markerTopPosition ? levelTop : (VFO_SWEEP_TRACE_START_Y + VFO_SWEEP_TRACE_HEIGHT_Y));
 
 		displayThemeApply(THEME_ITEM_FG_DECORATION, THEME_ITEM_BG);
 		for (int16_t y = markerStarts; y < markerEnds; y += 2)
@@ -3574,6 +3690,12 @@ static void sweepScanStep(void)
 			vfoSweepDrawSample(uiDataGlobal.Scan.sweepSampleIndex);
 
 #if defined(ENABLE_FAST_SCAN)
+			if (vfoSweepSamples[uiDataGlobal.Scan.sweepSampleIndex] > vfoSweepPeakLevel)
+			{
+				vfoSweepPeakLevel = vfoSweepSamples[uiDataGlobal.Scan.sweepSampleIndex];
+				vfoSweepPeakIndex = uiDataGlobal.Scan.sweepSampleIndex;
+			}
+
 			// The three columns this sample touches: the one just drawn and the two-wide
 			// cursor ahead of it. Only these change, so only these need blitting.
 			int16_t colLo = uiDataGlobal.Scan.sweepSampleIndex;
@@ -3583,8 +3705,8 @@ static void sweepScanStep(void)
 			uiDataGlobal.Scan.sweepSampleIndex += uiDataGlobal.Scan.sweepSampleIndexIncrement;
 
 			displayThemeApply(THEME_ITEM_FG_RX_FREQ, THEME_ITEM_BG);
-			displayDrawFastVLine((uiDataGlobal.Scan.sweepSampleIndex) % VFO_SWEEP_NUM_SAMPLES, VFO_SWEEP_GRAPH_START_Y, VFO_SWEEP_GRAPH_HEIGHT_Y, true);// draw solid line in the next location
-			displayDrawFastVLine((uiDataGlobal.Scan.sweepSampleIndex + uiDataGlobal.Scan.sweepSampleIndexIncrement) % VFO_SWEEP_NUM_SAMPLES, VFO_SWEEP_GRAPH_START_Y, VFO_SWEEP_GRAPH_HEIGHT_Y, true);// draw solid line in the next location
+			displayDrawFastVLine((uiDataGlobal.Scan.sweepSampleIndex) % VFO_SWEEP_NUM_SAMPLES, VFO_SWEEP_TRACE_START_Y, VFO_SWEEP_TRACE_HEIGHT_Y, true);// draw solid line in the next location
+			displayDrawFastVLine((uiDataGlobal.Scan.sweepSampleIndex + uiDataGlobal.Scan.sweepSampleIndexIncrement) % VFO_SWEEP_NUM_SAMPLES, VFO_SWEEP_TRACE_START_Y, VFO_SWEEP_TRACE_HEIGHT_Y, true);// draw solid line in the next location
 			displayThemeResetToDefault();
 
 			if (uiNotificationIsVisible())
@@ -3600,6 +3722,15 @@ static void sweepScanStep(void)
 				// changed columns is ~50x less data. displayRenderColumns() falls back to
 				// the full-width blit itself when the span is too wide or wraps round the
 				// right edge, so no case is left unpainted.
+				if (vfoSweepPassComplete)
+				{
+					// A pass just ended: the marker and its label moved, and they are not
+					// in the strip. Repaint them and blit the lot -- once per pass.
+					vfoSweepPassComplete = false;
+					vfoSweepDrawPeakMarker();
+					displayRenderRows(1, ((8 + VFO_SWEEP_GRAPH_HEIGHT_Y) / 8) + 1);
+				}
+				else
 				{
 					int16_t c1 = (uiDataGlobal.Scan.sweepSampleIndex % VFO_SWEEP_NUM_SAMPLES);
 					int16_t c2 = ((uiDataGlobal.Scan.sweepSampleIndex + uiDataGlobal.Scan.sweepSampleIndexIncrement) % VFO_SWEEP_NUM_SAMPLES);
@@ -3616,6 +3747,17 @@ static void sweepScanStep(void)
 		}
 		else
 		{
+#if defined(ENABLE_FAST_SCAN)
+			// End of a pass: latch the peak found during it and repaint the marker. Doing
+			// it here rather than per sample means the marker holds still while the trace
+			// redraws under it, and the one full-width blit it costs lands once per pass
+			// (12.5 ms against a 1-4 s sweep) instead of once per sample.
+			vfoSweepShownPeakLevel = vfoSweepPeakLevel;
+			vfoSweepShownPeakIndex = vfoSweepPeakIndex;
+			vfoSweepPeakLevel = 0;
+			vfoSweepPeakIndex = -1;
+			vfoSweepPassComplete = true;
+#endif
 			uiDataGlobal.Scan.sweepSampleIndex = 0;
 			uiDataGlobal.Scan.sweepSampleIndexIncrement = 1;// go back to normal increment at the end of the special sweep step used just after the graph is zoomed in
 		}
