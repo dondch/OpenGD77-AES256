@@ -236,12 +236,91 @@ uint8_t  spectrumScanSqReg = 0;
 uint16_t spectrumScanSqMask = 0;
 bool     spectrumScanSqInvert = false;
 
+uint8_t spectrumScanRssiMargin = 6;
+uint8_t spectrumScanFloorShift = 3;
+
+/* The floor is carried in 1/256 of a count.
+ *
+ * ★ A plain integer IIR on these numbers does not converge at all: with
+ * `floor += (sample - floor) >> 3` and readings in the 30s and 40s, every step where the
+ * sample is within 8 counts of the estimate shifts to zero and the floor sticks wherever
+ * it was first seeded. The fractional part is not a refinement, it is the difference
+ * between an estimator and a constant. */
+static int32_t s_floorQ8 = 0;
+static bool s_floorSeeded = false;
+static uint32_t s_lastStepFreq = 0;
+static bool s_stepDecision = false;
+static uint16_t s_detectRun = 0;
+
+/* If the floor is ever learned too low -- a seed taken on an unusually quiet sample, or a
+ * step onto a much quieter part of the band -- every sample reads as a carrier, and since
+ * carriers are excluded from the estimate the floor can never recover. That is a detector
+ * that latches on and stays on. After this many consecutive detections, let the floor
+ * move anyway. */
+#define SPECTRUM_DETECT_RUN_MAX  64
+
+void spectrumScanDetectReset(void)
+{
+	s_floorSeeded = false;
+	s_lastStepFreq = 0;
+	s_stepDecision = false;
+	s_detectRun = 0;
+}
+
+uint8_t spectrumScanFloor(void)
+{
+	return (uint8_t)(s_floorSeeded ? ((s_floorQ8 >> 8) & 0xFF) : 0);
+}
+
+static bool spectrumRssiAutoDetect(uint8_t rssi)
+{
+	int32_t sampleQ8 = ((int32_t)rssi) << 8;
+	bool detected;
+
+	if (s_floorSeeded == false)
+	{
+		s_floorQ8 = sampleQ8;
+		s_floorSeeded = true;
+	}
+
+	detected = (((int32_t)rssi) >= ((s_floorQ8 >> 8) + (int32_t)spectrumScanRssiMargin));
+
+	/* Quiet samples teach the floor; a carrier must not, or a signal strong enough to
+	 * stop the scan drags the estimate up behind it and the radio goes deaf on the very
+	 * frequency it just found. The run guard above is the escape hatch. */
+	if ((detected == false) || (s_detectRun >= SPECTRUM_DETECT_RUN_MAX))
+	{
+		s_floorQ8 += ((sampleQ8 - s_floorQ8) >> spectrumScanFloorShift);
+	}
+
+	s_detectRun = detected ? (s_detectRun + 1) : 0;
+
+	return detected;
+}
+
 bool spectrumScanCarrierDetected(uint8_t rssi, uint8_t noise, uint8_t squelch)
 {
 	switch (spectrumScanDetectMode)
 	{
 		case SPECTRUM_DETECT_RSSI:
 			return (rssi >= spectrumScanRssiThreshold);
+
+		case SPECTRUM_DETECT_RSSI_AUTO:
+		{
+			/* One sample per scan step -- see spectrum.h. The frequency changing is the
+			 * step boundary; there is no step counter reachable from here, and using the
+			 * frequency means this also behaves sensibly when the scan stops, since the
+			 * decision then simply holds. */
+			uint32_t f = currentRadioDevice->currentRxFrequency;
+
+			if (f != s_lastStepFreq)
+			{
+				s_lastStepFreq = f;
+				s_stepDecision = spectrumRssiAutoDetect(rssi);
+			}
+
+			return s_stepDecision;
+		}
 
 		case SPECTRUM_DETECT_CHIPSQ:
 		{

@@ -191,15 +191,49 @@ extern uint16_t spectrumScanSettleTicks;
  *
  * Mode 2 costs an extra ~140 us I2C read per test. That is fine for a measurement and
  * is why this is not a candidate for shipping as-is. */
-#define SPECTRUM_DETECT_STOCK   0
-#define SPECTRUM_DETECT_RSSI    1
-#define SPECTRUM_DETECT_CHIPSQ  2
+#define SPECTRUM_DETECT_STOCK      0
+#define SPECTRUM_DETECT_RSSI       1
+#define SPECTRUM_DETECT_CHIPSQ     2
+#define SPECTRUM_DETECT_RSSI_AUTO  3
 
 extern uint8_t  spectrumScanDetectMode;
 extern uint8_t  spectrumScanRssiThreshold;
 extern uint8_t  spectrumScanSqReg;
 extern uint16_t spectrumScanSqMask;
 extern bool     spectrumScanSqInvert;
+
+/* ---- mode 3: RSSI against a running noise floor ----
+ * Mode 1 needs an absolute threshold, and there is no absolute threshold to be had: the
+ * floor was measured at 33-46 counts across 430-433.6 MHz alone, so a number that works
+ * at one end of a scan is deaf or permanently open at the other. The floor has to be
+ * learned, which is what makes mode 3 rather than mode 1 the shippable shape.
+ *
+ * ★ The estimator compares like with like, and that is the whole trick. Every scan step
+ * samples at the same delay after its retune, so every sample carries the same settle
+ * history -- a running average of recent steps IS the floor *at that point on the settle
+ * curve*, and the transient cancels out of the comparison instead of having to be waited
+ * out. This is why the sub-4 ms cliff does not apply to this rule: it never needs the
+ * reading to be correct in absolute terms, only comparable.
+ *
+ * That only holds if there is exactly ONE sample per step. scanning() calls
+ * trxCarrierDetected() on every main-loop tick of the test window, and RSSI swings wildly
+ * across a settle (12 to 37 counts on a bare floor), so mixing several ticks of one step
+ * into the estimate would put that swing straight into the noise of the comparison. The
+ * decision is therefore taken once, on the first test after the frequency changes, and
+ * held for the rest of the step. Where in the settle that lands is set by
+ * spectrumScanSettleTicks (CPS 0xAA) -- which is exactly the knob the bench wants.
+ *
+ * margin  counts above the floor that count as a carrier
+ * shift   IIR rate: floor += (sample - floor) >> shift. Bigger = slower and steadier. */
+extern uint8_t spectrumScanRssiMargin;
+extern uint8_t spectrumScanFloorShift;
+
+/* The running floor, in whole counts, for the host to watch converge (CPS 0xAC). */
+uint8_t spectrumScanFloor(void);
+
+/* Forget the floor. Called when the detection mode is set, so a measurement never starts
+ * against an estimate learned on another band or another carrier. */
+void spectrumScanDetectReset(void);
 
 /* True if a carrier is present under the currently selected rule. Only called from
  * trxCarrierDetected(), and only when the mode is not stock. */

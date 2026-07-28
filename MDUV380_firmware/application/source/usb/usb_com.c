@@ -1299,30 +1299,57 @@ static void cpsHandleCommand(void)
 			}
 			return;   /* NOT break -- see above */
 		case 0xAC: // DEV: report the analog squelch threshold the scanner is currently
-			//        using, plus the live rssi/noise, as [cmd, 0xAC, squelch, rssi, noise].
-			//        `noise < squelch` IS the scan/stop decision (trxCarrierDetected), so a
-			//        detection experiment that assumes a threshold is measuring against a
-			//        number the radio may not be using. Ask instead.
+			//        using, the live rssi/noise, the running RSSI noise floor and the
+			//        detection mode, as [cmd, 0xAC, squelch, rssi, noise, floor, mode].
+			//        `noise < squelch` IS the stock scan/stop decision
+			//        (trxCarrierDetected), so a detection experiment that assumes a
+			//        threshold is measuring against a number the radio may not be using.
+			//        Ask instead. The floor is here so the host can watch mode 3's
+			//        estimator converge rather than infer that it has.
 			{
 				usbComSendBuf[0] = com_requestbuffer[0];
 				usbComSendBuf[1] = 0xAC;
 				usbComSendBuf[2] = trxGetAnalogSquelchThreshold();
 				usbComSendBuf[3] = currentRadioDevice->trxRxSignal;
 				usbComSendBuf[4] = currentRadioDevice->trxRxNoise;
+				usbComSendBuf[5] = spectrumScanFloor();
+				usbComSendBuf[6] = spectrumScanDetectMode;
+				/* Whether the scan is running, and whether it has stopped on something.
+				 * Without this the host can only infer detection by recomputing the rule
+				 * from a slow poll -- against a different sample than the one the radio
+				 * actually decided on, which is a guess dressed up as a measurement.
+				 * 0 = SCANNING, 1 = SHORT_PAUSED, 2 = PAUSED. */
+				usbComSendBuf[7] = (uint8_t)uiDataGlobal.Scan.state;
+				usbComSendBuf[8] = (uint8_t)(uiDataGlobal.Scan.active ? 1 : 0);
 				hasToReply = true;
-				replyLength = 5;
+				replyLength = 9;
 			}
 			return;   /* NOT break -- see above */
 		case 0xAD: // DEV: choose what the scanner decides on (see spectrum.h):
-			//   [2]=mode (0 stock / 1 rssi / 2 chip squelch bit), [3]=rssi threshold,
-			//   [4]=status register, [5..6]=mask BE, [7]=invert.
+			//   [2]=mode (0 stock / 1 rssi / 2 chip squelch bit / 3 rssi vs running floor),
+			//   [3]=rssi threshold (mode 1), [4]=status register, [5..6]=mask BE,
+			//   [7]=invert, [8]=margin over the floor (mode 3), [9]=floor IIR shift.
 			//   Reply echoes all of it back. Takes effect on the next carrier test, so a
 			//   detection threshold can be searched under each rule without reflashing.
+			//   Always forgets the learned floor: a run must never start against an
+			//   estimate learned on another band, another carrier or another margin.
 			spectrumScanDetectMode = com_requestbuffer[2];
 			spectrumScanRssiThreshold = com_requestbuffer[3];
 			spectrumScanSqReg = com_requestbuffer[4];
 			spectrumScanSqMask = (uint16_t)((com_requestbuffer[5] << 8) | com_requestbuffer[6]);
 			spectrumScanSqInvert = (com_requestbuffer[7] != 0);
+			if (com_requestbuffer[8] != 0)
+			{
+				spectrumScanRssiMargin = com_requestbuffer[8];
+			}
+			if (com_requestbuffer[9] != 0)
+			{
+				/* A shift of 0 would make the floor follow every sample exactly, so it
+				 * could never sit below a carrier -- nothing would ever be detected.
+				 * Above 8 it stops moving on this timescale. */
+				spectrumScanFloorShift = (com_requestbuffer[9] > 8) ? 8 : com_requestbuffer[9];
+			}
+			spectrumScanDetectReset();
 			usbComSendBuf[0] = com_requestbuffer[0];
 			usbComSendBuf[1] = 0xAD;
 			usbComSendBuf[2] = spectrumScanDetectMode;
@@ -1331,8 +1358,10 @@ static void cpsHandleCommand(void)
 			usbComSendBuf[5] = (uint8_t)((spectrumScanSqMask >> 8) & 0xFF);
 			usbComSendBuf[6] = (uint8_t)(spectrumScanSqMask & 0xFF);
 			usbComSendBuf[7] = (uint8_t)(spectrumScanSqInvert ? 1 : 0);
+			usbComSendBuf[8] = spectrumScanRssiMargin;
+			usbComSendBuf[9] = spectrumScanFloorShift;
 			hasToReply = true;
-			replyLength = 8;
+			replyLength = 10;
 			return;   /* NOT break -- see above */
 #endif
 #ifdef ENABLE_KEY_INJECTION
