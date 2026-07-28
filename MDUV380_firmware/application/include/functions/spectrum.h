@@ -223,10 +223,9 @@ extern bool     spectrumScanSqInvert;
  * held for the rest of the step. Where in the settle that lands is set by
  * spectrumScanSettleTicks (CPS 0xAA) -- which is exactly the knob the bench wants.
  *
- * margin  counts above the floor that count as a carrier
- * shift   IIR rate: floor += (sample - floor) >> shift. Bigger = slower and steadier. */
+ * margin  counts above the floor that count as a carrier. The IIR rate is fixed in
+ *         scanreject.c, which owns the estimator both this and the reject share. */
 extern uint8_t spectrumScanRssiMargin;
-extern uint8_t spectrumScanFloorShift;
 
 /* The running floor, in whole counts, for the host to watch converge (CPS 0xAC). */
 uint8_t spectrumScanFloor(void);
@@ -239,7 +238,13 @@ void spectrumScanDetectReset(void);
  * trxCarrierDetected(), and only when the mode is not stock. */
 bool spectrumScanCarrierDetected(uint8_t rssi, uint8_t noise, uint8_t squelch);
 
-/* ---- the fast reject ----
+/* ---- the fast reject: MOVED ----
+ * It now lives in scanreject.{c,h}, which compiles under ENABLE_FAST_SCAN as well,
+ * because it turned out to be a shipped scanner feature rather than dev tooling. The
+ * runtime knobs stay reachable from here (CPS 0xAE) for the bench.
+ *
+ * The rationale, kept below for the reader who arrives at mode 3 first and wonders why
+ * detection was not simply moved to RSSI:
  * Mode 3 above was built, measured and does not work: RSSI's step-to-step spread across
  * a scan is the size of a moderate carrier's lift, so any margin that suppresses false
  * stops is already deaf. RSSI is an absolute level; the noise byte is SNR-like and
@@ -264,17 +269,8 @@ bool spectrumScanCarrierDetected(uint8_t rssi, uint8_t noise, uint8_t squelch);
  *
  * Shares the floor estimator with mode 3 above, so do not run both at once: leave the
  * detection mode at stock, which is the configuration this is designed for anyway. */
-extern uint16_t spectrumScanRejectTicks;
-extern uint8_t  spectrumScanRejectMargin;
-
-/* How many steps have been taken and how many were thrown away early. The reject
- * fraction IS the speed win, and it cannot be inferred from the outside. */
-extern uint32_t spectrumScanStepsTotal;
-extern uint32_t spectrumScanStepsRejected;
-
-/* Called once per scan step at the reject point. True = this step is empty, abandon it. */
-bool spectrumScanRejectStep(uint8_t rssi);
-void spectrumScanRejectCountStep(void);
+/* Margin used by mode 3 only; the reject has its own (scanRejectMargin). */
+extern uint8_t spectrumScanRssiMargin;
 
 /* ---- Stage 0: settle probe ----
  * Park on fA, retune to fB, then sample a register either as fast as the I2C bus allows

@@ -33,6 +33,7 @@
 #include "functions/trx.h"
 #include "functions/rxPowerSaving.h"
 #include "functions/spectrum.h"   /* SCANPROF_*: dev-only scan-step profiler, no-ops otherwise */
+#include "functions/scanreject.h" /* the fast reject; compiles to nothing in a stock build */
 #include "user_interface/menuSystem.h"
 #include "user_interface/uiUtilities.h"
 #include "user_interface/uiLocalisation.h"
@@ -4204,7 +4205,7 @@ static void scanning(void)
 {
 	static bool scanPaused = false;
 	static bool voicePromptsAnnounced = true;
-#if defined(ENABLE_SPECTRUM)
+#if defined(ENABLE_FAST_SCAN) || defined(ENABLE_SPECTRUM)
 	static bool rejectDone = false;
 #endif
 
@@ -4215,8 +4216,8 @@ static void scanning(void)
 		return;
 	}
 
-#if defined(ENABLE_SPECTRUM)
-	/* The fast reject (see spectrum.h). RSSI is readable ~2.5 ms after a retune while
+#if defined(ENABLE_FAST_SCAN) || defined(ENABLE_SPECTRUM)
+	/* The fast reject (see scanreject.h). RSSI is readable ~2.5 ms after a retune while
 	 * `trxRxNoise < squelch` needs ~10-15 ms, and the expensive thing a scanner does is
 	 * prove a step EMPTY. So spend one 140 us RSSI read early: if the level has not
 	 * lifted at all, end the step now; otherwise let the dwell run and leave the decision
@@ -4226,19 +4227,25 @@ static void scanning(void)
 	 * so there is nothing to save there and the RSSI of a TDMA carrier in the wrong slot
 	 * would reject a channel that is genuinely busy.
 	 *
-	 * Once per step: rejectDone is cleared at the step boundary below. Testing on
-	 * `<=` rather than `==` so a skipped main-loop tick cannot make the test miss its
-	 * slot and silently disable the feature for that step. */
-	if ((spectrumScanRejectTicks != 0) && (rejectDone == false) &&
+	 * Not in Dual Watch either. That mode alternates between two VFOs, so consecutive
+	 * steps are two different frequencies with two different noise floors, and a single
+	 * running estimate interleaved across both is an average of neither.
+	 *
+	 * Once per step: rejectDone is cleared at the step boundary below. Testing on `<=`
+	 * rather than `==` so a skipped main-loop tick cannot make the test miss its slot and
+	 * silently disable the feature for that step. */
+	if ((scanRejectTicks != 0) && (rejectDone == false) &&
 			(uiDataGlobal.Scan.state == SCAN_STATE_SCANNING) &&
 			(trxGetMode() == RADIO_MODE_ANALOG) &&
+			(screenOperationMode[nonVolatileSettings.currentVFONumber] !=
+					VFO_SCREEN_OPERATION_DUAL_SCAN) &&
 			(uiDataGlobal.Scan.timer.timeout <=
-					(uiDataGlobal.Scan.dwellTime - (int)spectrumScanRejectTicks)))
+					(uiDataGlobal.Scan.dwellTime - (int)scanRejectTicks)))
 	{
 		rejectDone = true;
 		trxReadRSSIAndNoise(true);
 
-		if (spectrumScanRejectStep(currentRadioDevice->trxRxSignal))
+		if (scanRejectStep(currentRadioDevice->trxRxSignal))
 		{
 			/* Fall straight through to the step boundary below, this same tick. */
 			uiDataGlobal.Scan.timer.timeout = 0;
@@ -4402,13 +4409,13 @@ static void scanning(void)
 		SCANPROF_PERIOD(SCANPROF_STEP_PERIOD);
 		SCANPROF_START(tStepTotal);
 
-#if defined(ENABLE_SPECTRUM)
+#if defined(ENABLE_FAST_SCAN) || defined(ENABLE_SPECTRUM)
 		/* A new step begins here, so the fast reject gets one test again. Counted here
 		 * rather than at the reject point, so the total includes the steps that were
 		 * never eligible -- otherwise the reject fraction is measured against its own
 		 * denominator and always looks better than it is. */
 		rejectDone = false;
-		spectrumScanRejectCountStep();
+		scanRejectCountStep();
 #endif
 
 		// We are in Dual Watch scanning mode

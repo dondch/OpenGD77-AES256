@@ -51,6 +51,7 @@
 #endif
 #if defined(ENABLE_SPECTRUM)
 #include "functions/spectrum.h"   /* swept-RSSI receiver (CPS 0xA0 / 0xA1) */
+#include "functions/scanreject.h" /* the fast reject (CPS 0xAE) */
 #endif
 #include "interfaces/gps.h"
 
@@ -1342,13 +1343,6 @@ static void cpsHandleCommand(void)
 			{
 				spectrumScanRssiMargin = com_requestbuffer[8];
 			}
-			if (com_requestbuffer[9] != 0)
-			{
-				/* A shift of 0 would make the floor follow every sample exactly, so it
-				 * could never sit below a carrier -- nothing would ever be detected.
-				 * Above 8 it stops moving on this timescale. */
-				spectrumScanFloorShift = (com_requestbuffer[9] > 8) ? 8 : com_requestbuffer[9];
-			}
 			spectrumScanDetectReset();
 			usbComSendBuf[0] = com_requestbuffer[0];
 			usbComSendBuf[1] = 0xAD;
@@ -1359,7 +1353,7 @@ static void cpsHandleCommand(void)
 			usbComSendBuf[6] = (uint8_t)(spectrumScanSqMask & 0xFF);
 			usbComSendBuf[7] = (uint8_t)(spectrumScanSqInvert ? 1 : 0);
 			usbComSendBuf[8] = spectrumScanRssiMargin;
-			usbComSendBuf[9] = spectrumScanFloorShift;
+			usbComSendBuf[9] = 0;   // the IIR rate is fixed in scanreject.c now
 			hasToReply = true;
 			replyLength = 10;
 			return;   /* NOT break -- see above */
@@ -1373,28 +1367,28 @@ static void cpsHandleCommand(void)
 			{
 				if (com_requestbuffer[2] != 0)
 				{
-					spectrumScanRejectTicks = (uint16_t)((com_requestbuffer[3] << 8) |
+					scanRejectTicks = (uint16_t)((com_requestbuffer[3] << 8) |
 							com_requestbuffer[4]);
 					if (com_requestbuffer[5] != 0)
 					{
-						spectrumScanRejectMargin = com_requestbuffer[5];
+						scanRejectMargin = com_requestbuffer[5];
 					}
 					spectrumScanDetectReset();   // also zeroes the counters
 				}
 
 				usbComSendBuf[0] = com_requestbuffer[0];
 				usbComSendBuf[1] = 0xAE;
-				usbComSendBuf[2] = (uint8_t)((spectrumScanRejectTicks >> 8) & 0xFF);
-				usbComSendBuf[3] = (uint8_t)(spectrumScanRejectTicks & 0xFF);
-				usbComSendBuf[4] = spectrumScanRejectMargin;
-				usbComSendBuf[5] = (uint8_t)((spectrumScanStepsTotal >> 24) & 0xFF);
-				usbComSendBuf[6] = (uint8_t)((spectrumScanStepsTotal >> 16) & 0xFF);
-				usbComSendBuf[7] = (uint8_t)((spectrumScanStepsTotal >> 8) & 0xFF);
-				usbComSendBuf[8] = (uint8_t)(spectrumScanStepsTotal & 0xFF);
-				usbComSendBuf[9] = (uint8_t)((spectrumScanStepsRejected >> 24) & 0xFF);
-				usbComSendBuf[10] = (uint8_t)((spectrumScanStepsRejected >> 16) & 0xFF);
-				usbComSendBuf[11] = (uint8_t)((spectrumScanStepsRejected >> 8) & 0xFF);
-				usbComSendBuf[12] = (uint8_t)(spectrumScanStepsRejected & 0xFF);
+				usbComSendBuf[2] = (uint8_t)((scanRejectTicks >> 8) & 0xFF);
+				usbComSendBuf[3] = (uint8_t)(scanRejectTicks & 0xFF);
+				usbComSendBuf[4] = scanRejectMargin;
+				usbComSendBuf[5] = (uint8_t)((scanRejectStepsTotal >> 24) & 0xFF);
+				usbComSendBuf[6] = (uint8_t)((scanRejectStepsTotal >> 16) & 0xFF);
+				usbComSendBuf[7] = (uint8_t)((scanRejectStepsTotal >> 8) & 0xFF);
+				usbComSendBuf[8] = (uint8_t)(scanRejectStepsTotal & 0xFF);
+				usbComSendBuf[9] = (uint8_t)((scanRejectStepsRejected >> 24) & 0xFF);
+				usbComSendBuf[10] = (uint8_t)((scanRejectStepsRejected >> 16) & 0xFF);
+				usbComSendBuf[11] = (uint8_t)((scanRejectStepsRejected >> 8) & 0xFF);
+				usbComSendBuf[12] = (uint8_t)(scanRejectStepsRejected & 0xFF);
 				hasToReply = true;
 				replyLength = 13;
 			}
