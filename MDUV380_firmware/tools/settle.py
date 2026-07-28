@@ -347,13 +347,23 @@ def doSplit(ser, args):
         print("  %-6.0f%% %-22s %-22s" % (frac * 100, fmtUs(r), fmtUs(n)))
 
     print()
-    print("  ---- time to DETECT, i.e. what a scanner would actually wait for ----")
-    nDet = median([crossTime(t, ns, squelch - 1, rising=False) for t, _, ns, _, _ in runs])
-    print("  noise < %-3d (the real rule)      %s" % (squelch, fmtUs(nDet)))
-    for margin in (3, 6, 10):
-        rDet = median([crossTime(t, rs, baseRssi + margin, rising=True)
-                       for t, rs, _, _, _ in runs])
-        print("  rssi > floor + %-2d                 %s" % (margin, fmtUs(rDet)))
+    if args.reg not in (0, 0x1B):
+        # `noise < squelch` is a statement about 0x1B's low byte and nothing else. Run it
+        # against another register and it compares the squelch threshold to whatever that
+        # register's low byte happens to be -- for 0x1C that is a constant 0, which reads
+        # as "detected 444 us after the retune" and is pure nonsense.
+        print("  ---- detection section skipped: register 0x%02X is not 0x1B ----" % args.reg)
+        print("  Those rules are defined on 0x1B's two bytes. Compare the rise times")
+        print("  above against an 0x1B run instead.")
+    else:
+        print("  ---- time to DETECT, i.e. what a scanner would actually wait for ----")
+        nDet = median([crossTime(t, ns, squelch - 1, rising=False)
+                       for t, _, ns, _, _ in runs])
+        print("  noise < %-3d (the real rule)      %s" % (squelch, fmtUs(nDet)))
+        for margin in (3, 6, 10):
+            rDet = median([crossTime(t, rs, baseRssi + margin, rising=True)
+                           for t, rs, _, _, _ in runs])
+            print("  rssi > floor + %-2d                 %s" % (margin, fmtUs(rDet)))
 
     if args.csv:
         with open(args.csv, "w") as fh:
