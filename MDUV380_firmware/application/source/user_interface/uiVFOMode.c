@@ -229,6 +229,39 @@ static uint32_t      vfoSweepListenFreq = 0;
 // the first thing to change if the hold feels either too noisy or too deaf.
 #define VFO_SWEEP_HOLD_MIN_LIFT  6
 static uint8_t vfoSweepHold[VFO_SWEEP_NUM_SAMPLES];
+
+// ---- automatic noise floor and gain ----
+// The two manual knobs were the last thing standing between this and a display you can
+// just look at. Worse, their defaults do not fit the hardware: vfoSweepRssiNoiseFloor is
+// capped at VFO_SWEEP_RSSI_NOISE_FLOOR_MAX (24) while the real noise floor on this radio
+// measures around 36-43 counts, so the floor setting cannot reach the noise however it is
+// adjusted. The noise therefore always draws as a solid band ~20 pixels up, and the
+// useful range above it gets a fraction of the screen.
+//
+// That same mismatch quietly broke the peak and listen thresholds: both compare against
+// `floor + margin`, and with floor pinned below the noise those tests were true for every
+// sample the receiver has ever produced. Scaling off the measured floor is what makes
+// them mean anything.
+//
+// The auto values are kept separate from the manual ones rather than written back into
+// them, because they do not fit: vfoSweepSettings stores the floor in 5 bits and the gain
+// in 7, and the persisted format is shared with CHIRP and the stock firmware.
+#define VFO_SWEEP_AUTO_FLOOR_MARGIN  4    // leave this much noise visible, not clipped flat
+#define VFO_SWEEP_AUTO_MIN_SPAN     20    // never magnify a flat band into a wall of noise
+#define VFO_SWEEP_AUTO_HEADROOM_PCT 85    // put the strongest sample at this % of height
+#define VFO_SWEEP_AUTO_SLEW          4    // IIR weight; higher = steadier, slower
+
+static bool    vfoSweepAutoScale = true;
+static bool    vfoSweepAutoPrimed = false;
+static uint8_t vfoSweepAutoFloor = VFO_SWEEP_RSSI_NOISE_FLOOR_DEFAULT;
+static uint8_t vfoSweepAutoGain = VFO_SWEEP_GAIN_DEFAULT;
+
+#define VFO_SWEEP_FLOOR_ACTIVE  (vfoSweepAutoScale ? vfoSweepAutoFloor : vfoSweepRssiNoiseFloor)
+// MAX(1, ...) because this is a divisor and VFO_SWEEP_GAIN_MIN is 0.
+#define VFO_SWEEP_GAIN_ACTIVE   MAX(1, (vfoSweepAutoScale ? vfoSweepAutoGain : vfoSweepGain))
+#else
+#define VFO_SWEEP_FLOOR_ACTIVE  vfoSweepRssiNoiseFloor
+#define VFO_SWEEP_GAIN_ACTIVE   vfoSweepGain
 #endif
 
 #if defined(ENABLE_FAST_SCAN)
@@ -1590,9 +1623,11 @@ static void handleEvent(uiEvent_t *ev)
 				vfoSweepGain = VFO_SWEEP_GAIN_DEFAULT;
 #if defined(ENABLE_FAST_SCAN)
 				// This is already the "put the display back to a clean state" gesture, so
-				// it is also where the max hold gets cleared. Saves inventing a control on
-				// a keypad that has none free.
+				// it is also where the max hold gets cleared and automatic scaling comes
+				// back on. Saves inventing controls on a keypad that has none free.
 				memset(vfoSweepHold, 0x00, sizeof(vfoSweepHold));
+				vfoSweepAutoScale = true;
+				vfoSweepAutoPrimed = false;
 #endif
 				settingsSet(nonVolatileSettings.vfoSweepSettings, ((uiDataGlobal.Scan.sweepStepSizeIndex << 12) | (vfoSweepRssiNoiseFloor << 7) | vfoSweepGain));
 				vfoSweepUpdateSamples(0, true, 0);
@@ -2417,6 +2452,82 @@ static uint32_t vfoSweepFreqForSample(int16_t index)
 					(index - (VFO_SWEEP_NUM_SAMPLES / 2))) / VFO_SWEEP_PIXELS_PER_STEP);
 }
 
+/* Re-derive the display scaling from the pass just finished.
+ *
+ * The floor estimate is the mean of the samples at or below the overall mean. That is a
+ * one-extra-loop way to get something robust without a sort or a histogram -- neither of
+ * which fits in the RAM this build has left -- and it is far steadier than the raw
+ * minimum, which a single glitched sample drags down and takes the whole trace with it.
+ * A handful of strong signals cannot move it much either, since they all land above the
+ * mean and are excluded by construction. */
+static void vfoSweepUpdateAutoScale(void)
+{
+	uint32_t sum = 0;
+	uint32_t lowSum = 0;
+	uint16_t lowCount = 0;
+	uint8_t highest = 0;
+	uint8_t mean, noise, floorTarget;
+	int32_t span;
+
+	for (int i = 0; i < VFO_SWEEP_NUM_SAMPLES; i++)
+	{
+		sum += vfoSweepSamples[i];
+		if (vfoSweepSamples[i] > highest)
+		{
+			highest = vfoSweepSamples[i];
+		}
+	}
+	mean = (uint8_t)(sum / VFO_SWEEP_NUM_SAMPLES);
+
+	for (int i = 0; i < VFO_SWEEP_NUM_SAMPLES; i++)
+	{
+		if (vfoSweepSamples[i] <= mean)
+		{
+			lowSum += vfoSweepSamples[i];
+			lowCount++;
+		}
+	}
+	noise = (lowCount ? (uint8_t)(lowSum / lowCount) : mean);
+
+	// Sit just under the noise rather than on it, so the noise still has some texture
+	// instead of being clipped flat against the baseline.
+	floorTarget = ((noise > VFO_SWEEP_AUTO_FLOOR_MARGIN) ? (noise - VFO_SWEEP_AUTO_FLOOR_MARGIN) : 0);
+
+	// Span that puts the strongest sample at VFO_SWEEP_AUTO_HEADROOM_PCT of full height.
+	span = ((int32_t)highest - (int32_t)floorTarget);
+	if (span < VFO_SWEEP_AUTO_MIN_SPAN)
+	{
+		// An empty band is all noise, and stretching it to full height turns a quiet
+		// display into a wall of grass that looks like signal everywhere.
+		span = VFO_SWEEP_AUTO_MIN_SPAN;
+	}
+	span = ((span * 100) / VFO_SWEEP_AUTO_HEADROOM_PCT);
+	if (span > 255)
+	{
+		span = 255;
+	}
+
+	if (vfoSweepAutoPrimed)
+	{
+		// Slew, or the whole trace jumps every pass as the peak comes and goes.
+		vfoSweepAutoFloor = (uint8_t)(((vfoSweepAutoFloor * (VFO_SWEEP_AUTO_SLEW - 1)) + floorTarget) / VFO_SWEEP_AUTO_SLEW);
+		vfoSweepAutoGain = (uint8_t)(((vfoSweepAutoGain * (VFO_SWEEP_AUTO_SLEW - 1)) + span) / VFO_SWEEP_AUTO_SLEW);
+	}
+	else
+	{
+		// First pass after entering the sweep: take it outright. Slewing from the manual
+		// defaults would spend several seconds visibly settling every single time.
+		vfoSweepAutoFloor = floorTarget;
+		vfoSweepAutoGain = (uint8_t)span;
+		vfoSweepAutoPrimed = true;
+	}
+
+	if (vfoSweepAutoGain == 0)
+	{
+		vfoSweepAutoGain = 1;   // it is a divisor
+	}
+}
+
 /* Leave the parked-on signal and carry on sweeping.
  *
  * Shutting the audio explicitly matters: trxCheckAnalogSquelch() stops being called the
@@ -2465,7 +2576,7 @@ static void vfoSweepDrawPeakMarker(void)
 	// Nothing above the noise floor is not a peak, it is just the loudest noise. Saying
 	// so would be worse than saying nothing: it invites chasing a frequency that has
 	// nothing on it.
-	if (vfoSweepShownPeakLevel <= (vfoSweepRssiNoiseFloor + VFO_SWEEP_PEAK_MARGIN))
+	if (vfoSweepShownPeakLevel <= (VFO_SWEEP_FLOOR_ACTIVE + VFO_SWEEP_PEAK_MARGIN))
 	{
 		return;
 	}
@@ -2510,8 +2621,8 @@ static void vfoSweepDrawPeakMarker(void)
 
 static void vfoSweepDrawSample(int offset)
 {
-	int16_t graphHeight = MAX(vfoSweepSamples[offset] - vfoSweepRssiNoiseFloor, 0);
-	graphHeight = (graphHeight * VFO_SWEEP_TRACE_HEIGHT_Y) / vfoSweepGain;
+	int16_t graphHeight = MAX(vfoSweepSamples[offset] - VFO_SWEEP_FLOOR_ACTIVE, 0);
+	graphHeight = (graphHeight * VFO_SWEEP_TRACE_HEIGHT_Y) / VFO_SWEEP_GAIN_ACTIVE;
 	graphHeight = MIN(VFO_SWEEP_TRACE_HEIGHT_Y, graphHeight);
 
 	int16_t levelTop = ((VFO_SWEEP_TRACE_START_Y + VFO_SWEEP_TRACE_HEIGHT_Y) - graphHeight);
@@ -2526,8 +2637,8 @@ static void vfoSweepDrawSample(int offset)
 	// just cleared this column, so it survives until this column is next redrawn -- and it
 	// is inside the strip the blit already covers, so it costs no extra transfer.
 	{
-		int16_t holdHeight = MAX(vfoSweepHold[offset] - vfoSweepRssiNoiseFloor, 0);
-		holdHeight = ((holdHeight * VFO_SWEEP_TRACE_HEIGHT_Y) / vfoSweepGain);
+		int16_t holdHeight = MAX(vfoSweepHold[offset] - VFO_SWEEP_FLOOR_ACTIVE, 0);
+		holdHeight = ((holdHeight * VFO_SWEEP_TRACE_HEIGHT_Y) / VFO_SWEEP_GAIN_ACTIVE);
 		holdHeight = MIN(VFO_SWEEP_TRACE_HEIGHT_Y, holdHeight);
 
 		// Only where the hold is meaningfully above the live level. Drawing it wherever it
@@ -2677,6 +2788,15 @@ static void setSweepIncDecSetting(sweepSetting_t type, bool increment)
 			break;
 		case SWEEP_SETTING_RSSI:
 			{
+#if defined(ENABLE_FAST_SCAN)
+				// Touching either knob hands scaling back to the operator. Both key paths
+				// funnel through here, so this is the only place it needs saying.
+				//
+				// The display will jump: the manual floor is capped at 24 and cannot
+				// express what auto was using (~35 on this radio), so there is no way to
+				// hand over continuously. SK1 + rotary puts auto back.
+				vfoSweepAutoScale = false;
+#endif
 				if (increment)
 				{
 					if (vfoSweepRssiNoiseFloor > VFO_SWEEP_RSSI_NOISE_FLOOR_MIN)
@@ -2703,6 +2823,9 @@ static void setSweepIncDecSetting(sweepSetting_t type, bool increment)
 			break;
 		case SWEEP_SETTING_GAIN:
 			{
+#if defined(ENABLE_FAST_SCAN)
+				vfoSweepAutoScale = false;   // see SWEEP_SETTING_RSSI
+#endif
 				if (increment)
 				{
 					if (vfoSweepGain > VFO_SWEEP_GAIN_STEP)
@@ -3802,6 +3925,12 @@ static void sweepScanInit(void)
 	vfoSweepShownPeakIndex = -1;
 	vfoSweepPassComplete = false;
 	memset(vfoSweepHold, 0x00, sizeof(vfoSweepHold));
+	// Come back in automatic, and re-prime rather than carrying the last visit's scaling
+	// into a band that may be nothing like it. Manual scaling is not persisted and has no
+	// indicator on screen, so leaving it latched across visits would mean opening the
+	// spectrum screen into a mode you cannot see and did not ask for this time.
+	vfoSweepAutoScale = true;
+	vfoSweepAutoPrimed = false;
 #endif
 
 	menuSystemPopAllAndDisplaySpecificRootMenu(UI_VFO_MODE, true);
@@ -3950,6 +4079,11 @@ static void sweepScanStep(void)
 			vfoSweepPeakIndex = -1;
 			vfoSweepPassComplete = true;
 
+			if (vfoSweepAutoScale)
+			{
+				vfoSweepUpdateAutoScale();
+			}
+
 #if (VFO_SWEEP_HOLD_DECAY > 0)
 			// Fade the hold one step per pass. Bins below their live level are raised
 			// straight back by the max on the next pass, so this only ever eats away at
@@ -3963,7 +4097,7 @@ static void sweepScanStep(void)
 
 			// Strong enough to be worth interrupting the sweep for? Park on it.
 			if ((vfoSweepShownPeakIndex >= 0) &&
-					(vfoSweepShownPeakLevel > (vfoSweepRssiNoiseFloor + VFO_SWEEP_LISTEN_MARGIN)))
+					(vfoSweepShownPeakLevel > (VFO_SWEEP_FLOOR_ACTIVE + VFO_SWEEP_LISTEN_MARGIN)))
 			{
 				vfoSweepListenFreq = vfoSweepFreqForSample(vfoSweepShownPeakIndex);
 				vfoSweepListening = true;
