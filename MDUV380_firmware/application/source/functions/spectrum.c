@@ -215,6 +215,11 @@ bool spectrumReadReg(uint8_t reg, uint8_t *hi, uint8_t *lo)
 	return radioReadReg2byte(reg, hi, lo);
 }
 
+bool spectrumWriteRegRaw(uint8_t reg, uint8_t hi, uint8_t lo)
+{
+	return spectrumRawWrite(reg, hi, lo);
+}
+
 /* Split-dwell scan experiment. See spectrum.h. 0 = stock behaviour. */
 uint16_t spectrumScanAnalogDwellMs = 0;
 
@@ -223,6 +228,42 @@ uint16_t spectrumSweepStepTimeMs = 0;
 
 /* Scan settling interval override. See spectrum.h. 0 = the stock 1 tick. */
 uint16_t spectrumScanSettleTicks = 0;
+
+/* What the scanner decides on. See spectrum.h. 0 = stock. */
+uint8_t  spectrumScanDetectMode = SPECTRUM_DETECT_STOCK;
+uint8_t  spectrumScanRssiThreshold = 0;
+uint8_t  spectrumScanSqReg = 0;
+uint16_t spectrumScanSqMask = 0;
+bool     spectrumScanSqInvert = false;
+
+bool spectrumScanCarrierDetected(uint8_t rssi, uint8_t noise, uint8_t squelch)
+{
+	switch (spectrumScanDetectMode)
+	{
+		case SPECTRUM_DETECT_RSSI:
+			return (rssi >= spectrumScanRssiThreshold);
+
+		case SPECTRUM_DETECT_CHIPSQ:
+		{
+			uint8_t hi = 0, lo = 0;
+			bool open;
+
+			/* An unset register would test 0 against 0 and answer "detected" for ever,
+			 * which reads as a spectacularly sensitive scanner rather than as a
+			 * misconfiguration. Fall back to the stock rule instead. */
+			if ((spectrumScanSqMask == 0) || (radioReadReg2byte(spectrumScanSqReg, &hi, &lo) == false))
+			{
+				return (noise < squelch);
+			}
+
+			open = ((((uint16_t)hi << 8) | lo) & spectrumScanSqMask) != 0;
+			return (spectrumScanSqInvert ? (open == false) : open);
+		}
+
+		default:
+			return (noise < squelch);
+	}
+}
 
 /* Register overrides, re-applied after every retune. See spectrum.h. */
 static uint8_t s_overrides[SPECTRUM_MAX_OVERRIDES][3];
@@ -266,7 +307,14 @@ static void spectrumApplyOverrides(void)
  * measurement rather than per point -- it is a 140 us bus transaction. */
 static uint8_t s_reg30Hi = 0x60, s_reg30Lo = 0x26;
 
-static void spectrumCacheReg30(void)
+/* Same reasoning for the registers the 2026-07-28 candidate triggers poke: each is
+ * rewritten with the value it already holds, so it has to be read once first. Reading
+ * them per point would cost 140 us each and swamp the very saving being looked for. */
+static uint8_t s_reg0FHi = 0, s_reg0FLo = 0;   /* band select   */
+static uint8_t s_reg2BHi = 0, s_reg2BLo = 0;   /* xtal_freq     */
+static uint8_t s_reg2CHi = 0, s_reg2CLo = 0;   /* adclk_freq    */
+
+static void spectrumCacheRegs(void)
 {
 	uint8_t hi, lo;
 
@@ -275,11 +323,49 @@ static void spectrumCacheReg30(void)
 		s_reg30Hi = hi;
 		s_reg30Lo = lo | 0x20U;    /* the cached copy is the RX-ON form */
 	}
+
+	if (radioReadReg2byte(0x0F, &hi, &lo))
+	{
+		s_reg0FHi = hi;
+		s_reg0FLo = lo;
+	}
+
+	if (radioReadReg2byte(0x2B, &hi, &lo))
+	{
+		s_reg2BHi = hi;
+		s_reg2BLo = lo;
+	}
+
+	if (radioReadReg2byte(0x2C, &hi, &lo))
+	{
+		s_reg2CHi = hi;
+		s_reg2CLo = lo;
+	}
+}
+
+/* PLL registers, low word first. The one thing FAST cannot tell us: FAST writes 0x29
+ * then 0x2A and does not retune, but if the chip commits the pair on a write to the
+ * HIGH word -- which is how a lot of split channel-word synthesisers behave -- then FAST
+ * has been writing the high half of the new frequency against the low half of the old
+ * one and discarding it, and the correct order retunes for free. */
+static void spectrumFastRetuneHiLast(uint32_t freq)
+{
+	uint32_t f = (freq * 4U) / 25U;
+
+	radioWriteReg2byte(AT1846S_REG_FREQ_LO, (f >> 8) & 0xFF, f & 0xFF);
+	radioWriteReg2byte(AT1846S_REG_FREQ_HI, (f >> 24) & 0xFF, (f >> 16) & 0xFF);
+}
+
+/* Retune index: 4 bits, split (see spectrum.h). */
+static inline uint8_t spectrumRetuneKind(uint8_t mode)
+{
+	return (uint8_t)((mode & SPECTRUM_MODE_RETUNE_MASK) |
+			((mode & SPECTRUM_MODE_RETUNE_HI) ? 0x08U : 0U));
 }
 
 static void spectrumRetune(uint32_t freq, uint8_t mode)
 {
-	switch (mode & SPECTRUM_MODE_RETUNE_MASK)
+	switch (spectrumRetuneKind(mode))
 	{
 		case SPECTRUM_RETUNE_RADIO:
 			radioSetFrequency(freq, false);
@@ -324,6 +410,33 @@ static void spectrumRetune(uint32_t freq, uint8_t mode)
 			spectrumRawWrite(0x05, 0x87, 0x63);
 			break;
 
+		case SPECTRUM_RETUNE_BAND0F:
+			/* A band write plausibly reloads the synthesiser without stopping RX. Raw,
+			 * so the driver's value cache cannot swallow a write of the same value --
+			 * swallowing it is what would make this silently equal FAST. */
+			spectrumFastRetune(freq);
+			spectrumRawWrite(0x0F, s_reg0FHi, s_reg0FLo);
+			break;
+
+		case SPECTRUM_RETUNE_SQTOGGLE:
+			/* An edge on 0x30, but on a bit that does not gate the receiver. If this
+			 * latches, the ~4.4 ms is the RX restart and not the latch, and the whole
+			 * cost goes away. */
+			spectrumFastRetune(freq);
+			spectrumRawWrite(0x30, s_reg30Hi, (uint8_t)(s_reg30Lo ^ 0x08U));
+			spectrumRawWrite(0x30, s_reg30Hi, s_reg30Lo);
+			break;
+
+		case SPECTRUM_RETUNE_XTAL:
+			spectrumFastRetune(freq);
+			spectrumRawWrite(0x2B, s_reg2BHi, s_reg2BLo);
+			spectrumRawWrite(0x2C, s_reg2CHi, s_reg2CLo);
+			break;
+
+		case SPECTRUM_RETUNE_HILAST:
+			spectrumFastRetuneHiLast(freq);
+			break;
+
 		case SPECTRUM_RETUNE_FAST:
 		default:
 			spectrumFastRetune(freq);
@@ -333,11 +446,11 @@ static void spectrumRetune(uint32_t freq, uint8_t mode)
 	spectrumApplyOverrides();
 }
 
-static inline void spectrumReadRSSI(uint8_t *rssi, uint8_t *noise)
+static inline void spectrumSampleReg(uint8_t reg, uint8_t *rssi, uint8_t *noise)
 {
 	uint8_t v1 = 0, v2 = 0;
 
-	if (radioReadReg2byte(AT1846S_REG_RSSI, &v1, &v2))
+	if (radioReadReg2byte(reg, &v1, &v2))
 	{
 		*rssi = v1;
 		*noise = v2;
@@ -377,7 +490,7 @@ static void spectrumEnter(spectrumSavedState_t *st, uint8_t mode)
 		}
 	}
 
-	spectrumCacheReg30();
+	spectrumCacheRegs();
 	spectrumTimerInit();
 }
 
@@ -398,7 +511,7 @@ static void spectrumLeave(spectrumSavedState_t *st)
 /* ------------------------------------------------------ Stage 0: settle --- */
 
 int spectrumSettleProbe(uint32_t fA, uint32_t fB, uint8_t mode, uint16_t intervalUs,
-		uint8_t nSamples, spectrumSample_t *out, spectrumProbeInfo_t *info)
+		uint8_t nSamples, uint8_t reg, spectrumSample_t *out, spectrumProbeInfo_t *info)
 {
 	spectrumSavedState_t saved;
 	uint32_t t0, t1, tRead;
@@ -411,6 +524,11 @@ int spectrumSettleProbe(uint32_t fA, uint32_t fB, uint8_t mode, uint16_t interva
 		nSamples = SPECTRUM_PROBE_MAX_SAMPLES;
 	}
 
+	if (reg == 0)
+	{
+		reg = AT1846S_REG_RSSI;
+	}
+
 	/* The probe drives the radio itself, so it must not run on top of a session. */
 	spectrumSessionEnd();
 
@@ -421,11 +539,11 @@ int spectrumSettleProbe(uint32_t fA, uint32_t fB, uint8_t mode, uint16_t interva
 	spectrumRetune(fA, mode);
 	t0 = spectrumCycles();
 	spectrumWaitCycles(t0, 30000U * s_cyclesPerUs);   /* 30 ms */
-	spectrumReadRSSI(&rssi, &noise);
+	spectrumSampleReg(reg, &rssi, &noise);
 
-	/* Cost of one RSSI register read, measured on its own. */
+	/* Cost of one register read, measured on its own. */
 	t0 = spectrumCycles();
-	spectrumReadRSSI(&rssi, &noise);
+	spectrumSampleReg(reg, &rssi, &noise);
 	tRead = spectrumCycles() - t0;
 
 	/* The step under test. */
@@ -445,7 +563,7 @@ int spectrumSettleProbe(uint32_t fA, uint32_t fB, uint8_t mode, uint16_t interva
 		}
 
 		ts = spectrumCycles();
-		spectrumReadRSSI(&rssi, &noise);
+		spectrumSampleReg(reg, &rssi, &noise);
 
 		{
 			uint32_t us = spectrumCyclesToUs(ts - t0);
@@ -524,7 +642,7 @@ int spectrumSweep(uint32_t fStart, uint32_t stepHz, uint16_t nPoints, uint16_t d
 			spectrumWaitCycles(tPoint, dwellCycles);
 		}
 
-		spectrumReadRSSI(&rssi, &noise);
+		spectrumSampleReg(AT1846S_REG_RSSI, &rssi, &noise);
 		out[(i * 2) + 0] = rssi;
 		out[(i * 2) + 1] = noise;
 

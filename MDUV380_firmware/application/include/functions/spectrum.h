@@ -51,7 +51,52 @@
 #define SPECTRUM_RETUNE_POKE05     5  /* PLL regs + rewrite 0x05 (freq mode select) */
 #define SPECTRUM_RETUNE_LATE30     6  /* RX off, PLL regs, RX on -- mute as short as
                                        * possible around only the frequency writes */
+
+/* Candidates 7..10, added 2026-07-28. All four ask the same question from different
+ * angles: the AT1846S guide's entire "setting frequency" procedure is *write 29H and
+ * 2AH* -- no latch, no strobe, no restart is documented anywhere -- yet writing those
+ * two registers alone provably does not move the receiver, and the only trigger found so
+ * far is the RX off->on edge on 30H[5], which costs a full receiver restart (~4.4 ms).
+ * That restart is therefore undocumented behaviour rather than a datasheet requirement,
+ * so a cheaper trigger may exist. Each of these writes the PLL registers and then pokes
+ * one thing that plausibly forces the synthesiser to reload without restarting RX. */
+#define SPECTRUM_RETUNE_BAND0F     7  /* PLL regs + rewrite 0x0F (band select) unchanged.
+                                       * 0x0F[1:0] selects 400-520 / 200-260 / 134-174
+                                       * MHz and is absent from the vendor guide entirely
+                                       * (it comes from OpenRTX's community map), so a
+                                       * write to it is the least explored thing on the
+                                       * chip that could plausibly reload the VCO. The
+                                       * value is the CURRENT one, read once per
+                                       * measurement: an in-band sweep never changes band,
+                                       * and writing a different value would retune the
+                                       * front end rather than the synthesiser. */
+#define SPECTRUM_RETUNE_SQTOGGLE   8  /* PLL regs + toggle sq_on (0x30[3]) and put it
+                                       * back. Same register as the known-good latch but
+                                       * a different bit, and one that does not gate the
+                                       * receiver -- so if the latch is "any write to
+                                       * 0x30 that changes a bit" rather than "restart
+                                       * RX", this finds out and costs nothing. */
+#define SPECTRUM_RETUNE_XTAL       9  /* PLL regs + rewrite 0x2B/0x2C (xtal_freq /
+                                       * adclk_freq) unchanged. These feed the
+                                       * synthesiser arithmetic, so a write may force the
+                                       * dividers to be recomputed from the new channel
+                                       * word. Values are the current ones, cached once
+                                       * per measurement. */
+#define SPECTRUM_RETUNE_HILAST    10  /* The PLL registers alone, low word FIRST. If the
+                                       * high word is what commits the pair -- which is
+                                       * how a great many synthesisers work and would
+                                       * explain the whole mystery -- then this retunes
+                                       * with zero extra bus traffic and the settle
+                                       * question is answered outright. */
+
+/* The retune index is 4 bits, split so that the low 3 stay exactly where they were.
+ * ★ Do NOT widen the mask over 0x08/0x10 instead: spectrum_char.py shipped with
+ * MODE_FORCE_FM/MODE_WIDE set to 0x04/0x08, i.e. one bit adrift of this header, which
+ * silently sent every one of its measurements as SPECTRUM_RETUNE_POKE30 (a no-op retune)
+ * with FM force off. A mode-bit layout change that an out-of-date host cannot detect
+ * produces plausible numbers, not an error. Bit 5 was free in every host that exists. */
 #define SPECTRUM_MODE_RETUNE_MASK  0x07
+#define SPECTRUM_MODE_RETUNE_HI    0x20  /* bit 3 of the retune index */
 
 #define SPECTRUM_MODE_FORCE_FM     0x08  /* switch to analog FM for the measurement */
 #define SPECTRUM_MODE_WIDE         0x10  /* 25 kHz IF instead of 12.5 kHz (with FORCE_FM) */
@@ -68,6 +113,17 @@
 void spectrumSetOverrides(int count, const uint8_t *regValTriplets);
 int spectrumGetOverrideCount(void);
 bool spectrumReadReg(uint8_t reg, uint8_t *hi, uint8_t *lo);
+
+/* One raw register write, straight onto the bus (CPS 0xAB). The override table only
+ * applies during a retune, which is no help when the question is "what does the chip do
+ * right now" -- e.g. finding which status bit follows the hardware squelch (30H[3] sq_on,
+ * thresholds 48H/49H), which is a matter of setting a bit and then reading candidate
+ * registers with the carrier on and off.
+ *
+ * Bypasses the driver's value cache, so afterwards the cache disagrees with the chip and
+ * a later driver write of the cached value will be swallowed. Dev-only, and the next
+ * AT1846sInit() or bandwidth change puts it right. */
+bool spectrumWriteRegRaw(uint8_t reg, uint8_t hi, uint8_t lo);
 
 /* ---- split-dwell scan experiment ----
  * scanStart() gives every channel the same dwell: settingsGetScanStepTimeMilliseconds(),
@@ -112,18 +168,68 @@ extern uint16_t spectrumSweepStepTimeMs;
  * which is not what the scanner decides on. */
 extern uint16_t spectrumScanSettleTicks;
 
+/* ---- what the scanner decides on ----
+ * trxCarrierDetected() stops the scan on `trxRxNoise < squelch`: the LOW byte of 0x1B,
+ * which is the chip's filtered noise/SNR figure. If the ~4.4 ms settle turns out to be
+ * that filter rather than the PLL, then the fix is not to make the receiver settle
+ * faster but to stop asking the slow question -- and the only way to know what that
+ * costs in sensitivity is to run the real scanner against a level-controlled carrier
+ * with the rule swapped.
+ *
+ * A runtime knob (CPS 0xAD) rather than a build flag, for the usual reason: reflashing
+ * between A and B changes far more than the decision rule, and the threshold search
+ * needs tens of runs. 0 = stock, and stock is what a release build compiles to anyway
+ * since all of this is behind ENABLE_SPECTRUM.
+ *
+ *   0  stock: noise < squelch
+ *   1  RSSI:  trxRxSignal >= spectrumScanRssiThreshold
+ *   2  the chip's own squelch/status bit: (reg spectrumScanSqReg & mask) != 0,
+ *      or == 0 if spectrumScanSqInvert. Generic because which register carries that
+ *      flag is not documented anywhere -- it has to be found by diffing the register
+ *      file with the carrier on and off (`settle.py regs --diff`), and pinning it at
+ *      build time would cost a flash cycle to correct.
+ *
+ * Mode 2 costs an extra ~140 us I2C read per test. That is fine for a measurement and
+ * is why this is not a candidate for shipping as-is. */
+#define SPECTRUM_DETECT_STOCK   0
+#define SPECTRUM_DETECT_RSSI    1
+#define SPECTRUM_DETECT_CHIPSQ  2
+
+extern uint8_t  spectrumScanDetectMode;
+extern uint8_t  spectrumScanRssiThreshold;
+extern uint8_t  spectrumScanSqReg;
+extern uint16_t spectrumScanSqMask;
+extern bool     spectrumScanSqInvert;
+
+/* True if a carrier is present under the currently selected rule. Only called from
+ * trxCarrierDetected(), and only when the mode is not stock. */
+bool spectrumScanCarrierDetected(uint8_t rssi, uint8_t noise, uint8_t squelch);
+
 /* ---- Stage 0: settle probe ----
- * Park on fA, retune to fB, then sample RSSI either as fast as the I2C bus allows
- * (intervalUs == 0) or on a fixed grid, timestamping every sample. Plotting RSSI
+ * Park on fA, retune to fB, then sample a register either as fast as the I2C bus allows
+ * (intervalUs == 0) or on a fixed grid, timestamping every sample. Plotting the reading
  * against time gives the real retune -> settle latency, which is what sets the
- * achievable sweep rate. Returns the number of samples captured. */
+ * achievable sweep rate. Returns the number of samples captured.
+ *
+ * `reg` is the AT1846S register to sample; 0 means 0x1B, whose two bytes are the RSSI and
+ * the noise/SNR level. Being able to point it somewhere else is what separates the two
+ * halves of the settle: VK3KYY describes the wall as "PLL lock time AND a low pass filter
+ * on the RSSI and also S/N values", and those have completely different fixes. 0x1B gives
+ * both filtered readings at once with a single timestamp, so their curves can be compared
+ * without any cross-run alignment; pointing the probe at a status register instead times
+ * the chip's own hardware squelch against them.
+ *
+ * Deliberately reuses the sample's two data bytes rather than adding a third: the sample
+ * array is static and 200 entries long, and a fifth byte per sample would cost 200 bytes
+ * of a dev build that has a few hundred spare. Two probe runs under identical conditions
+ * are cheaper than that, and the retune under test is repeatable by construction. */
 #define SPECTRUM_PROBE_MAX_SAMPLES  200
 
 typedef struct
 {
 	uint16_t tUs;      /* microseconds since the retune write sequence started */
-	uint8_t  rssi;     /* AT1846S reg 0x1B high byte */
-	uint8_t  noise;    /* AT1846S reg 0x1B low byte  */
+	uint8_t  rssi;     /* sampled register, high byte (reg 0x1B: RSSI)        */
+	uint8_t  noise;    /* sampled register, low byte  (reg 0x1B: noise level) */
 } spectrumSample_t;
 
 typedef struct
@@ -134,7 +240,7 @@ typedef struct
 } spectrumProbeInfo_t;
 
 int spectrumSettleProbe(uint32_t fA, uint32_t fB, uint8_t mode, uint16_t intervalUs,
-		uint8_t nSamples, spectrumSample_t *out, spectrumProbeInfo_t *info);
+		uint8_t nSamples, uint8_t reg, spectrumSample_t *out, spectrumProbeInfo_t *info);
 
 /* ---- Stage 1: sweep ----
  * nPoints readings starting at fStart, stepping by stepHz (also 10 Hz units), dwelling

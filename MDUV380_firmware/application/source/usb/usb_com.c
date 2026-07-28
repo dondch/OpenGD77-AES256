@@ -1076,11 +1076,14 @@ static void cpsHandleCommand(void)
 				replyLength = 6 + (n * 2);
 			}
 			return;   /* NOT break: the generic '-' reply below would clobber the data */
-		case 0xA1: // DEV: retune -> settle -> RSSI timing probe (Stage 0). Request (14 B):
+		case 0xA1: // DEV: retune -> settle -> register timing probe (Stage 0). Request (15 B):
 			//   [2..5]=freq A BE, [6..9]=freq B BE (10 Hz units), [10]=mode,
-			//   [11]=sample count, [12..13]=sample interval us BE (0 = as fast as I2C allows).
+			//   [11]=sample count, [12..13]=sample interval us BE (0 = as fast as I2C allows),
+			//   [14]=AT1846S register to sample (0 = 0x1B, i.e. rssi/noise).
 			// Reply: [cmd, 0xA1, count, mode, retuneUs BE(2), readUs BE(2),
-			//         count * (tUs BE(2), rssi, noise)].
+			//         count * (tUs BE(2), hi, lo)].
+			// [14] is optional for backwards compatibility: a 14-byte request from an older
+			// host leaves it zero, which selects 0x1B and is exactly what it used to get.
 			{
 				uint32_t fA = (com_requestbuffer[2] << 24) | (com_requestbuffer[3] << 16) |
 						(com_requestbuffer[4] << 8) | com_requestbuffer[5];
@@ -1089,6 +1092,7 @@ static void cpsHandleCommand(void)
 				uint8_t mode = com_requestbuffer[10];
 				uint8_t nSamples = com_requestbuffer[11];
 				uint16_t intervalUs = (com_requestbuffer[12] << 8) | com_requestbuffer[13];
+				uint8_t reg = com_requestbuffer[14];
 				static spectrumSample_t samples[SPECTRUM_PROBE_MAX_SAMPLES];
 				spectrumProbeInfo_t info = { 0, 0, 0 };
 				int n = 0;
@@ -1096,7 +1100,7 @@ static void cpsHandleCommand(void)
 				if ((trxGetBandFromFrequency(fA) != FREQUENCY_OUT_OF_BAND) &&
 						(trxGetBandFromFrequency(fB) != FREQUENCY_OUT_OF_BAND))
 				{
-					n = spectrumSettleProbe(fA, fB, mode, intervalUs, nSamples, samples, &info);
+					n = spectrumSettleProbe(fA, fB, mode, intervalUs, nSamples, reg, samples, &info);
 				}
 
 				usbComSendBuf[0] = com_requestbuffer[0];
@@ -1273,6 +1277,62 @@ static void cpsHandleCommand(void)
 				hasToReply = true;
 				replyLength = 6;
 			}
+			return;   /* NOT break -- see above */
+		case 0xAB: // DEV: write one AT1846S register raw: [2]=reg, [3]=hi, [4]=lo
+			//        -> [cmd, 0xAB, reg, hi, lo, ok]. The counterpart to 0xA5, and the
+			//        pair is what makes the hardware squelch testable without a flash
+			//        cycle: set sq_on (30H[3]) and the thresholds (48H/49H), then read
+			//        candidate status registers with the carrier on and off.
+			//        Bypasses the driver's value cache -- see spectrum.h.
+			{
+				bool ok = spectrumWriteRegRaw(com_requestbuffer[2], com_requestbuffer[3],
+						com_requestbuffer[4]);
+
+				usbComSendBuf[0] = com_requestbuffer[0];
+				usbComSendBuf[1] = 0xAB;
+				usbComSendBuf[2] = com_requestbuffer[2];
+				usbComSendBuf[3] = com_requestbuffer[3];
+				usbComSendBuf[4] = com_requestbuffer[4];
+				usbComSendBuf[5] = (uint8_t)(ok ? 1 : 0);
+				hasToReply = true;
+				replyLength = 6;
+			}
+			return;   /* NOT break -- see above */
+		case 0xAC: // DEV: report the analog squelch threshold the scanner is currently
+			//        using, plus the live rssi/noise, as [cmd, 0xAC, squelch, rssi, noise].
+			//        `noise < squelch` IS the scan/stop decision (trxCarrierDetected), so a
+			//        detection experiment that assumes a threshold is measuring against a
+			//        number the radio may not be using. Ask instead.
+			{
+				usbComSendBuf[0] = com_requestbuffer[0];
+				usbComSendBuf[1] = 0xAC;
+				usbComSendBuf[2] = trxGetAnalogSquelchThreshold();
+				usbComSendBuf[3] = currentRadioDevice->trxRxSignal;
+				usbComSendBuf[4] = currentRadioDevice->trxRxNoise;
+				hasToReply = true;
+				replyLength = 5;
+			}
+			return;   /* NOT break -- see above */
+		case 0xAD: // DEV: choose what the scanner decides on (see spectrum.h):
+			//   [2]=mode (0 stock / 1 rssi / 2 chip squelch bit), [3]=rssi threshold,
+			//   [4]=status register, [5..6]=mask BE, [7]=invert.
+			//   Reply echoes all of it back. Takes effect on the next carrier test, so a
+			//   detection threshold can be searched under each rule without reflashing.
+			spectrumScanDetectMode = com_requestbuffer[2];
+			spectrumScanRssiThreshold = com_requestbuffer[3];
+			spectrumScanSqReg = com_requestbuffer[4];
+			spectrumScanSqMask = (uint16_t)((com_requestbuffer[5] << 8) | com_requestbuffer[6]);
+			spectrumScanSqInvert = (com_requestbuffer[7] != 0);
+			usbComSendBuf[0] = com_requestbuffer[0];
+			usbComSendBuf[1] = 0xAD;
+			usbComSendBuf[2] = spectrumScanDetectMode;
+			usbComSendBuf[3] = spectrumScanRssiThreshold;
+			usbComSendBuf[4] = spectrumScanSqReg;
+			usbComSendBuf[5] = (uint8_t)((spectrumScanSqMask >> 8) & 0xFF);
+			usbComSendBuf[6] = (uint8_t)(spectrumScanSqMask & 0xFF);
+			usbComSendBuf[7] = (uint8_t)(spectrumScanSqInvert ? 1 : 0);
+			hasToReply = true;
+			replyLength = 8;
 			return;   /* NOT break -- see above */
 #endif
 #ifdef ENABLE_KEY_INJECTION

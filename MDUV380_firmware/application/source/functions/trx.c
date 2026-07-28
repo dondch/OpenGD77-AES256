@@ -423,8 +423,41 @@ bool trxCarrierDetected(RadioDevice_t deviceId)
 			squelch = TRX_SQUELCH_MAX - ((nonVolatileSettings.squelchDefaults[radioDevice->trxCurrentBand[TRX_RX_FREQ_BAND]] - 1) * TRX_SQUELCH_INC);
 			break;
 	}
+#if defined(ENABLE_SPECTRUM)
+	/* DEV: let the bench swap the decision rule at runtime -- see spectrum.h. Stock
+	 * behaviour when the mode is 0, and the whole block vanishes in a release build. */
+	if (spectrumScanDetectMode != SPECTRUM_DETECT_STOCK)
+	{
+		return spectrumScanCarrierDetected(radioDevice->trxRxSignal,
+				radioDevice->trxRxNoise, squelch);
+	}
+#endif
+
 	return (radioDevice->trxRxNoise < squelch);
 }
+
+#if defined(ENABLE_SPECTRUM)
+/* DEV: the number the scanner actually compares against (CPS 0xAC).
+ *
+ * Every detection experiment on this radio turns on `trxRxNoise < squelch`, and the
+ * threshold depends on the channel's squelch override, the per-band default and the
+ * user's settings -- so a host tool that assumes a value is measuring against a
+ * threshold the radio is not using. Reads the same two places trxCarrierDetected() does,
+ * deliberately by calling into the same file rather than by having the host chase
+ * struct offsets in RAM.
+ *
+ * Compiles to nothing in a stock build. */
+uint8_t trxGetAnalogSquelchThreshold(void)
+{
+	if (currentChannelData->sql != 0)
+	{
+		return TRX_SQUELCH_MAX - ((currentChannelData->sql - 1) * TRX_SQUELCH_INC);
+	}
+
+	return TRX_SQUELCH_MAX - ((nonVolatileSettings.squelchDefaults[
+			currentRadioDevice->trxCurrentBand[TRX_RX_FREQ_BAND]] - 1) * TRX_SQUELCH_INC);
+}
+#endif
 
 bool trxCheckDigitalSquelch(RadioDevice_t deviceId)
 {

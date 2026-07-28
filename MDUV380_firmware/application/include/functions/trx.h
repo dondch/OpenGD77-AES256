@@ -119,6 +119,9 @@ extern volatile bool trxIsTransmittingDMR;
 extern volatile uint32_t trxDMRstartTime;
 
 bool trxCarrierDetected(RadioDevice_t deviceId);
+#if defined(ENABLE_SPECTRUM)
+uint8_t trxGetAnalogSquelchThreshold(void);   // DEV: see trx.c. CPS 0xAC.
+#endif
 bool trxCheckDigitalSquelch(RadioDevice_t deviceId);
 bool trxCheckAnalogSquelch(void);
 void trxResetSquelchesState(RadioDevice_t deviceId);
