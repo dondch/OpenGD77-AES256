@@ -534,9 +534,25 @@ int spectrumSettleProbe(uint32_t fA, uint32_t fB, uint8_t mode, uint16_t interva
 
 	spectrumEnter(&saved, mode);
 
-	/* Park on fA and let it settle properly, so the step we then measure is a
-	 * real retune and not the tail of the previous one. */
-	spectrumRetune(fA, mode);
+	/* Park on fA with the FULL path, whatever method is under test, and let it settle
+	 * properly, so the step we then measure is a real retune and not the tail of the
+	 * previous one.
+	 *
+	 * ★ radioSetFrequency() rather than spectrumRetune(): the cheap methods only move
+	 * the PLL and never touch the front end, so parking with one of them left the
+	 * receiver with whatever setup the radio's current channel happened to have. The
+	 * symptom is brutal to diagnose -- a `latch` probe onto a frequency with a strong
+	 * carrier on it reads the bare noise floor, while a *sweep* at the same frequency
+	 * with the same method sees the carrier plainly, because spectrumSessionBegin()
+	 * calls radioSetFrequency() once at the anchor and the probe never did. Every
+	 * retune-method comparison taken with this probe before 2026-07-28 was therefore of
+	 * a misconfigured receiver.
+	 *
+	 * It is also the more correct experiment: the question is what latches a frequency
+	 * CHANGE, so everything except that change should already be set up, exactly as it
+	 * is in a sweep session. */
+	radioSetFrequency(fA, false);
+	spectrumApplyOverrides();
 	t0 = spectrumCycles();
 	spectrumWaitCycles(t0, 30000U * s_cyclesPerUs);   /* 30 ms */
 	spectrumSampleReg(reg, &rssi, &noise);
