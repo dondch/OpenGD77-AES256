@@ -35,6 +35,7 @@ import argparse
 import json
 import struct
 import sys
+import time
 
 import serial
 from serial.tools import list_ports
@@ -49,6 +50,9 @@ CMD_OVERRIDES = 0xA4
 CMD_REG_READ = 0xA5
 CMD_REG_WRITE = 0xAB
 CMD_SQUELCH = 0xAC
+CMD_DETECT = 0xAD
+
+DETECT_NAMES = {"stock": 0, "rssi": 1, "chipsq": 2, "auto": 3}
 
 # Retune index -> name. 0..6 predate this session; 7..10 are the candidate cheap triggers.
 # `fast` writes only the PLL registers and is PROVEN not to move the receiver: it is the
@@ -211,13 +215,39 @@ def setOverrides(ser, triplets):
 
 def readSquelch(ser):
     """(threshold, rssi, noise). The threshold is the one trxCarrierDetected() uses."""
+    return readState(ser)[:3]
+
+
+SCAN_STATE_NAMES = {0: "scanning", 1: "short-paused", 2: "PAUSED"}
+
+
+def readState(ser):
+    """(squelch, rssi, noise, floor, detectMode, scanState, scanActive) -- CPS 0xAC."""
     ser.reset_input_buffer()
     ser.write(struct.pack(">BB", ord("C"), CMD_SQUELCH))
     ser.flush()
-    r = readExact(ser, 5)
-    if (len(r) < 5) or (r[1] != CMD_SQUELCH):
+    r = readExact(ser, 9)
+    if (len(r) < 9) or (r[1] != CMD_SQUELCH):
         sys.exit("no squelch reply (firmware too old for CPS 0xAC?): %s" % r.hex())
-    return r[2], r[3], r[4]
+    return r[2], r[3], r[4], r[5], r[6], r[7], bool(r[8])
+
+
+def setDetect(ser, mode, threshold=0, sqReg=0, sqMask=0, invert=False,
+              margin=0, shift=0):
+    """CPS 0xAD. Zero means 'leave as it is' for margin and shift; the mode is always
+    applied and the learned floor is always forgotten."""
+    ser.reset_input_buffer()
+    ser.write(struct.pack(">BBBBBHBBB", ord("C"), CMD_DETECT, mode, threshold, sqReg,
+                          sqMask, 1 if invert else 0, margin, shift))
+    ser.flush()
+    r = readExact(ser, 10)
+    if (len(r) < 10) or (r[1] != CMD_DETECT):
+        sys.exit("no detect-mode reply (firmware too old for CPS 0xAD?): %s" % r.hex())
+    if r[2] != mode:
+        sys.exit("radio is in detect mode %d, asked for %d" % (r[2], mode))
+    return dict(mode=r[2], threshold=r[3], sqReg=r[4],
+                sqMask=(r[5] << 8) | r[6], invert=bool(r[7]),
+                margin=r[8], shift=r[9])
 
 
 # -------------------------------------------------------------------- analysis
@@ -495,12 +525,48 @@ def doRegs(ser, args):
 
 # --------------------------------------------------------------------- mode: sq
 
+def doDetect(ser, args):
+    """Set the scanner's decision rule and watch the floor estimator converge."""
+    mode = DETECT_NAMES[args.mode]
+    got = setDetect(ser, mode, threshold=args.threshold, sqReg=args.sq_reg,
+                    sqMask=args.sq_mask, invert=args.invert,
+                    margin=args.margin, shift=args.shift)
+    print("detection rule: %s (mode %d)" % (args.mode, got["mode"]))
+    if got["mode"] == DETECT_NAMES["rssi"]:
+        print("  fixed threshold  : rssi >= %d" % got["threshold"])
+    elif got["mode"] == DETECT_NAMES["auto"]:
+        print("  margin over floor: %d counts" % got["margin"])
+        print("  floor IIR shift  : %d  (memory of roughly %d steps)"
+              % (got["shift"], 1 << got["shift"]))
+    elif got["mode"] == DETECT_NAMES["chipsq"]:
+        print("  status bit       : reg 0x%02X & 0x%04X%s"
+              % (got["sqReg"], got["sqMask"], ", inverted" if got["invert"] else ""))
+    print("  the learned floor has been forgotten\n")
+
+    if args.watch:
+        print("  %8s %6s %6s %6s  %s" % ("t", "rssi", "noise", "floor", "scan"))
+        t0 = time.time()
+        while (time.time() - t0) < args.watch:
+            _sq, rssi, noise, floor, _m, state, active = readState(ser)
+            print("  %7.1fs %6d %6d %6d  %s"
+                  % (time.time() - t0, rssi, noise, floor,
+                     SCAN_STATE_NAMES.get(state, "?") if active else "idle"))
+            time.sleep(args.interval)
+        print("\n  floor moves only while the scanner is running -- it is fed from")
+        print("  trxCarrierDetected(), which nothing calls when the radio is idle.")
+
+
 def doSq(ser, _args):
-    squelch, rssi, noise = readSquelch(ser)
+    squelch, rssi, noise, floor, mode, state, active = readState(ser)
     print("squelch threshold : %d   (the scanner stops when noise < this)" % squelch)
     print("live rssi         : %d" % rssi)
     print("live noise        : %d   -> %s"
           % (noise, "OPEN (carrier)" if noise < squelch else "closed"))
+    print("detection rule    : %d   (%s)"
+          % (mode, {v: k for k, v in DETECT_NAMES.items()}.get(mode, "?")))
+    print("learned rssi floor: %d%s" % (floor, "  (not seeded yet)" if floor == 0 else ""))
+    print("scan               : %s"
+          % (SCAN_STATE_NAMES.get(state, "?") if active else "not scanning"))
     reg1b = readReg(ser, 0x1B)
     reg30 = readReg(ser, 0x30)
     if reg1b is not None:
@@ -561,6 +627,22 @@ def main():
 
     sub.add_parser("sq", help="what threshold is the scanner really using?")
 
+    p = sub.add_parser("detect", help="set the scanner's decision rule (CPS 0xAD)")
+    p.add_argument("mode", choices=sorted(DETECT_NAMES),
+                   help="stock = noise < squelch; rssi = fixed threshold; "
+                        "auto = rssi against a running floor; chipsq = a status bit")
+    p.add_argument("--threshold", type=int, default=0, help="mode rssi: absolute counts")
+    p.add_argument("--margin", type=int, default=0,
+                   help="mode auto: counts above the learned floor (0 = leave as is)")
+    p.add_argument("--shift", type=int, default=0,
+                   help="mode auto: floor IIR shift, bigger is slower (0 = leave as is)")
+    p.add_argument("--sq-reg", type=lambda v: int(v, 0), default=0)
+    p.add_argument("--sq-mask", type=lambda v: int(v, 0), default=0)
+    p.add_argument("--invert", action="store_true")
+    p.add_argument("--watch", type=float, default=0,
+                   help="then poll the live state for this many seconds")
+    p.add_argument("--interval", type=float, default=0.25, help="poll period, seconds")
+
     args = ap.parse_args()
 
     if (args.cmd == "regs") and args.diff:
@@ -569,7 +651,8 @@ def main():
 
     ser = serial.Serial(findPort(args.port), 115200, timeout=2.0)
     try:
-        {"split": doSplit, "triggers": doTriggers, "regs": doRegs, "sq": doSq}[args.cmd](ser, args)
+        {"split": doSplit, "triggers": doTriggers, "regs": doRegs, "sq": doSq,
+         "detect": doDetect}[args.cmd](ser, args)
     finally:
         ser.close()
 
