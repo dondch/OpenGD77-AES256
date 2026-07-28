@@ -93,8 +93,11 @@ def prof_read(ser, action=0):
 
     head = read_exact(ser, 5)
     if len(head) < 5 or head[0] != ord("C") or head[1] != CMD_PROF:
-        sys.exit("bad profiler reply: %s -- is this an ENABLE_SPECTRUM build?"
-                 % head.hex())
+        # A bare 0x2d ('-') is cpsHandleCommand's generic reply for an unknown command,
+        # i.e. the profiler is simply not in this image.
+        sys.exit("bad profiler reply: %s -- build with ENABLE_SCAN_PROFILER=1 "
+                 "(it is separate from ENABLE_SPECTRUM because its slot table costs "
+                 "544 bytes of RAM)" % head.hex())
     nslots, cycles_per_us = head[2], struct.unpack_from(">H", head, 3)[0]
 
     if action & PROF_RESET_ONLY:

@@ -1205,6 +1205,7 @@ static void cpsHandleCommand(void)
 			hasToReply = true;
 			replyLength = 4;
 			return;   /* NOT break -- see above */
+#if defined(ENABLE_SCAN_PROFILER)
 		case 0xA9: // DEV: read the scan-step profiler table. [2] = action:
 			//        bit0 = zero the table after reading, bit1 = zero it and return nothing
 			//        useful (arm before a run). Reply:
@@ -1256,6 +1257,7 @@ static void cpsHandleCommand(void)
 				replyLength = n;
 			}
 			return;   /* NOT break -- see above */
+#endif /* ENABLE_SCAN_PROFILER */
 		case 0xA5: // DEV: read one AT1846S register: [2]=reg -> [cmd, 0xA5, reg, hi, lo, ok].
 			//        Reads the chip, not the driver's value cache.
 			{

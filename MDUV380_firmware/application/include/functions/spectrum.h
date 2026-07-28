@@ -176,9 +176,16 @@ void spectrumTick(void);
  * SCANPROF_START/SCANPROF_END bracket a region, SCANPROF_PERIOD records the interval
  * since the previous call on the same slot (for periods rather than durations).
  *
- * Everything is a no-op without ENABLE_SPECTRUM, so the instrumented call sites can live
- * in stock files (uiVFOMode.c, applicationMain.c, HX8353E_display.c) without a #if
- * around each one and without changing the stock build by a single byte. */
+ * Everything is a no-op without ENABLE_SCAN_PROFILER, so the instrumented call sites can
+ * live in stock files (uiVFOMode.c, applicationMain.c, HX8353E_display.c) without a #if
+ * around each one and without changing the stock build by a single byte.
+ *
+ * ★ Its own flag, separate from ENABLE_SPECTRUM, because the slot table is 544 bytes of
+ * RAM -- on a target with 360 bytes spare in the full dev build, that is the difference
+ * between having room for a feature and not. It has already answered the question it was
+ * built for, so the sweep tooling is usually worth keeping when the profiler is not.
+ * Requires ENABLE_SPECTRUM: the implementation lives in spectrum.c. */
+#if defined(ENABLE_SCAN_PROFILER)
 #define SCANPROF_STEP_PERIOD   0   /* wall time between consecutive scan steps       */
 #define SCANPROF_STEP_TOTAL    1   /* the whole "dwell expired" branch of scanning() */
 #define SCANPROF_HANDLEUP      2   /* handleUpKey() as called by the scan step       */
@@ -221,10 +228,11 @@ void scanProfAdd(uint8_t slot, uint32_t startCycles);
 void scanProfMarkPeriod(uint8_t slot);
 void scanProfReset(void);
 uint32_t scanProfCyclesPerUs(void);
+#endif /* ENABLE_SCAN_PROFILER */
 
 #endif /* ENABLE_SPECTRUM */
 
-#if defined(ENABLE_SPECTRUM)
+#if defined(ENABLE_SCAN_PROFILER)
 #define SCANPROF_START(v)     uint32_t v = scanProfNow()
 #define SCANPROF_END(s, v)    scanProfAdd((s), (v))
 #define SCANPROF_PERIOD(s)    scanProfMarkPeriod(s)

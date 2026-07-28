@@ -83,6 +83,7 @@ static inline uint32_t spectrumCyclesToUs(uint32_t cycles)
 }
 
 /* ------------------------------------------------------- scan-step profiler */
+#if defined(ENABLE_SCAN_PROFILER)
 
 /* See the slot list in spectrum.h. Deliberately allocation-free and division-free in
  * the hot path: call sites only ever read CYCCNT and do one subtract/compare/add, so
@@ -163,6 +164,7 @@ uint32_t scanProfCyclesPerUs(void)
 	(void)scanProfNow();   // make sure s_cyclesPerUs has been computed
 	return s_cyclesPerUs;
 }
+#endif /* ENABLE_SCAN_PROFILER */
 
 /* Busy-wait until `cycles` have elapsed since `since`. Unsigned arithmetic makes
  * the 32-bit CYCCNT wrap (every ~60 s at 72 MHz) harmless. */

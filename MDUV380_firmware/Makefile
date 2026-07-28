@@ -55,6 +55,14 @@ ifeq ($(ENABLE_SPECTRUM),1)
 DEFS += -DENABLE_SPECTRUM
 endif
 
+# Dev-only: DWT scan-step profiler (CPS 0xA9, tools/scanprof.py). Costs 544 bytes of RAM
+# for the slot table, which is a lot on a target with under 2 KB spare, so it is separate
+# from ENABLE_SPECTRUM -- the sweep tooling is worth keeping when the profiler is not.
+# Requires ENABLE_SPECTRUM: the implementation lives in spectrum.c.
+ifeq ($(ENABLE_SCAN_PROFILER),1)
+DEFS += -DENABLE_SCAN_PROFILER
+endif
+
 # Faster ANALOG scanning: adds sub-30 ms steps (20/15/10/6 ms) to the existing
 # "Scan dwell time" setting, selectable on the radio and via CHIRP. Digital scanning is
 # unchanged (it takes the larger of this and its own DMR timeslot minimum). Unlike
