@@ -51,6 +51,7 @@ CMD_REG_READ = 0xA5
 CMD_REG_WRITE = 0xAB
 CMD_SQUELCH = 0xAC
 CMD_DETECT = 0xAD
+CMD_REJECT = 0xAE
 
 DETECT_NAMES = {"stock": 0, "rssi": 1, "chipsq": 2, "auto": 3}
 
@@ -211,6 +212,23 @@ def setOverrides(ser, triplets):
     ser.flush()
     r = readExact(ser, 3)
     return (len(r) == 3) and (r[2] == len(triplets))
+
+
+def setReject(ser, ticks=None, margin=0):
+    """CPS 0xAE. ticks None = read the counters without disturbing anything.
+
+    Returns (ticks, margin, stepsTotal, stepsRejected). The reject fraction is the speed
+    win and is counted in the firmware, because nothing outside can see a step that was
+    thrown away."""
+    action = 0 if (ticks is None) else 1
+    ser.reset_input_buffer()
+    ser.write(struct.pack(">BBBHB", ord("C"), CMD_REJECT, action, ticks or 0, margin))
+    ser.flush()
+    r = readExact(ser, 13)
+    if (len(r) < 13) or (r[1] != CMD_REJECT):
+        sys.exit("no reject reply (firmware too old for CPS 0xAE?): %s" % r.hex())
+    return ((r[2] << 8) | r[3], r[4],
+            struct.unpack_from(">I", r, 5)[0], struct.unpack_from(">I", r, 9)[0])
 
 
 def readSquelch(ser):

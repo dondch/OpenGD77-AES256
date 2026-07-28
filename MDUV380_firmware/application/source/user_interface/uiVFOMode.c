@@ -4204,6 +4204,9 @@ static void scanning(void)
 {
 	static bool scanPaused = false;
 	static bool voicePromptsAnnounced = true;
+#if defined(ENABLE_SPECTRUM)
+	static bool rejectDone = false;
+#endif
 
 	if (!rxPowerSavingIsRxOn())
 	{
@@ -4211,6 +4214,37 @@ static void scanning(void)
 		uiDataGlobal.Scan.timer.timeout = 0;
 		return;
 	}
+
+#if defined(ENABLE_SPECTRUM)
+	/* The fast reject (see spectrum.h). RSSI is readable ~2.5 ms after a retune while
+	 * `trxRxNoise < squelch` needs ~10-15 ms, and the expensive thing a scanner does is
+	 * prove a step EMPTY. So spend one 140 us RSSI read early: if the level has not
+	 * lifted at all, end the step now; otherwise let the dwell run and leave the decision
+	 * to the stock rule, untouched.
+	 *
+	 * Analog only -- a digital step has to sit through a DMR timeslot to catch a burst,
+	 * so there is nothing to save there and the RSSI of a TDMA carrier in the wrong slot
+	 * would reject a channel that is genuinely busy.
+	 *
+	 * Once per step: rejectDone is cleared at the step boundary below. Testing on
+	 * `<=` rather than `==` so a skipped main-loop tick cannot make the test miss its
+	 * slot and silently disable the feature for that step. */
+	if ((spectrumScanRejectTicks != 0) && (rejectDone == false) &&
+			(uiDataGlobal.Scan.state == SCAN_STATE_SCANNING) &&
+			(trxGetMode() == RADIO_MODE_ANALOG) &&
+			(uiDataGlobal.Scan.timer.timeout <=
+					(uiDataGlobal.Scan.dwellTime - (int)spectrumScanRejectTicks)))
+	{
+		rejectDone = true;
+		trxReadRSSIAndNoise(true);
+
+		if (spectrumScanRejectStep(currentRadioDevice->trxRxSignal))
+		{
+			/* Fall straight through to the step boundary below, this same tick. */
+			uiDataGlobal.Scan.timer.timeout = 0;
+		}
+	}
+#endif
 
 	//After initial settling time
 	if((uiDataGlobal.Scan.state == SCAN_STATE_SCANNING) && (uiDataGlobal.Scan.timer.timeout > SCAN_SKIP_CHANNEL_INTERVAL) && (uiDataGlobal.Scan.timer.timeout < (uiDataGlobal.Scan.dwellTime - SCAN_SETTLING_INTERVAL_ACTIVE)))
@@ -4367,6 +4401,15 @@ static void scanning(void)
 		 * is being spent in the dwell loop, not here. */
 		SCANPROF_PERIOD(SCANPROF_STEP_PERIOD);
 		SCANPROF_START(tStepTotal);
+
+#if defined(ENABLE_SPECTRUM)
+		/* A new step begins here, so the fast reject gets one test again. Counted here
+		 * rather than at the reject point, so the total includes the steps that were
+		 * never eligible -- otherwise the reject fraction is measured against its own
+		 * denominator and always looks better than it is. */
+		rejectDone = false;
+		spectrumScanRejectCountStep();
+#endif
 
 		// We are in Dual Watch scanning mode
 		if (screenOperationMode[nonVolatileSettings.currentVFONumber] == VFO_SCREEN_OPERATION_DUAL_SCAN)

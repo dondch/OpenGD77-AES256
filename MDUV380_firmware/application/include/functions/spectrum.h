@@ -239,6 +239,43 @@ void spectrumScanDetectReset(void);
  * trxCarrierDetected(), and only when the mode is not stock. */
 bool spectrumScanCarrierDetected(uint8_t rssi, uint8_t noise, uint8_t squelch);
 
+/* ---- the fast reject ----
+ * Mode 3 above was built, measured and does not work: RSSI's step-to-step spread across
+ * a scan is the size of a moderate carrier's lift, so any margin that suppresses false
+ * stops is already deaf. RSSI is an absolute level; the noise byte is SNR-like and
+ * frequency-flat. Detection has to stay on the noise byte.
+ *
+ * But the expensive thing a scanner does is prove a step EMPTY, and that is what costs
+ * the full ~10-15 ms of noise settle. RSSI is usable at ~2.5 ms. So use it to throw
+ * steps away, not to keep them:
+ *
+ *   sample RSSI rejectTicks after the step began; if it has not lifted above the running
+ *   floor by rejectMargin, end the step immediately. Otherwise let the dwell run and let
+ *   `trxRxNoise < squelch` decide exactly as it does now.
+ *
+ * ★ The asymmetry is the whole point. A wrong reject would cost sensitivity, but a wrong
+ * KEEP costs only one wasted dwell -- so the margin is set low and deliberately
+ * trigger-happy, the 16-25 count spread that killed the detector becomes harmless, and
+ * the arbiter is untouched, which makes sensitivity identical to stock by construction
+ * rather than by measurement.
+ *
+ * rejectTicks 0 disables it entirely and the scan is stock. Runtime (CPS 0xAE) because
+ * the reject fraction and the sensitivity check both want sweeping.
+ *
+ * Shares the floor estimator with mode 3 above, so do not run both at once: leave the
+ * detection mode at stock, which is the configuration this is designed for anyway. */
+extern uint16_t spectrumScanRejectTicks;
+extern uint8_t  spectrumScanRejectMargin;
+
+/* How many steps have been taken and how many were thrown away early. The reject
+ * fraction IS the speed win, and it cannot be inferred from the outside. */
+extern uint32_t spectrumScanStepsTotal;
+extern uint32_t spectrumScanStepsRejected;
+
+/* Called once per scan step at the reject point. True = this step is empty, abandon it. */
+bool spectrumScanRejectStep(uint8_t rssi);
+void spectrumScanRejectCountStep(void);
+
 /* ---- Stage 0: settle probe ----
  * Park on fA, retune to fB, then sample a register either as fast as the I2C bus allows
  * (intervalUs == 0) or on a fixed grid, timestamping every sample. Plotting the reading

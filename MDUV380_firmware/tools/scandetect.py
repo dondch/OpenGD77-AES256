@@ -114,6 +114,50 @@ def countStops(ser, seconds, interval):
     return stops, seen, floor
 
 
+def rejectRun(ser, args):
+    """Steps per second with and without the fast reject, on the same scan range.
+
+    Detection stays on the stock rule throughout, so any difference is speed and not
+    sensitivity -- that is the property the whole design is chosen for, and running both
+    arms back to back on one range is what makes the comparison mean anything."""
+    ticks, _, margin = args.reject.partition(":")
+    ticks, margin = int(ticks), int(margin or 0)
+
+    if args.dwell:
+        setWord(ser, CMD_SCAN_DWELL, args.dwell)
+    settle.setDetect(ser, settle.DETECT_NAMES["stock"])
+
+    print("  dwell %d ms, stock detection rule, %.0f s per arm\n" % (args.dwell, args.seconds))
+    print("  %-22s %10s %10s %10s %9s" % ("", "steps", "rejected", "steps/s", "ms/step"))
+
+    results = {}
+    for label, t in (("stock (reject off)", 0), ("reject %d ticks/m%d" % (ticks, margin), ticks)):
+        if not intoVfo(ser):
+            sys.exit("lost VFO mode")
+        settle.setReject(ser, ticks=t, margin=margin)
+        injectFunc(ser, FUNC_START_SCANNING)
+        time.sleep(1.0)
+        settle.setReject(ser, ticks=t, margin=margin)   # zero the counters after start-up
+        t0 = time.time()
+        time.sleep(args.seconds)
+        _tk, _m, total, rejected = settle.setReject(ser)
+        elapsed = time.time() - t0
+        key(ser, KEY_RED)
+        time.sleep(0.5)
+        rate = total / elapsed if elapsed else 0
+        results[t] = rate
+        print("  %-22s %10d %10d %10.1f %9.2f"
+              % (label, total, rejected, rate, (1000.0 / rate) if rate else 0))
+
+    if results.get(0) and results.get(ticks):
+        print("\n  speed-up %.2fx" % (results[ticks] / results[0]))
+
+    settle.setReject(ser, ticks=0)
+    if args.dwell:
+        setWord(ser, CMD_SCAN_DWELL, 0)
+    print("  reject disabled, overrides returned to stock")
+
+
 def paramSweep(ser, args):
     ticksList, _, marginList = args.sweep.partition(":")
     ticksList = [int(v) for v in ticksList.split(",")]
@@ -175,6 +219,11 @@ def main():
                     help="main-loop ticks after the retune before testing (0 = stock 1)")
     ap.add_argument("--seconds", type=float, default=12.0)
     ap.add_argument("--interval", type=float, default=0.3)
+    ap.add_argument("--reject", metavar="TICKS:MARGIN",
+                    help="enable the fast reject and report the step rate and the "
+                         "fraction of steps thrown away early, e.g. 3:8 . Detection is "
+                         "left on the stock rule, so sensitivity is unchanged by "
+                         "construction; what this measures is the speed.")
     ap.add_argument("--sweep", metavar="TICKS:MARGINS",
                     help="characterise instead of watching: comma-separated settle ticks, "
                          "a colon, comma-separated margins. e.g. 1,2,3,4:6,12,18 . Counts "
@@ -195,6 +244,8 @@ def main():
 
         if args.sweep:
             return paramSweep(ser, args)
+        if args.reject:
+            return rejectRun(ser, args)
 
         if args.dwell:
             setWord(ser, CMD_SCAN_DWELL, args.dwell)

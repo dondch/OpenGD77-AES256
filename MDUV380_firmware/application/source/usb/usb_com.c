@@ -1363,6 +1363,42 @@ static void cpsHandleCommand(void)
 			hasToReply = true;
 			replyLength = 10;
 			return;   /* NOT break -- see above */
+		case 0xAE: // DEV: the fast reject (see spectrum.h).
+			//   [2]=action (0 = just read the counters, 1 = set and zero them),
+			//   [3..4]=reject ticks BE (0 disables), [5]=reject margin.
+			//   Reply: [cmd, 0xAE, ticks BE(2), margin, stepsTotal BE(4),
+			//           stepsRejected BE(4)].
+			//   The reject fraction IS the speed win and cannot be inferred from
+			//   outside, so it is counted in the firmware and read from here.
+			{
+				if (com_requestbuffer[2] != 0)
+				{
+					spectrumScanRejectTicks = (uint16_t)((com_requestbuffer[3] << 8) |
+							com_requestbuffer[4]);
+					if (com_requestbuffer[5] != 0)
+					{
+						spectrumScanRejectMargin = com_requestbuffer[5];
+					}
+					spectrumScanDetectReset();   // also zeroes the counters
+				}
+
+				usbComSendBuf[0] = com_requestbuffer[0];
+				usbComSendBuf[1] = 0xAE;
+				usbComSendBuf[2] = (uint8_t)((spectrumScanRejectTicks >> 8) & 0xFF);
+				usbComSendBuf[3] = (uint8_t)(spectrumScanRejectTicks & 0xFF);
+				usbComSendBuf[4] = spectrumScanRejectMargin;
+				usbComSendBuf[5] = (uint8_t)((spectrumScanStepsTotal >> 24) & 0xFF);
+				usbComSendBuf[6] = (uint8_t)((spectrumScanStepsTotal >> 16) & 0xFF);
+				usbComSendBuf[7] = (uint8_t)((spectrumScanStepsTotal >> 8) & 0xFF);
+				usbComSendBuf[8] = (uint8_t)(spectrumScanStepsTotal & 0xFF);
+				usbComSendBuf[9] = (uint8_t)((spectrumScanStepsRejected >> 24) & 0xFF);
+				usbComSendBuf[10] = (uint8_t)((spectrumScanStepsRejected >> 16) & 0xFF);
+				usbComSendBuf[11] = (uint8_t)((spectrumScanStepsRejected >> 8) & 0xFF);
+				usbComSendBuf[12] = (uint8_t)(spectrumScanStepsRejected & 0xFF);
+				hasToReply = true;
+				replyLength = 13;
+			}
+			return;   /* NOT break -- see above */
 #endif
 #ifdef ENABLE_KEY_INJECTION
 		case 0x96: // DEV: inject a keypad key: [2]=keycode, [3]=flags (bit0 = long press).

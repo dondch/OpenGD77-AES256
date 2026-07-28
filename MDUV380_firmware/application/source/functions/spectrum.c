@@ -259,12 +259,20 @@ static uint16_t s_detectRun = 0;
  * move anyway. */
 #define SPECTRUM_DETECT_RUN_MAX  64
 
+/* The fast reject. See spectrum.h. 0 ticks = disabled, i.e. stock scanning. */
+uint16_t spectrumScanRejectTicks = 0;
+uint8_t  spectrumScanRejectMargin = 8;
+uint32_t spectrumScanStepsTotal = 0;
+uint32_t spectrumScanStepsRejected = 0;
+
 void spectrumScanDetectReset(void)
 {
 	s_floorSeeded = false;
 	s_lastStepFreq = 0;
 	s_stepDecision = false;
 	s_detectRun = 0;
+	spectrumScanStepsTotal = 0;
+	spectrumScanStepsRejected = 0;
 }
 
 uint8_t spectrumScanFloor(void)
@@ -296,6 +304,42 @@ static bool spectrumRssiAutoDetect(uint8_t rssi)
 	s_detectRun = detected ? (s_detectRun + 1) : 0;
 
 	return detected;
+}
+
+void spectrumScanRejectCountStep(void)
+{
+	spectrumScanStepsTotal++;
+}
+
+bool spectrumScanRejectStep(uint8_t rssi)
+{
+	bool lifted;
+
+	if (spectrumScanRejectTicks == 0)
+	{
+		return false;
+	}
+
+	/* Deliberately the same estimator and the same exclusion as mode 3: a step that
+	 * looks like a carrier must not teach the floor, or a strong signal raises the bar
+	 * for the frequencies after it. The difference is only what the answer is used for.
+	 *
+	 * Note the margin here is the REJECT margin, which is meant to be smaller than any
+	 * detection margin would be -- being wrong in the keep direction is nearly free. */
+	{
+		uint8_t saved = spectrumScanRssiMargin;
+
+		spectrumScanRssiMargin = spectrumScanRejectMargin;
+		lifted = spectrumRssiAutoDetect(rssi);
+		spectrumScanRssiMargin = saved;
+	}
+
+	if (lifted == false)
+	{
+		spectrumScanStepsRejected++;
+	}
+
+	return (lifted == false);
 }
 
 bool spectrumScanCarrierDetected(uint8_t rssi, uint8_t noise, uint8_t squelch)
