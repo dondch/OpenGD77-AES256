@@ -18,6 +18,7 @@ sys.path.insert(0, r"\\wsl.localhost\Ubuntu-24.04\home\dondch\repo\MDUV380_firmw
 sys.path.insert(0, r"C:\Users\ddona\OneDrive\Desktop\HAM_Radio\TYT UV390Plus\chirp-opengd77-aes")
 
 import serial
+import fwsym
 from fwsym import sym
 import fbmirror
 
@@ -63,6 +64,12 @@ def in_channel_mode(ser):
 def main():
     port = fbmirror.find_port()
     with serial.Serial(port, 115200, timeout=2.0) as ser:
+        # Before trusting a single address: confirm the .elf we are resolving against is
+        # the firmware actually on the radio. Skipping this once cost a debugging session
+        # -- screenOperationMode resolved to a stale build and read 0 (NORMAL) while the
+        # radio was visibly sweeping, and nothing failed, it just lied.
+        fwsym.assertMatchesRadio(lambda a, n: readmem(ser, a, n))
+
         for attempt in range(8):
             mode = op_mode(ser)
             if mode == SWEEP:

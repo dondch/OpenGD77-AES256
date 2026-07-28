@@ -27,4 +27,14 @@ echo ">> Building firmware (ENABLE_AES=$AES) ..."
 make -j"$(nproc)" ENABLE_AES="$AES"
 echo ">> Flashing (radio must be in DFU/bootloader mode) ..."
 python3 tools/opengd77_stm32_firmware_loader.py -s "$DONOR" -f build/openuv380-10w.bin -m MD-UV380
+
+# Record which .elf this actually was, so host tools that read firmware memory resolve
+# symbols against the right build. build/openuv380-10w.elf is only ever "whatever was
+# built last" -- verifying a stock image for its size triple right after flashing a dev
+# one leaves it disagreeing with the radio, and symbols present in both then resolve to
+# the wrong address and return plausible garbage instead of failing. See tools/fwsym.py.
+echo ">> Stamping the flashed .elf ..."
+python3 tools/fwsym.py --stamp
+
 echo ">> Done. The loader prints 'Patching for DMR' on success."
+echo ">> Check at any time with: python3 MDUV380_firmware/tools/fwsym.py --check"
