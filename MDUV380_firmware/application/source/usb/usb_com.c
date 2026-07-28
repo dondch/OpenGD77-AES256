@@ -1399,6 +1399,49 @@ static void cpsHandleCommand(void)
 				replyLength = 13;
 			}
 			return;   /* NOT break -- see above */
+		case 0xAF: // DEV: set the VFO scan limits. [2]=VFO (0 = A), [3..6]=low BE,
+			//   [7..10]=high BE, both in 10 Hz units. 0 for both = just report.
+			//   Reply: [cmd, 0xAF, vfo, low BE(4), high BE(4)].
+			//
+			//   These have no symbol of their own -- they are members of
+			//   nonVolatileSettings -- so a host can only read them via a DWARF offset
+			//   and cannot write them at all. Setting them from the UI means entering
+			//   digits while screenOperationMode == SCAN, which is the exact path that
+			//   has zeroed vfoScanLow/High more than once, and on a radio with a dead
+			//   panel it is done blind. A dozen lines here removes all of that.
+			{
+				uint8_t vfo = (com_requestbuffer[2] != 0) ? 1 : 0;
+				uint32_t lo = (com_requestbuffer[3] << 24) | (com_requestbuffer[4] << 16) |
+						(com_requestbuffer[5] << 8) | com_requestbuffer[6];
+				uint32_t hi = (com_requestbuffer[7] << 24) | (com_requestbuffer[8] << 16) |
+						(com_requestbuffer[9] << 8) | com_requestbuffer[10];
+
+				/* Refuse a reversed or out-of-band pair rather than storing it: the scan
+				 * clamps rxFreq into the range on entry, so a bad range strands the VFO
+				 * somewhere unexpected and the next session inherits it. */
+				if ((lo != 0) && (hi > lo) &&
+						(trxGetBandFromFrequency(lo) != FREQUENCY_OUT_OF_BAND) &&
+						(trxGetBandFromFrequency(hi) != FREQUENCY_OUT_OF_BAND))
+				{
+					settingsSet(nonVolatileSettings.vfoScanLow[vfo], lo);
+					settingsSet(nonVolatileSettings.vfoScanHigh[vfo], hi);
+				}
+
+				usbComSendBuf[0] = com_requestbuffer[0];
+				usbComSendBuf[1] = 0xAF;
+				usbComSendBuf[2] = vfo;
+				usbComSendBuf[3] = (uint8_t)((nonVolatileSettings.vfoScanLow[vfo] >> 24) & 0xFF);
+				usbComSendBuf[4] = (uint8_t)((nonVolatileSettings.vfoScanLow[vfo] >> 16) & 0xFF);
+				usbComSendBuf[5] = (uint8_t)((nonVolatileSettings.vfoScanLow[vfo] >> 8) & 0xFF);
+				usbComSendBuf[6] = (uint8_t)(nonVolatileSettings.vfoScanLow[vfo] & 0xFF);
+				usbComSendBuf[7] = (uint8_t)((nonVolatileSettings.vfoScanHigh[vfo] >> 24) & 0xFF);
+				usbComSendBuf[8] = (uint8_t)((nonVolatileSettings.vfoScanHigh[vfo] >> 16) & 0xFF);
+				usbComSendBuf[9] = (uint8_t)((nonVolatileSettings.vfoScanHigh[vfo] >> 8) & 0xFF);
+				usbComSendBuf[10] = (uint8_t)(nonVolatileSettings.vfoScanHigh[vfo] & 0xFF);
+				hasToReply = true;
+				replyLength = 11;
+			}
+			return;   /* NOT break -- see above */
 #endif
 #ifdef ENABLE_KEY_INJECTION
 		case 0x96: // DEV: inject a keypad key: [2]=keycode, [3]=flags (bit0 = long press).

@@ -114,6 +114,100 @@ def countStops(ser, seconds, interval):
     return stops, seen, floor
 
 
+def wsl(cmd):
+    import subprocess
+    return subprocess.run(["wsl", "-d", "Ubuntu-24.04", "bash", "-lc", cmd],
+                          capture_output=True, text=True, timeout=120)
+
+
+def txStop():
+    wsl("pkill -x hackrf_transfer")
+    time.sleep(1.2)
+
+
+def txStart(txvga, iq, carrierHz=433502500):
+    """Start the carrier and CONFIRM it started -- a silent failure to transmit reads
+    exactly like 'too weak to detect', which is the thing being measured."""
+    txStop()
+    for _ in range(4):
+        wsl("cd ~ && setsid nohup hackrf_transfer -t %s -f %d -s 2000000 -x %d -a 0 -R "
+            "> /tmp/hrf.log 2>&1 < /dev/null &" % (iq, carrierHz - 250000, txvga))
+        time.sleep(4.5)
+        # Alive is the test. An earlier version also demanded a 'dBfs' throughput line
+        # within 3 s and killed a perfectly healthy transmitter when the log had not been
+        # flushed yet -- a check strict enough to cause the failure it was watching for.
+        r = wsl("pgrep -x hackrf_transfer >/dev/null && echo UP")
+        if "UP" in r.stdout:
+            return
+        txStop()
+    sys.exit("could not start the HackRF at txvga %d" % txvga)
+
+
+def stopsWithin(ser, seconds, interval=0.2):
+    """Did the scan stop on something within `seconds`? True/False."""
+    t0 = time.time()
+    while (time.time() - t0) < seconds:
+        _sq, _r, _n, _f, _m, state, active = settle.readState(ser)
+        if active and (state != 0):
+            return True
+        if not active:
+            return False        # scan ended (SCAN_MODE_STOP), which counts as a detection
+        time.sleep(interval)
+    return False
+
+
+def thresholdRun(ser, args):
+    """Lowest carrier level at which the scan still stops, for each reject setting.
+
+    This is the number the whole fast-reject design turns on. The claim is that a wrong
+    KEEP costs only time, so sensitivity should be identical to stock -- but that holds
+    only if a real carrier is never REJECTED, and the settle curves say a weak one has
+    not lifted at 3 ms. Measured rather than argued."""
+    configs = [(0, 0)] + [tuple(int(x) for x in c.split(":"))
+                          for c in args.sens.split(",")]
+    # --tx-external: the transmitter is already running at one level and this run just
+    # tests every config against it. Needed because a hackrf_transfer launched from a
+    # Windows Python subprocess is torn down along with the transient WSL session that
+    # spawned it, setsid and nohup notwithstanding, while one launched from a persistent
+    # shell survives. Losing the carrier mid-sweep reads as "too weak to detect", which
+    # is precisely the thing being measured.
+    levels = [("external", 0)] if args.tx_external else (
+        [("cw_250k.iq", v) for v in (20, 14, 8, 4, 0)] +
+        [("cw_a35.iq", v) for v in (14, 8, 4, 0)])
+
+    if args.dwell:
+        setWord(ser, CMD_SCAN_DWELL, args.dwell)
+    settle.setDetect(ser, settle.DETECT_NAMES["stock"])
+    print("  dwell %d ms, stock detection rule, scan range must contain the carrier\n"
+          % args.dwell)
+    print("  %-22s %s" % ("reject", "".join("%12s" % ("%s%+d" % (iq[3:6], v))
+                                            for iq, v in levels)))
+
+    for ticks, margin in configs:
+        cells = []
+        for iq, txvga in levels:
+            if not args.tx_external:
+                txStart(txvga, iq)
+            if not intoVfo(ser):
+                sys.exit("lost VFO mode")
+            settle.setReject(ser, ticks=ticks, margin=margin)
+            injectFunc(ser, FUNC_START_SCANNING)
+            time.sleep(0.8)
+            cells.append("STOP" if stopsWithin(ser, args.seconds) else "-")
+            key(ser, KEY_RED)
+            time.sleep(0.4)
+        label = "off (stock)" if ticks == 0 else "%d ticks / margin %d" % (ticks, margin)
+        print("  %-22s %s" % (label, "".join("%12s" % c for c in cells)))
+
+    if not args.tx_external:
+        txStop()
+    settle.setReject(ser, ticks=0)
+    if args.dwell:
+        setWord(ser, CMD_SCAN_DWELL, 0)
+    print("\n  A reject row that loses a STOP the stock row has is costing sensitivity.")
+    print("  transmitter stopped, overrides returned to stock")
+
+
 def rejectRun(ser, args):
     """Steps per second with and without the fast reject, on the same scan range.
 
@@ -219,6 +313,12 @@ def main():
                     help="main-loop ticks after the retune before testing (0 = stock 1)")
     ap.add_argument("--seconds", type=float, default=12.0)
     ap.add_argument("--interval", type=float, default=0.3)
+    ap.add_argument("--tx-external", action="store_true",
+                    help="the carrier is already running and this run must not manage it")
+    ap.add_argument("--sens", metavar="TICKS:MARGIN,...",
+                    help="walk the carrier down and report the lowest level at which the "
+                         "scan still stops, for stock and for each reject setting. This "
+                         "is the sensitivity check. TRANSMITS.")
     ap.add_argument("--reject", metavar="TICKS:MARGIN",
                     help="enable the fast reject and report the step rate and the "
                          "fraction of steps thrown away early, e.g. 3:8 . Detection is "
@@ -244,6 +344,8 @@ def main():
 
         if args.sweep:
             return paramSweep(ser, args)
+        if args.sens:
+            return thresholdRun(ser, args)
         if args.reject:
             return rejectRun(ser, args)
 
