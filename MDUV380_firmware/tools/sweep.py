@@ -38,9 +38,17 @@ CMD_SESSION_END = 0xA3
 # sweep built on it silently returns the anchor frequency over and over. `latch` is the
 # cheapest method that actually retunes.
 RETUNE_NAMES = {"fast": 0, "radio": 1, "trx": 2, "latch": 3,
-                "poke30": 4, "poke05": 5, "late30": 6}
+                "poke30": 4, "poke05": 5, "late30": 6,
+                # Candidate cheap triggers added 2026-07-28; whether each actually moves
+                # the receiver is exactly what `settle.py triggers` measures, so none of
+                # them belongs in RETUNE_VALID until it has been shown to.
+                "band0f": 7, "sqtoggle": 8, "xtal": 9, "hilast": 10}
 RETUNE_VALID = ("radio", "trx", "latch", "late30")
 
+# The retune index is 4 bits, split: the low 3 stay put and bit 5 carries the top one, so
+# a host that predates the extra methods still encodes the old ones identically.
+MODE_RETUNE_MASK = 0x07
+MODE_RETUNE_HI = 0x20
 MODE_FORCE_FM = 0x08
 MODE_WIDE = 0x10
 
@@ -81,7 +89,8 @@ def build_mode(args):
         print("WARNING: --retune %s does not actually move the receiver. Every point will "
               "return the anchor frequency's reading. Use it only as a negative control."
               % args.retune, file=sys.stderr)
-    mode = RETUNE_NAMES[args.retune]
+    kind = RETUNE_NAMES[args.retune]
+    mode = (kind & MODE_RETUNE_MASK) | (MODE_RETUNE_HI if (kind & 0x08) else 0)
     if not args.no_fm:
         mode |= MODE_FORCE_FM
     if args.wide:
@@ -116,6 +125,10 @@ def do_probe(ser, args):
     if len(head) < 8 or head[0] != ord("C") or head[1] != CMD_PROBE:
         sys.exit("bad probe reply: %s" % head.hex())
     count, gotmode = head[2], head[3]
+    if gotmode != mode:
+        sys.exit("radio ran mode 0x%02X, host asked for 0x%02X -- host and firmware "
+                 "disagree about the mode bits, so this measurement would be of "
+                 "something other than what was asked for" % (gotmode, mode))
     retune_us, read_us = struct.unpack_from(">HH", head, 4)
     body = read_exact(ser, count * 4)
     if len(body) < count * 4:
@@ -151,29 +164,37 @@ def do_probe(ser, args):
 
 
 def analyse_settle(samples, retune_us):
-    """Report when RSSI last moved by more than a tolerance from its final value.
+    """Report when each curve last moved by more than a tolerance from its final value.
 
     'Settled' is defined against the tail of the trace, which is the honest
     definition for a swept receiver: the number we care about is how long after a
-    retune the reading is the same as it would be if we waited forever."""
-    tail = [s[1] for s in samples[-max(3, len(samples) // 5):]]
-    final = sum(tail) / float(len(tail))
-    noise_spread = max(tail) - min(tail)
+    retune the reading is the same as it would be if we waited forever.
+
+    ★ BOTH bytes, not just RSSI. The scanner's stop decision is `trxRxNoise < squelch`,
+    i.e. the LOW byte, and the two are filtered separately in the chip -- reporting only
+    RSSI answers a question nobody is asking. `settle.py split` does this properly, with
+    repeats and a measured floor; this is the quick look."""
+    tail = samples[-max(3, len(samples) // 5):]
 
     print()
-    print("  final RSSI %.1f (last %d samples, spread %d)" % (final, len(tail), noise_spread))
-    for tol in (1, 2, 3):
-        settled_at = None
-        for t, rssi, _noise in samples:
-            if abs(rssi - final) > tol:
-                settled_at = None
-            elif settled_at is None:
-                settled_at = t
-        if settled_at is None:
-            print("  within +/-%d of final : never" % tol)
-        else:
-            print("  within +/-%d of final : %d us after the retune started "
-                  "(%d us after it finished)" % (tol, settled_at, max(0, settled_at - retune_us)))
+    for idx, label in ((1, "rssi "), (2, "noise")):
+        vals = [s[idx] for s in tail]
+        final = sum(vals) / float(len(vals))
+        print("  final %s %.1f (last %d samples, spread %d)"
+              % (label, final, len(vals), max(vals) - min(vals)))
+        for tol in (1, 2, 3):
+            settled_at = None
+            for s in samples:
+                if abs(s[idx] - final) > tol:
+                    settled_at = None
+                elif settled_at is None:
+                    settled_at = s[0]
+            if settled_at is None:
+                print("    within +/-%d of final : never" % tol)
+            else:
+                print("    within +/-%d of final : %d us after the retune started "
+                      "(%d us after it finished)"
+                      % (tol, settled_at, max(0, settled_at - retune_us)))
 
 
 # ------------------------------------------------------------------ Stage 1/2

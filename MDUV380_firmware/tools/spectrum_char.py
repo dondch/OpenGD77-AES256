@@ -34,8 +34,29 @@ from serial.tools import list_ports
 
 APP_VID, APP_PID = 0x1FC9, 0x0094
 CMD_SWEEP, CMD_SESSION_BEGIN, CMD_SESSION_END = 0xA0, 0xA2, 0xA3
-MODE_FORCE_FM, MODE_WIDE = 0x04, 0x08
+
+# ★ CORRECTED 2026-07-28. These were 0x04 / 0x08, one bit adrift of spectrum.h, from the
+# day the file was written. The mode byte's low three bits are the RETUNE METHOD, so
+# 0x04 was not "force FM" at all -- it was SPECTRUM_RETUNE_POKE30, which rewrites reg
+# 0x30 with the value it already holds and is a measured no-op: the receiver never left
+# the session's anchor frequency. And with --wide off, FORCE_FM was never set either, so
+# the radio stayed in whatever mode it happened to be in.
+#
+# Nothing failed, because nothing can: every point returned the anchor's reading, which
+# is a perfectly plausible flat trace. `shape` was measuring the filter shape of a
+# receiver that was not being tuned across the carrier, and the settle number `dwell`
+# reports was the settle of a retune that never happened. TREAT ANY spectrum_char.py
+# RESULT TAKEN BEFORE THIS DATE AS VOID and re-measure.
+#
+# The retune method is now explicit rather than left at 0 (which is SPECTRUM_RETUNE_FAST,
+# itself a proven no-op) -- see RETUNE_LATCH.
+MODE_FORCE_FM, MODE_WIDE = 0x08, 0x10
+RETUNE_LATCH = 0x03   # PLL registers + the RX off->on edge that actually moves the receiver
 MAX_SWEEP_POINTS = 480
+
+
+def buildMode(args):
+    return RETUNE_LATCH | MODE_FORCE_FM | (MODE_WIDE if args.wide else 0)
 
 # HackRF CW generation. The tone is offset from the LO so it does not sit on top of the
 # transmitter's own DC/LO leakage, which would make a spur look like the signal.
@@ -178,7 +199,7 @@ def stat(xs):
 def do_floor(ser, args, _hrf):
     """No transmitter. How steady is a bin, and how steady is the floor across a span?"""
     f0, step, n = mhz(args.freq) - (args.points // 2) * khz(args.step), khz(args.step), args.points
-    mode = MODE_FORCE_FM | (MODE_WIDE if args.wide else 0)
+    mode = buildMode(args)
 
     session_begin(ser, f0, mode)
     try:
@@ -209,7 +230,7 @@ def do_floor(ser, args, _hrf):
 
 def do_shape(ser, args, hrf):
     """The filter shape measured at a long dwell IS the resolution bandwidth."""
-    mode = MODE_FORCE_FM | (MODE_WIDE if args.wide else 0)
+    mode = buildMode(args)
     f_centre = mhz(args.freq)
     step = khz(args.step)
     n = args.points
@@ -260,7 +281,7 @@ def bandwidth_at(prof, peak, down_db, step_khz):
 def do_dwell(ser, args, hrf):
     """The Stage 0 number that the noise floor could not give: how long after a retune is
     the reading right? Compared against a very long dwell as ground truth."""
-    mode = MODE_FORCE_FM | (MODE_WIDE if args.wide else 0)
+    mode = buildMode(args)
     step = khz(args.step)
     n = args.points
     f0 = mhz(args.freq) - (n // 2) * step
@@ -320,7 +341,7 @@ def tail_asymmetry(prof, pk):
 def do_level(ser, args, hrf):
     """RSSI against a transmitter level that steps in exact 1 dB increments. Gives the
     counts-per-dB slope, the usable range, and where it compresses."""
-    mode = MODE_FORCE_FM | (MODE_WIDE if args.wide else 0)
+    mode = buildMode(args)
     f = mhz(args.freq)
     gains = list(range(args.gain_min, args.gain_max + 1, args.gain_step))
 
