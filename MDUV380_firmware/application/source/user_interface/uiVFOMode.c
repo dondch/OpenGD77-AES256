@@ -78,6 +78,10 @@ static void vfoSweepUpdateSamples(int offset, bool forceRedraw, int bandwidthRes
 static void setSweepIncDecSetting(sweepSetting_t type, bool increment);
 static void vfoSweepDrawSample(int offset);
 static void clearNuisance(void);
+#if defined(ENABLE_FAST_SCAN)
+static void vfoSweepStopListening(void);
+static void vfoSweepDrawPeakMarker(void);
+#endif
 
 static vfoSelectedFrequencyInput_t selectedFreq = VFO_SELECTED_FREQUENCY_INPUT_RX;
 
@@ -178,6 +182,27 @@ static bool    vfoSweepPassComplete = false; // set when a pass wraps; drives th
 // Costs 8 of 78 pixels of vertical range. Worth it: an unlabelled spike tells you
 // something is there but not what frequency it is on, which was the whole complaint.
 #define VFO_SWEEP_LABEL_BAND_H   8
+
+// ---- listen on peak ----
+// fagci's UV-K5 mod does not just show you a signal, it parks on it and lets you hear it,
+// which is what turns a spectrum display into a scanner you would actually use. Same here:
+// at the end of a pass, if the peak is strong enough, tune to it and open the audio.
+//
+// The mechanism is the existing pause state, not a new one. sweepScanStep() already
+// returns early unless Scan.state == SCAN_STATE_SCANNING, and -- the part that makes this
+// cheap -- trxCheckAnalogSquelch() bails out early on uiVFOModeSweepScanning(false), which
+// tests for exactly that same SCANNING state. So moving to SCAN_STATE_PAUSED both stops
+// the sweep and re-enables the normal squelch and audio path, with no change to either.
+//
+// Trigger margin is higher than the marker's: a signal worth interrupting the sweep for is
+// a stronger claim than one worth pointing at.
+#define VFO_SWEEP_LISTEN_MARGIN    10
+#define VFO_SWEEP_LISTEN_MIN_MS  1200   // park at least this long, even if nothing opens
+#define VFO_SWEEP_LISTEN_HANG_MS  800   // and this long after the audio last closed
+
+static bool          vfoSweepListening = false;
+static ticksTimer_t  vfoSweepListenTimer = { 0, 0 };
+static uint32_t      vfoSweepListenFreq = 0;
 #endif
 
 #if defined(ENABLE_FAST_SCAN)
@@ -865,6 +890,13 @@ void uiVFOModeStopScanning(void)
 {
 	bool resetAPRS = true;
 
+#if defined(ENABLE_FAST_SCAN)
+	// Leaving the sweep while parked on a signal must not leave the audio amplifier
+	// enabled behind us -- nothing calls trxCheckAnalogSquelch() to close it once
+	// Scan.active goes false.
+	vfoSweepStopListening();
+#endif
+
 	if (uiDataGlobal.Scan.toneActive)
 	{
 		if (prevCSSTone != (CODEPLUG_CSS_TONE_NONE - 1))
@@ -1091,6 +1123,22 @@ static void handleEvent(uiEvent_t *ev)
 	{
 		if (BUTTONCHECK_DOWN(ev, BUTTON_SK2) == 0)
 		{
+#if defined(ENABLE_FAST_SCAN)
+			// Same key, same meaning, in the sweep screen: skip the signal we are parked
+			// on and carry on. Without it a persistent carrier holds the sweep until the
+			// hang timer gives up, over and over, and the only way out is to leave the
+			// screen entirely. STAR is otherwise unused while sweeping -- the nuisance
+			// delete below excludes VFO_SCREEN_OPERATION_SWEEP.
+			if (vfoSweepListening && (ev->keys.key == KEY_STAR))
+			{
+				vfoSweepStopListening();
+				vfoSweepDrawPeakMarker();
+				displayRenderRows(1, ((8 + VFO_SWEEP_GRAPH_HEIGHT_Y) / 8) + 1);
+				keyboardReset();
+				return;
+			}
+#endif
+
 			// Right key sets the current frequency as a 'nuisance' frequency.
 			if((uiDataGlobal.Scan.state == SCAN_STATE_PAUSED) &&
 #if defined(PLATFORM_MDUV380) || defined(PLATFORM_MD380)
@@ -2337,6 +2385,23 @@ static uint32_t vfoSweepFreqForSample(int16_t index)
 					(index - (VFO_SWEEP_NUM_SAMPLES / 2))) / VFO_SWEEP_PIXELS_PER_STEP);
 }
 
+/* Leave the parked-on signal and carry on sweeping.
+ *
+ * Shutting the audio explicitly matters: trxCheckAnalogSquelch() stops being called the
+ * moment the state goes back to SCANNING, so whatever it last left enabled would stay
+ * enabled and the sweep would run with the amplifier open on noise. */
+static void vfoSweepStopListening(void)
+{
+	if (vfoSweepListening)
+	{
+		vfoSweepListening = false;
+		trxTerminateCheckAnalogSquelch(RADIO_DEVICE_PRIMARY);
+		uiDataGlobal.Scan.state = SCAN_STATE_SCANNING;
+		// No retune needed here: the next sweepScanStep() recomputes scanSweepCurrentFreq
+		// from sweepSampleIndex and tunes there itself.
+	}
+}
+
 /* Marker over the strongest sample of the last completed pass, with its frequency.
  *
  * Drawn at the top of the graph rather than on the trace: the trace is what moves, and a
@@ -2384,7 +2449,16 @@ static void vfoSweepDrawPeakMarker(void)
 			x, (VFO_SWEEP_GRAPH_START_Y + (VFO_SWEEP_LABEL_BAND_H - 2)), true);
 
 	f = vfoSweepFreqForSample(vfoSweepShownPeakIndex);
-	snprintf(buffer, SCREEN_LINE_BUFFER_SIZE, "%u.%04u", (f / 100000), ((f % 100000) / 10));
+
+	// While parked on the signal, say so. Otherwise a stopped trace looks like a crash.
+	if (vfoSweepListening)
+	{
+		snprintf(buffer, SCREEN_LINE_BUFFER_SIZE, ">%u.%04u", (f / 100000), ((f % 100000) / 10));
+	}
+	else
+	{
+		snprintf(buffer, SCREEN_LINE_BUFFER_SIZE, "%u.%04u", (f / 100000), ((f % 100000) / 10));
+	}
 
 	// 8 px per character in FONT_SIZE_1; keep the label clear of the marker.
 	if (x < (DISPLAY_SIZE_X / 2))
@@ -3654,6 +3728,17 @@ static void sweepScanInit(void)
 
 	memset(vfoSweepSamples, 0x00, VFO_SWEEP_NUM_SAMPLES * sizeof(uint8_t));
 
+#if defined(ENABLE_FAST_SCAN)
+	// Start clean: a stale peak from a previous visit would be marked, and worse, listened
+	// to, before this sweep has measured anything.
+	vfoSweepListening = false;
+	vfoSweepPeakLevel = 0;
+	vfoSweepPeakIndex = -1;
+	vfoSweepShownPeakLevel = 0;
+	vfoSweepShownPeakIndex = -1;
+	vfoSweepPassComplete = false;
+#endif
+
 	menuSystemPopAllAndDisplaySpecificRootMenu(UI_VFO_MODE, true);
 
 	vfoSweepUpdateSamples(0, true, 0);
@@ -3668,6 +3753,38 @@ static void sweepScanInit(void)
 
 static void sweepScanStep(void)
 {
+#if defined(ENABLE_FAST_SCAN)
+	if (vfoSweepListening)
+	{
+		// The pass that triggered this ended before the render below could run, so the
+		// marker and its ">" listening prefix are still unpainted. Do it here.
+		if (vfoSweepPassComplete)
+		{
+			vfoSweepPassComplete = false;
+			vfoSweepDrawPeakMarker();
+			displayRenderRows(1, ((8 + VFO_SWEEP_GRAPH_HEIGHT_Y) / 8) + 1);
+		}
+
+		// Hold for as long as the audio is actually open, so a transmission is not cut off
+		// mid-sentence, then give up HANG ms after it closes. The MIN timer started at
+		// entry covers the case where nothing ever opens -- a peak strong enough to stop
+		// the sweep but not to break squelch, which is common on a noisy band edge.
+		if (audioAmpGetStatus() & AUDIO_AMP_CHANNEL_RF)
+		{
+			ticksTimerStart(&vfoSweepListenTimer, VFO_SWEEP_LISTEN_HANG_MS);
+		}
+
+		if (ticksTimerHasExpired(&vfoSweepListenTimer))
+		{
+			vfoSweepStopListening();
+			vfoSweepDrawPeakMarker();   // repaint without the ">"
+			displayRenderRows(1, ((8 + VFO_SWEEP_GRAPH_HEIGHT_Y) / 8) + 1);
+		}
+
+		return;
+	}
+#endif
+
 	if (uiDataGlobal.Scan.state != SCAN_STATE_SCANNING)
 	{
 		return;
@@ -3757,6 +3874,24 @@ static void sweepScanStep(void)
 			vfoSweepPeakLevel = 0;
 			vfoSweepPeakIndex = -1;
 			vfoSweepPassComplete = true;
+
+			// Strong enough to be worth interrupting the sweep for? Park on it.
+			if ((vfoSweepShownPeakIndex >= 0) &&
+					(vfoSweepShownPeakLevel > (vfoSweepRssiNoiseFloor + VFO_SWEEP_LISTEN_MARGIN)))
+			{
+				vfoSweepListenFreq = vfoSweepFreqForSample(vfoSweepShownPeakIndex);
+				vfoSweepListening = true;
+				ticksTimerStart(&vfoSweepListenTimer, VFO_SWEEP_LISTEN_MIN_MS);
+
+				trxSetFrequency(vfoSweepListenFreq, currentChannelData->txFreq,
+						(((currentChannelData->chMode == RADIO_MODE_DIGITAL) &&
+								codeplugChannelGetFlag(currentChannelData, CHANNEL_FLAG_FORCE_DMO))
+										? DMR_MODE_DMO : DMR_MODE_AUTO));
+
+				// Last, and only after the retune: this is what re-enables the squelch and
+				// audio path, and it must not do so while still tuned to the old sample.
+				uiDataGlobal.Scan.state = SCAN_STATE_PAUSED;
+			}
 #endif
 			uiDataGlobal.Scan.sweepSampleIndex = 0;
 			uiDataGlobal.Scan.sweepSampleIndexIncrement = 1;// go back to normal increment at the end of the special sweep step used just after the graph is zoomed in
