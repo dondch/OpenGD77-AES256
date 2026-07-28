@@ -203,6 +203,32 @@ static bool    vfoSweepPassComplete = false; // set when a pass wraps; drives th
 static bool          vfoSweepListening = false;
 static ticksTimer_t  vfoSweepListenTimer = { 0, 0 };
 static uint32_t      vfoSweepListenFreq = 0;
+
+// ---- max hold ----
+// A single pass only shows what was on the air during the ~13 ms this bin was actually
+// being listened to. Anything intermittent -- most of what is worth finding -- is invisible
+// unless you happen to be looking at the right column at the right moment. The hold keeps
+// the highest level each bin has reached and draws it as a thin line above the live trace,
+// so a burst that happened three passes ago is still on screen.
+//
+// It fades rather than holding forever. A true hold fills up with every transient the
+// receiver has ever seen and stops meaning anything within a few minutes, and clearing it
+// needs a control this keypad does not have to spare. One count per pass is slow enough
+// that a genuine intermittent signal stays visible for tens of passes. Set to 0 for a
+// true hold.
+#define VFO_SWEEP_HOLD_DECAY  1
+// Pixels the hold must stand above the live trace before it is drawn at all.
+//
+// Held noise is not a small effect to be nudged away: max-hold over many passes converges
+// on the noise *envelope*, which sits well above the instantaneous floor, so the natural
+// result is a speckle band across every bin. Tried 3 and it was still dirty wherever the
+// floor was low. 6 leaves the band suppressed while anything worth finding -- which is
+// normally tens of counts up -- still shows.
+//
+// This is the knob that trades readability against catching a marginal held signal. It is
+// the first thing to change if the hold feels either too noisy or too deaf.
+#define VFO_SWEEP_HOLD_MIN_LIFT  6
+static uint8_t vfoSweepHold[VFO_SWEEP_NUM_SAMPLES];
 #endif
 
 #if defined(ENABLE_FAST_SCAN)
@@ -1562,6 +1588,12 @@ static void handleEvent(uiEvent_t *ev)
 			{
 				vfoSweepRssiNoiseFloor = VFO_SWEEP_RSSI_NOISE_FLOOR_DEFAULT;
 				vfoSweepGain = VFO_SWEEP_GAIN_DEFAULT;
+#if defined(ENABLE_FAST_SCAN)
+				// This is already the "put the display back to a clean state" gesture, so
+				// it is also where the max hold gets cleared. Saves inventing a control on
+				// a keypad that has none free.
+				memset(vfoSweepHold, 0x00, sizeof(vfoSweepHold));
+#endif
 				settingsSet(nonVolatileSettings.vfoSweepSettings, ((uiDataGlobal.Scan.sweepStepSizeIndex << 12) | (vfoSweepRssiNoiseFloor << 7) | vfoSweepGain));
 				vfoSweepUpdateSamples(0, true, 0);
 			}
@@ -2489,6 +2521,28 @@ static void vfoSweepDrawSample(int offset)
 	displayDrawFastVLine(offset, VFO_SWEEP_TRACE_START_Y, (VFO_SWEEP_TRACE_HEIGHT_Y - graphHeight), false); // Clear
 	displayDrawFastVLine(offset, levelTop, graphHeight, true); // Level
 
+#if defined(ENABLE_FAST_SCAN)
+	// Max hold, as a single pixel above the live level. Drawn here, in the same call that
+	// just cleared this column, so it survives until this column is next redrawn -- and it
+	// is inside the strip the blit already covers, so it costs no extra transfer.
+	{
+		int16_t holdHeight = MAX(vfoSweepHold[offset] - vfoSweepRssiNoiseFloor, 0);
+		holdHeight = ((holdHeight * VFO_SWEEP_TRACE_HEIGHT_Y) / vfoSweepGain);
+		holdHeight = MIN(VFO_SWEEP_TRACE_HEIGHT_Y, holdHeight);
+
+		// Only where the hold is meaningfully above the live level. Drawing it wherever it
+		// merely exceeds the trace covers the whole screen in speckle: the noise floor
+		// fluctuates by a couple of counts, so max-hold of noise sits just above the live
+		// noise in every single bin, and the result reads as dirt on the display rather
+		// than as information. A few pixels of required lift leaves only real signals.
+		if (holdHeight > (graphHeight + VFO_SWEEP_HOLD_MIN_LIFT))
+		{
+			displayThemeApply(THEME_ITEM_FG_DECORATION, THEME_ITEM_BG);
+			displaySetPixel(offset, ((VFO_SWEEP_TRACE_START_Y + VFO_SWEEP_TRACE_HEIGHT_Y) - holdHeight), true);
+		}
+	}
+#endif
+
 	// center freq marker
 	if (offset == (DISPLAY_SIZE_X >> 1))
 	{
@@ -2511,6 +2565,16 @@ static void vfoSweepUpdateSamples(int offset, bool forceRedraw, int bandwidthRes
 {
 	const int SHIFT_DISTANCE[7] = {6,6,6,6,8,8,8};
 	offset *= SHIFT_DISTANCE[uiDataGlobal.Scan.sweepStepSizeIndex];// real offset in samples;
+
+#if defined(ENABLE_FAST_SCAN)
+	// Scrolling or rescaling changes what frequency each bin covers. The live samples get
+	// shifted and interpolated to match, but a *held* peak carried across would be a claim
+	// about a frequency it was never measured at, which is worse than losing it. Drop it.
+	if ((offset != 0) || (bandwidthRescale != 0))
+	{
+		memset(vfoSweepHold, 0x00, sizeof(vfoSweepHold));
+	}
+#endif
 
 	if (offset != 0)
 	{
@@ -3737,6 +3801,7 @@ static void sweepScanInit(void)
 	vfoSweepShownPeakLevel = 0;
 	vfoSweepShownPeakIndex = -1;
 	vfoSweepPassComplete = false;
+	memset(vfoSweepHold, 0x00, sizeof(vfoSweepHold));
 #endif
 
 	menuSystemPopAllAndDisplaySpecificRootMenu(UI_VFO_MODE, true);
@@ -3803,6 +3868,16 @@ static void sweepScanStep(void)
 #endif
 
 			vfoSweepSamples[uiDataGlobal.Scan.sweepSampleIndex] = radioDevices[RADIO_DEVICE_PRIMARY].trxRxSignal;// Need to save the samples so for when the freq is changed and we need to scroll the display
+
+#if defined(ENABLE_FAST_SCAN)
+			// Raise the hold BEFORE drawing: vfoSweepDrawSample() paints the level and the
+			// hold line together from these two arrays, so updating after it would draw
+			// this bin's hold one pass stale.
+			if (vfoSweepSamples[uiDataGlobal.Scan.sweepSampleIndex] > vfoSweepHold[uiDataGlobal.Scan.sweepSampleIndex])
+			{
+				vfoSweepHold[uiDataGlobal.Scan.sweepSampleIndex] = vfoSweepSamples[uiDataGlobal.Scan.sweepSampleIndex];
+			}
+#endif
 
 			vfoSweepDrawSample(uiDataGlobal.Scan.sweepSampleIndex);
 
@@ -3874,6 +3949,17 @@ static void sweepScanStep(void)
 			vfoSweepPeakLevel = 0;
 			vfoSweepPeakIndex = -1;
 			vfoSweepPassComplete = true;
+
+#if (VFO_SWEEP_HOLD_DECAY > 0)
+			// Fade the hold one step per pass. Bins below their live level are raised
+			// straight back by the max on the next pass, so this only ever eats away at
+			// peaks nothing is sustaining.
+			for (int i = 0; i < VFO_SWEEP_NUM_SAMPLES; i++)
+			{
+				vfoSweepHold[i] = ((vfoSweepHold[i] > VFO_SWEEP_HOLD_DECAY)
+						? (vfoSweepHold[i] - VFO_SWEEP_HOLD_DECAY) : 0);
+			}
+#endif
 
 			// Strong enough to be worth interrupting the sweep for? Park on it.
 			if ((vfoSweepShownPeakIndex >= 0) &&
