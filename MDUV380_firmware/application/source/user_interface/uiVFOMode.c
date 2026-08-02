@@ -333,6 +333,34 @@ static uint8_t vfoSweepAutoGain = VFO_SWEEP_GAIN_DEFAULT;
 static bool    vfoSweepWide = false;
 static uint8_t vfoSweepSubIndex = 0;       // which measurement within the current column
 static uint8_t vfoSweepColumnPeak = 0;     // running max over that column's measurements
+static uint16_t vfoSweepColumnSum = 0;     // and their running sum, for the average
+
+/* ---- the average detector ----
+ *
+ * ★ MEASURED, and it is the price of the wide span: peak-detecting N sub-samples per
+ * column raises the NOISE FLOOR while leaving signals exactly where they are. A carrier
+ * is already its own maximum; the max of N noise samples is not. Same centre, same
+ * spectrum, only N changing:
+ *
+ *                        min   p25  median   max
+ *   narrow 2 MHz  N=1     48    54     56     84
+ *   wide 20 MHz   N=10    47    68     75     84
+ *
+ * The peak is identical and the floor climbs 14 counts -- about 12 dB at the measured
+ * 1.11 counts/dB. So a carrier standing a comfortable 28 counts above the floor at 2 MHz
+ * stands only ~19 at 20 MHz, and the auto scale, the peak marker and listen-on-peak all
+ * lose that much because every one of them compares against a floor derived from the
+ * PEAK trace. Dwelling makes it worse, not better: more passes means the max is taken
+ * over more noise samples still.
+ *
+ * The fix is to stop estimating the floor from a peak-detected trace. The MEAN of the
+ * same N sub-samples is unbiased -- averaging noise does not walk upward with N the way
+ * maximising it does -- so the peak stays the signal detector and the average becomes the
+ * floor. Costs one byte per column and nothing in time.
+ *
+ * With N == 1 the average and the peak are the same number, so the narrow span behaves
+ * exactly as it always has. */
+static uint8_t vfoSweepAvg[VFO_SWEEP_NUM_SAMPLES];
 
 // ---- auto scroll ----
 // A 20 MHz window still only covers a sixth of UHF. Advancing the centre by exactly one span
@@ -2722,6 +2750,7 @@ static void vfoSweepAdvanceWindow(void)
 	// hold especially: showing a held peak against the new window would be a claim about
 	// a frequency it was never measured at.
 	memset(vfoSweepSamples, 0x00, sizeof(vfoSweepSamples));
+		memset(vfoSweepAvg, 0x00, sizeof(vfoSweepAvg));
 	memset(vfoSweepHold, 0x00, sizeof(vfoSweepHold));
 	vfoSweepShownPeakLevel = 0;
 	vfoSweepShownPeakIndex = -1;
@@ -2770,9 +2799,15 @@ static void vfoSweepUpdateAutoScale(void)
 	uint8_t mean, noise, floorTarget;
 	int32_t span;
 
+	// ★ The FLOOR comes from the averaged trace and the HEIGHT from the peak trace. They
+	// are different statistics of the same measurements and each is right for its job: a
+	// peak-detected floor walks upward with the number of sub-samples (measured, +14
+	// counts at N=10) and drags the threshold up with it, while a peak is what a signal
+	// actually reaches. With N == 1 the two arrays are identical and this is exactly the
+	// old behaviour.
 	for (int i = 0; i < VFO_SWEEP_NUM_SAMPLES; i++)
 	{
-		sum += vfoSweepSamples[i];
+		sum += vfoSweepAvg[i];
 		if (vfoSweepSamples[i] > highest)
 		{
 			highest = vfoSweepSamples[i];
@@ -2782,9 +2817,9 @@ static void vfoSweepUpdateAutoScale(void)
 
 	for (int i = 0; i < VFO_SWEEP_NUM_SAMPLES; i++)
 	{
-		if (vfoSweepSamples[i] <= mean)
+		if (vfoSweepAvg[i] <= mean)
 		{
-			lowSum += vfoSweepSamples[i];
+			lowSum += vfoSweepAvg[i];
 			lowCount++;
 		}
 	}
@@ -3117,6 +3152,7 @@ static void setSweepIncDecSetting(sweepSetting_t type, bool increment)
 						// Entering or leaving the wide span changes what every bin covers,
 						// so nothing measured carries over -- same reasoning as a scroll.
 						memset(vfoSweepSamples, 0x00, sizeof(vfoSweepSamples));
+		memset(vfoSweepAvg, 0x00, sizeof(vfoSweepAvg));
 						memset(vfoSweepHold, 0x00, sizeof(vfoSweepHold));
 						vfoSweepShownPeakLevel = 0;
 						vfoSweepShownPeakIndex = -1;
@@ -4169,6 +4205,7 @@ void uiVFOModeSweepSetModes(bool wide, bool autoScroll, uint8_t stepIndex, bool 
 
 		// Same invalidation the SK2 path does: every bin covers a different frequency now.
 		memset(vfoSweepSamples, 0x00, sizeof(vfoSweepSamples));
+		memset(vfoSweepAvg, 0x00, sizeof(vfoSweepAvg));
 		memset(vfoSweepHold, 0x00, sizeof(vfoSweepHold));
 		vfoSweepShownPeakLevel = 0;
 		vfoSweepShownPeakIndex = -1;
@@ -4354,6 +4391,9 @@ static void sweepScanInit(void)
 	uiDataGlobal.displayQSOState = QSO_DISPLAY_DEFAULT_SCREEN;
 
 	memset(vfoSweepSamples, 0x00, VFO_SWEEP_NUM_SAMPLES * sizeof(uint8_t));
+#if defined(ENABLE_FAST_SCAN)
+	memset(vfoSweepAvg, 0x00, sizeof(vfoSweepAvg));
+#endif
 
 #if defined(ENABLE_FAST_SCAN)
 	// The sweep samples far faster than the stock RSSI filter settles -- see
@@ -4476,6 +4516,7 @@ static void sweepScanStep(void)
 			{
 				vfoSweepColumnPeak = radioDevices[RADIO_DEVICE_PRIMARY].trxRxSignal;
 			}
+			vfoSweepColumnSum += radioDevices[RADIO_DEVICE_PRIMARY].trxRxSignal;
 
 			vfoSweepSubIndex++;
 
@@ -4495,7 +4536,13 @@ static void sweepScanStep(void)
 
 			vfoSweepSubIndex = 0;
 			vfoSweepSamples[uiDataGlobal.Scan.sweepSampleIndex] = vfoSweepColumnPeak;
+			// The unbiased half of the pair -- see vfoSweepAvg. Integer division is fine:
+			// this is a floor estimate in whole counts and the bias it is correcting is
+			// fourteen of them.
+			vfoSweepAvg[uiDataGlobal.Scan.sweepSampleIndex] =
+					(uint8_t)(vfoSweepColumnSum / vfoSweepSubSamples());
 			vfoSweepColumnPeak = 0;
+			vfoSweepColumnSum = 0;
 #else
 			vfoSweepSamples[uiDataGlobal.Scan.sweepSampleIndex] = radioDevices[RADIO_DEVICE_PRIMARY].trxRxSignal;// Need to save the samples so for when the freq is changed and we need to scroll the display
 #endif
