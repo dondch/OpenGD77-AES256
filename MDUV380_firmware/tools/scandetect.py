@@ -101,17 +101,19 @@ def countStops(ser, seconds, interval):
     stops = 0
     wasScanning = True
     seen = []
+    noiseSeen = []
     t0 = time.time()
     while (time.time() - t0) < seconds:
-        _sq, rssi, _n, floor, _m, state, active = settle.readState(ser)
+        _sq, rssi, noise, floor, _m, state, active = settle.readState(ser)
         scanning = active and (state == 0)
         if wasScanning and not scanning:
             stops += 1
         if scanning:
             seen.append(rssi)
+            noiseSeen.append(noise)
         wasScanning = scanning
         time.sleep(interval)
-    return stops, seen, floor
+    return stops, seen, floor, noiseSeen
 
 
 def wsl(cmd):
@@ -282,7 +284,7 @@ def paramSweep(ser, args):
             injectFunc(ser, FUNC_START_SCANNING)
             time.sleep(1.2)
             squelch = settle.readState(ser)[0]
-            stops, seen, floor = countStops(ser, args.seconds, args.interval)
+            stops, seen, floor, _noise = countStops(ser, args.seconds, args.interval)
             key(ser, KEY_RED)
             time.sleep(0.5)
             spread = (max(seen) - min(seen)) if len(seen) > 1 else 0
@@ -298,6 +300,202 @@ def paramSweep(ser, args):
     settle.setDetect(ser, settle.DETECT_NAMES["stock"])
     print("\n  cell = false stops (rssi spread while scanning). Zero is the only")
     print("  acceptable value with no carrier. Overrides returned to stock.")
+
+
+def countsSensRun(ser, args):
+    """Does a shorter noise average ever MISS a carrier the stock setting catches?
+
+    This is the gate. The speed-up is worthless if it costs a detection, and this project
+    has already built and thrown away an RSSI detector for exactly that. Same protocol as
+    the run that validated the fast reject: one carrier, one scan range containing it, the
+    stock detection rule in every arm, and the arms differing only in 0x5A.
+
+    Unlike the reject -- whose sensitivity is identical to stock BY CONSTRUCTION, because
+    it never touches the arbiter -- noise_ct_u changes the arbiter's own input. So there
+    is a real mechanism for a miss here and it has to be measured, not argued: a shorter
+    average settles to a lower value but jitters more, and a weak carrier that only just
+    drags the noise byte under the threshold could be resolved differently.
+
+    ★ Trials, not one shot. At the marginal level detection is a coin flip and a single
+    trial per arm produces a table of noise that reads like a result.
+
+    ★★ And the trials are INTERLEAVED -- one round visits every arm once, then repeats --
+    rather than run as a block per arm. The marginal level does not hold still: measured
+    here, stock scored 2/4 and then 8/8 at the same TXVGA minutes apart, with the
+    transmitter verified up at a constant -11.2 dBfs throughout, so the drift is in the RF
+    path and not in the source. Run in blocks, a slow drift lands entirely on whichever
+    arm happened to be running and comes out as a sensitivity difference between
+    registers. Interleaved, every arm sees the same drift and the comparison survives it.
+    This is the only reason the table below can be trusted at a level chosen precisely
+    because it is unstable.
+
+    The carrier must already be running: a hackrf_transfer started from a Windows Python
+    subprocess dies with the transient WSL session that spawned it, and a carrier that
+    quietly dropped reads exactly like "too weak to detect"."""
+    if args.dwell:
+        setWord(ser, CMD_SCAN_DWELL, args.dwell)
+    settle.setDetect(ser, settle.DETECT_NAMES["stock"])
+
+    ticks, _, margin = (args.reject or "0:0").partition(":")
+    ticks, margin = int(ticks), int(margin or 0)
+
+    print("  dwell %d ms, stock detection rule, reject %s, %d trial(s) per arm, "
+          "%.1f s each" % (args.dwell or 30, "off" if ticks == 0
+                           else "%d ticks/m%d" % (ticks, margin),
+                           args.trials, args.seconds))
+    print("  the carrier must be up and inside the scan range NOW\n")
+    cts = [int(c) for c in args.counts.split(",")]
+    # ★ Dwell is part of the interleave, not an outer loop, for the same drift reason.
+    # It also turns this into the measurement that actually matters: over EMPTY spectrum
+    # noise_ct_u changes the step rate by nothing at all (measured: 27.7 steps/s in every
+    # row), because an empty step runs the full dwell whatever the arbiter is doing. The
+    # register buys speed only by making a SHORTER DWELL viable -- stock's rule needs
+    # ~8.9 ms to fire and a 6 ms dwell gives it a ~5 ms window, which is the documented
+    # sub-4 ms cliff seen from the other side. So the end-to-end win is a dwell floor,
+    # and this table is where it gets measured.
+    dwells = [int(d) for d in (args.dwells or str(args.dwell or 30)).split(",")]
+    stock = settle.decodeCounts(settle.STOCK_DETECT_COUNTS)["noise"]
+    cells = [(d, ct) for d in dwells for ct in cts]
+    hits = {c: 0 for c in cells}
+    perRound = {c: [] for c in cells}
+
+    try:
+        for rnd in range(args.trials):
+            for cell in cells:
+                dwell, ct = cell
+                setWord(ser, CMD_SCAN_DWELL, dwell)
+                want = settle.setCounts(ser, noise=ct)
+                if not intoVfo(ser):
+                    sys.exit("lost VFO mode partway through")
+                settle.setReject(ser, ticks=ticks, margin=margin)
+                injectFunc(ser, FUNC_START_SCANNING)
+                time.sleep(0.8)
+                got = stopsWithin(ser, args.seconds)
+                hits[cell] += 1 if got else 0
+                perRound[cell].append("Y" if got else ".")
+                key(ser, KEY_RED)
+                time.sleep(0.4)
+                settle.assertCounts(ser, want)
+            print("  round %d/%d: %s"
+                  % (rnd + 1, args.trials,
+                     "  ".join("%dms/ct%d %s" % (d, ct, perRound[(d, ct)][-1])
+                               for (d, ct) in cells)))
+
+        print("\n  %-8s %-10s %8s %10s %8s   %s"
+              % ("dwell", "noise_ct", "detects", "of trials", "0x5A", "per round"))
+        for (d, ct) in cells:
+            print("  %-8s %-10s %8d %10d %8s   %s"
+                  % ("%d ms" % d, "%d%s" % (ct, " *" if ct == stock else ""),
+                     hits[(d, ct)], args.trials,
+                     "%04X" % settle.buildCounts(noise=ct),
+                     "".join(perRound[(d, ct)])))
+    finally:
+        settle.restoreCounts(ser)
+        settle.setReject(ser, ticks=0)
+        if args.dwell:
+            setWord(ser, CMD_SCAN_DWELL, 0)
+        print("\n  0x5A restored to %s, reject off, dwell back to stock"
+              % settle.formatCounts(settle.readReg(ser, settle.REG_DETECT_COUNTS)))
+    print("  Any row that detects less often than the stock row is costing sensitivity,")
+    print("  which is disqualifying however much speed it buys.")
+
+
+def countsRun(ser, args):
+    """False stops with no carrier, against 0x5A's averaging length.
+
+    `noise_ct_u` shortens the average behind `trxRxNoise`, which is the byte the stock
+    stop rule decides on -- measured 2.9x faster to fire. The vendor's stated price is
+    that the reading jitters, and the scanner re-evaluates the rule on EVERY tick from
+    the end of the settling interval to the end of the dwell, so one 30 ms step gets ~28
+    independent chances to dip below the threshold. A single dip is a false stop. This
+    counts them on a real scan, which is the only place the live rule runs.
+
+    ★ The denominator is reported, and that is not decoration. The precedent this test
+    exists because of is the ticks=5 row in the settle work, which scored a clean zero
+    because the test window `timeout < dwellTime - SETTLING` was EMPTY and the scanner
+    never evaluated at all. Zero stops out of zero steps is not a pass. `steps` comes
+    from the firmware's own step counter, which counts whether or not the reject is on.
+
+    Detection stays on the stock rule and the reject stays off unless asked for, so the
+    only thing varying between rows is the register."""
+    if args.dwell:
+        setWord(ser, CMD_SCAN_DWELL, args.dwell)
+    settle.setDetect(ser, settle.DETECT_NAMES["stock"])
+
+    ticks, _, margin = (args.reject or "0:0").partition(":")
+    ticks, margin = int(ticks), int(margin or 0)
+
+    print("  dwell %d ms, stock detection rule, reject %s, %.0f s per row"
+          % (args.dwell or 30, "off" if ticks == 0 else "%d ticks/m%d" % (ticks, margin),
+             args.seconds))
+    print("  RUN THIS WITH NO CARRIER -- every row should read 0 false stops\n")
+    # ★ The step counter is a MORE sensitive false-stop detector than polling the scan
+    # state, and it is what this table is really built on. A false detection does not end
+    # the scan: it sets SHORT_PAUSED for SCAN_SHORT_PAUSE_TIME (500 ms) and resumes when
+    # the audio amp never opens. So it costs ~500 ms of not stepping -- about 14 steps at
+    # a 30 ms dwell -- and if the host happens not to poll during that window the stop is
+    # invisible while the missing steps are not. Reported as `lost`, in steps, against
+    # the best row: independent of the poll rate entirely.
+    print("  %-10s %8s %8s %9s %8s %7s %8s %7s"
+          % ("noise_ct", "stops", "steps", "steps/s", "ms/step", "lost", "min", "0x5A"))
+
+    stock = settle.decodeCounts(settle.STOCK_DETECT_COUNTS)["noise"]
+    rows = []
+    try:
+        for ct in [int(c) for c in args.counts.split(",")]:
+            # Re-verify VFO mode every row: each row ends with RED, and a RED from a
+            # VFO screen that is no longer scanning switches to CHANNEL mode, where this
+            # radio's blank channels give a garbage squelch threshold and the rest of the
+            # table is about nothing.
+            if not intoVfo(ser):
+                sys.exit("lost VFO mode partway through the sweep")
+            want = settle.setCounts(ser, noise=ct)
+
+            injectFunc(ser, FUNC_START_SCANNING)
+            time.sleep(1.0)
+            squelch = settle.readState(ser)[0]
+            settle.setReject(ser, ticks=ticks, margin=margin)   # also zeroes the counters
+            t0 = time.time()
+            stops, _seen, _floor, noiseSeen = countStops(ser, args.seconds, args.interval)
+            elapsed = time.time() - t0
+            _t, _m, steps, _rej = settle.setReject(ser)
+            key(ser, KEY_RED)
+            time.sleep(0.5)
+
+            # The register is only rewritten by AT1846sInit(), so a row that lost its
+            # setting would look exactly like a row that passed.
+            settle.assertCounts(ser, want)
+
+            rate = steps / elapsed if elapsed else 0
+            rows.append((ct, stops, steps, rate,
+                         min(noiseSeen) if noiseSeen else None, want, squelch))
+            if steps == 0:
+                print("       ^ ZERO STEPS -- the scanner never evaluated. This row is "
+                      "degenerate,\n         not clean; do not read its zero as a pass.")
+
+        best = max(r[3] for r in rows) if rows else 0
+        for ct, stops, steps, rate, minNoise, want, squelch in rows:
+            lost = (best - rate) * args.seconds
+            print("  %-10s %8s %8d %9.1f %8.2f %7s %8s %7s%s"
+                  % ("%d%s" % (ct, " *" if ct == stock else ""),
+                     stops, steps, rate, (1000.0 / rate) if rate else 0,
+                     "%.0f" % lost if lost >= 1 else "-",
+                     minNoise if minNoise is not None else "-", "%04X" % want,
+                     "" if squelch < 100 else "  !sq%d" % squelch))
+    finally:
+        settle.restoreCounts(ser)
+        settle.setReject(ser, ticks=0)
+        if args.dwell:
+            setWord(ser, CMD_SCAN_DWELL, 0)
+        print("\n  0x5A restored to %s, reject off, dwell back to stock"
+              % settle.formatCounts(settle.readReg(ser, settle.REG_DETECT_COUNTS)))
+
+    print("  * = stock. 'lost' is steps not taken relative to the fastest row: with no")
+    print("  carrier every row should step at the same rate, so a deficit is time the")
+    print("  scanner spent parked on nothing. ~14 steps = one 500 ms false pause.")
+    print("  'min' is the lowest noise the host happened to catch while scanning -- a")
+    print("  coarse sample of a rule evaluated ~1000x faster than it is polled, so it is")
+    print("  a hint about headroom, not the minimum.")
 
 
 def main():
@@ -324,6 +522,21 @@ def main():
                          "fraction of steps thrown away early, e.g. 3:8 . Detection is "
                          "left on the stock rule, so sensitivity is unchanged by "
                          "construction; what this measures is the speed.")
+    ap.add_argument("--counts", metavar="NOISE_CT,...",
+                    help="sweep 0x5A's noise_ct_u over a real scan and count the false "
+                         "stops at each setting, e.g. 3,2,1,0 . Run it with NO carrier. "
+                         "Shortening that average makes the stop rule fire ~2.9x sooner; "
+                         "the vendor says the price is jitter, and a rule re-evaluated "
+                         "every tick for a whole dwell turns jitter into false stops.")
+    ap.add_argument("--counts-sens", action="store_true",
+                    help="with --counts and a carrier already running: how often each "
+                         "noise_ct_u setting detects it. The sensitivity gate. Use "
+                         "--trials 4 at a marginal level.")
+    ap.add_argument("--trials", type=int, default=4)
+    ap.add_argument("--dwells", metavar="MS,...",
+                    help="with --counts-sens: interleave over these dwells as well as "
+                         "over noise_ct_u. This is what finds the dwell floor, which is "
+                         "the only place the register buys end-to-end speed.")
     ap.add_argument("--sweep", metavar="TICKS:MARGINS",
                     help="characterise instead of watching: comma-separated settle ticks, "
                          "a colon, comma-separated margins. e.g. 1,2,3,4:6,12,18 . Counts "
@@ -342,6 +555,8 @@ def main():
             sys.exit("could not get the radio into VFO mode")
         print("  in VFO mode")
 
+        if args.counts:
+            return (countsSensRun if args.counts_sens else countsRun)(ser, args)
         if args.sweep:
             return paramSweep(ser, args)
         if args.sens:

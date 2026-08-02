@@ -165,6 +165,84 @@ def writeReg(ser, reg, value):
     return (len(r) == 6) and (r[5] == 1)
 
 
+# ------------------------------------------------- 0x5A, the detection counts
+#
+# One power-of-two averager per detection quantity. The firmware writes the vendor
+# init table's 0x06DB and nothing else ever touches the register, so a value set here
+# survives a live scan -- and survives until the next reboot, which is why every caller
+# below reads back and why anything that changes it must put it back.
+#
+# noise_ct_u is the interesting one: the scanner's stop rule is `trxRxNoise < squelch`,
+# and shortening that average is worth ~2.9x on the time the rule takes to fire. The
+# vendor's warning is that it also makes the reading jitter, which on a rule re-evaluated
+# every tick for a whole dwell is a false-stop risk. Measure, do not assume.
+REG_DETECT_COUNTS = 0x5A
+STOCK_DETECT_COUNTS = 0x06DB
+DETECT_COUNT_FIELDS = ("pkdet", "rssi", "modu", "sif", "noise")   # 0x5A, high to low
+
+
+def decodeCounts(value):
+    return dict(pkdet=(value >> 12) & 7, rssi=(value >> 9) & 7, modu=(value >> 6) & 7,
+                sif=(value >> 3) & 7, noise=value & 7)
+
+
+def encodeCounts(f):
+    return ((f["pkdet"] << 12) | (f["rssi"] << 9) | (f["modu"] << 6) |
+            (f["sif"] << 3) | f["noise"])
+
+
+def buildCounts(base=STOCK_DETECT_COUNTS, **fields):
+    f = decodeCounts(base)
+    for name, value in fields.items():
+        if value is None:
+            continue
+        if name not in f:
+            raise KeyError("0x5A has no field %r" % name)
+        f[name] = value
+    return encodeCounts(f)
+
+
+def setCounts(ser, base=STOCK_DETECT_COUNTS, **fields):
+    """Set 0x5A and prove the chip took it. Returns the value written.
+
+    Both routes, deliberately: the override table (CPS 0xA4) so a spectrum retune
+    re-applies it, and a raw write (CPS 0xAB) so it is in force straight away and during
+    a live scan, which never goes through the spectrum retune path at all. A setting that
+    is only half applied produces a plausible row rather than an error."""
+    want = buildCounts(base, **fields)
+    setOverrides(ser, [(REG_DETECT_COUNTS, want >> 8, want & 0xFF)])
+    writeReg(ser, REG_DETECT_COUNTS, want)
+    got = readReg(ser, REG_DETECT_COUNTS)
+    if got != want:
+        sys.exit("0x5A: wrote %04X, chip reads %04X" % (want, got))
+    return want
+
+
+def assertCounts(ser, want):
+    """The counterpart to setCounts, for the end of a measurement. A setting that
+    reverted partway through is the failure mode this register actually has."""
+    got = readReg(ser, REG_DETECT_COUNTS)
+    if got != want:
+        sys.exit("0x5A drifted from %04X to %04X mid-measurement" % (want, got))
+
+
+def restoreCounts(ser):
+    """Put 0x5A back and empty the override table. Not optional: nothing else rewrites
+    this register until AT1846sInit(), so a value left behind here is inherited by the
+    next session and by the radio's ordinary use of itself."""
+    writeReg(ser, REG_DETECT_COUNTS, STOCK_DETECT_COUNTS)
+    setOverrides(ser, [])
+    got = readReg(ser, REG_DETECT_COUNTS)
+    if got != STOCK_DETECT_COUNTS:
+        sys.exit("could not restore 0x5A: reads %04X" % got)
+
+
+def formatCounts(value):
+    f = decodeCounts(value)
+    return "%04X (%s)" % (value, " ".join("%s=%d" % (n, f[n])
+                                          for n in DETECT_COUNT_FIELDS))
+
+
 def sessionBegin(ser, anchor, mode):
     """Park the receiver on `anchor` and leave it there (CPS 0xA2).
 
