@@ -1126,7 +1126,9 @@ static void cpsHandleCommand(void)
 #if defined(ENABLE_FAST_SCAN)
 		case 0xB1: // DEV: the sweep's wide span and auto scroll.
 			//   [2]=action (0 = report, 1 = set runtime, 2 = set and persist),
-			//   [3]=flags: bit0 wide, bit1 autoScroll, [4]=step index 0..6 (>6 = leave alone).
+			//   [3]=flags: bit0 wide, bit1 autoScroll, [4]=step index 0..6 (>6 = leave alone),
+			//   [5]=dwell passes per window 1..32 (0 = leave alone).
+			//   Reply gains [7]=dwell passes.
 			//   Reply: [cmd, 0xB1, flags, spanBE(4)] -- span in 10 Hz units.
 			//
 			//   The wide span is selected with SK2 + UP on the radio, and SK2 is a BUTTON:
@@ -1142,7 +1144,8 @@ static void cpsHandleCommand(void)
 					uiVFOModeSweepSetModes(((com_requestbuffer[3] & 0x01) != 0),
 							((com_requestbuffer[3] & 0x02) != 0),
 							com_requestbuffer[4],
-							(com_requestbuffer[2] == 2));
+							(com_requestbuffer[2] == 2),
+							com_requestbuffer[5]);
 				}
 
 				uint32_t span = uiVFOModeSweepSpan();
@@ -1155,8 +1158,9 @@ static void cpsHandleCommand(void)
 				usbComSendBuf[4] = (uint8_t)((span >> 16) & 0xFF);
 				usbComSendBuf[5] = (uint8_t)((span >> 8) & 0xFF);
 				usbComSendBuf[6] = (uint8_t)(span & 0xFF);
+				usbComSendBuf[7] = uiVFOModeSweepDwellPasses();
 				hasToReply = true;
-				replyLength = 7;
+				replyLength = 8;
 			}
 			return;   /* NOT break -- cpsHandleCommand appends a generic '-' after the switch */
 #endif

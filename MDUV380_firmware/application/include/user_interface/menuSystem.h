@@ -197,12 +197,14 @@ bool uiVFOModeSweepScanning(bool includePaused);
  * a column is no longer necessarily one measurement. */
 uint32_t uiVFOModeSweepSpan(void);
 bool uiVFOModeSweepIsAutoScrolling(void);
+uint8_t uiVFOModeSweepDwellPasses(void);
 #endif
 #if defined(ENABLE_SPECTRUM) && defined(ENABLE_FAST_SCAN)
 /* DEV only, CPS 0xB1 -- the wide span is behind SK2, which is a button and therefore
  * unreachable from the keypad injector. See the definition. Both flags: the modes it
  * drives only exist under ENABLE_FAST_SCAN. */
-void uiVFOModeSweepSetModes(bool wide, bool autoScroll, uint8_t stepIndex, bool persist);
+void uiVFOModeSweepSetModes(bool wide, bool autoScroll, uint8_t stepIndex, bool persist,
+		uint8_t dwellPasses);
 bool uiVFOModeSweepIsWide(void);
 #endif
 void uiVFOSweepScanModePause(bool pause, bool forceDigitalOnPause);

@@ -345,6 +345,28 @@ static uint8_t vfoSweepColumnPeak = 0;     // running max over that column's mea
 static bool vfoSweepAutoScroll = false;
 static bool vfoSweepScrollPending = false;   // pass ended parked; advance once it resumes
 
+/* ---- dwell: several passes per window before moving on ----
+ *
+ * ★ MEASURED limitation this exists to fix. A survey that advances after ONE pass finds
+ * continuous carriers and little else: at the 20 MHz span each 12.5 kHz slice gets ~6 ms
+ * of listening per pass, so anything intermittent has to be transmitting during its own
+ * 6 ms to be seen. Surveying this bench that way found every internal clock product and
+ * exactly nothing else -- both real signals present (146.0250 and 147.0375 MHz) were
+ * missed by the survey and found by spot-checking, despite being STRONGER than several
+ * things it did report.
+ *
+ * Staying N passes multiplies the chance of overlapping a burst by N, and the max hold
+ * already carries the result across passes -- it just used to be thrown away by the
+ * advance before it could accumulate. 4 passes at the 20 MHz span is ~38 s per window,
+ * ~5.8 minutes for a full UHF cycle, which is a survey rather than a display.
+ *
+ * The hold decay is suppressed while dwelling (see the end-of-pass block): one count per
+ * pass is right for a live display, where a stale peak should fade, but wrong for a
+ * survey, where a burst three passes ago is exactly what is being looked for. */
+#define VFO_SWEEP_DWELL_PASSES  4
+static uint8_t vfoSweepDwellPasses = 1;      // 1 = advance every pass
+static uint8_t vfoSweepPassesDone = 0;
+
 /* Longest the auto scroll will let a single park last.
  *
  * ★ MEASURED, not guessed: without this the survey stops permanently. The listen hold is
@@ -1347,7 +1369,26 @@ static void handleEvent(uiEvent_t *ev)
 			if ((vfoSweepListening == false) && (ev->keys.key == KEY_STAR) &&
 					(screenOperationMode[nonVolatileSettings.currentVFONumber] == VFO_SCREEN_OPERATION_SWEEP))
 			{
-				vfoSweepAutoScroll = !vfoSweepAutoScroll;
+				// Cycles off -> scroll -> scroll with dwell -> off. A third state rather
+				// than a second key: the two differ only in how long each window is
+				// listened to, so they belong on one control, and this keypad has nothing
+				// spare anyway.
+				if (vfoSweepAutoScroll == false)
+				{
+					vfoSweepAutoScroll = true;
+					vfoSweepDwellPasses = 1;
+				}
+				else if (vfoSweepDwellPasses <= 1)
+				{
+					vfoSweepDwellPasses = VFO_SWEEP_DWELL_PASSES;
+				}
+				else
+				{
+					vfoSweepAutoScroll = false;
+					vfoSweepDwellPasses = 1;
+				}
+
+				vfoSweepPassesDone = 0;
 				uiDataGlobal.displayQSOState = QSO_DISPLAY_DEFAULT_SCREEN;
 				headerRowIsDirty = true;
 				keyboardReset();
@@ -2624,6 +2665,7 @@ static void vfoSweepAdvanceWindow(void)
 	uint32_t band = trxGetBandFromFrequency(currentChannelData->rxFreq);
 
 	vfoSweepScrollPending = false;
+	vfoSweepPassesDone = 0;      // the new window gets its own full dwell
 
 	if (band == FREQUENCY_OUT_OF_BAND)
 	{
@@ -4079,6 +4121,11 @@ bool uiVFOModeSweepIsAutoScrolling(void)
 {
 	return vfoSweepAutoScroll;
 }
+
+uint8_t uiVFOModeSweepDwellPasses(void)
+{
+	return vfoSweepDwellPasses;
+}
 #endif
 
 /* Needs BOTH flags: the modes it drives are ENABLE_FAST_SCAN state, so an
@@ -4093,8 +4140,15 @@ bool uiVFOModeSweepIsAutoScrolling(void)
  * the dead-panel guinea-pig there is otherwise no way to reach this control at all and
  * the feature could only ever be verified by eye on the other radio. Compiles to nothing
  * in a release build. */
-void uiVFOModeSweepSetModes(bool wide, bool autoScroll, uint8_t stepIndex, bool persist)
+void uiVFOModeSweepSetModes(bool wide, bool autoScroll, uint8_t stepIndex, bool persist,
+		uint8_t dwellPasses)
 {
+	if ((dwellPasses >= 1) && (dwellPasses <= 32))
+	{
+		vfoSweepDwellPasses = dwellPasses;
+		vfoSweepPassesDone = 0;
+	}
+
 	/* ★ Does NOT write the settings unless asked to, and that is not a detail.
 	 *
 	 * The stored word packs sweepStepSizeIndex, and that variable is only loaded from
@@ -4291,6 +4345,8 @@ static void sweepScanInit(void)
 	// Auto scroll always starts off -- see the note at its declaration.
 	vfoSweepAutoScroll = false;
 	vfoSweepScrollPending = false;   // a scroll owed by a previous visit is not owed now
+	vfoSweepDwellPasses = 1;
+	vfoSweepPassesDone = 0;
 #endif
 
 	screenOperationMode[nonVolatileSettings.currentVFONumber] = VFO_SCREEN_OPERATION_SWEEP;
@@ -4534,10 +4590,19 @@ static void sweepScanStep(void)
 			// Fade the hold one step per pass. Bins below their live level are raised
 			// straight back by the max on the next pass, so this only ever eats away at
 			// peaks nothing is sustaining.
-			for (int i = 0; i < VFO_SWEEP_NUM_SAMPLES; i++)
+			//
+			// ★ Not while dwelling. Fading is right for a live display, where a stale peak
+			// should eventually go; it is wrong for a survey, where a burst three passes
+			// ago is precisely what is being looked for. The hold is cleared on every
+			// advance anyway, so within a dwelling window it is a true max and cannot
+			// accumulate junk indefinitely.
+			if (vfoSweepDwellPasses <= 1)
 			{
-				vfoSweepHold[i] = ((vfoSweepHold[i] > VFO_SWEEP_HOLD_DECAY)
-						? (vfoSweepHold[i] - VFO_SWEEP_HOLD_DECAY) : 0);
+				for (int i = 0; i < VFO_SWEEP_NUM_SAMPLES; i++)
+				{
+					vfoSweepHold[i] = ((vfoSweepHold[i] > VFO_SWEEP_HOLD_DECAY)
+							? (vfoSweepHold[i] - VFO_SWEEP_HOLD_DECAY) : 0);
+				}
 			}
 #endif
 
@@ -4582,13 +4647,21 @@ static void sweepScanStep(void)
 			// ends -- see the top of this function.
 			if (vfoSweepAutoScroll)
 			{
-				if (uiDataGlobal.Scan.state == SCAN_STATE_SCANNING)
+				vfoSweepPassesDone++;
+
+				// Dwell: only move on once this window has had its share of passes. The
+				// hold has been accumulating across them undecayed, so what moves on is a
+				// window that was listened to N times, not once.
+				if (vfoSweepPassesDone >= vfoSweepDwellPasses)
 				{
-					vfoSweepAdvanceWindow();
-				}
-				else
-				{
-					vfoSweepScrollPending = true;
+					if (uiDataGlobal.Scan.state == SCAN_STATE_SCANNING)
+					{
+						vfoSweepAdvanceWindow();
+					}
+					else
+					{
+						vfoSweepScrollPending = true;
+					}
 				}
 			}
 #endif

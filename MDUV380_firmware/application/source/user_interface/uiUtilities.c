@@ -1963,17 +1963,33 @@ void uiUtilityRenderHeader(bool isVFODualWatchScanning, bool isVFOSweepScanning,
 		// from the step table here any more -- ask the sweep itself. Printed in MHz once it
 		// runs to whole megahertz, because "+/-10000kHz" is not a legible way to say 20 MHz.
 		uint32_t half = uiVFOModeSweepSpan() / 2;   // 10 Hz units
+		char scrollMark[6] = "";
+
+		// ">>" surveying a window per pass, ">>4" dwelling four passes on each. The dwell
+		// count is worth the three characters: it is the difference between a display and
+		// a survey, and it multiplies how long a full cycle takes.
+		if (uiVFOModeSweepIsAutoScrolling())
+		{
+			uint8_t passes = uiVFOModeSweepDwellPasses();
+
+			if (passes > 1)
+			{
+				sprintf(scrollMark, " >>%u", (unsigned)passes);
+			}
+			else
+			{
+				sprintf(scrollMark, " >>");
+			}
+		}
 
 		if (half >= 100000)
 		{
 			sprintf(buffer, "+/-%u.%02uMHz%s", (unsigned)(half / 100000),
-					(unsigned)((half % 100000) / 1000),
-					(uiVFOModeSweepIsAutoScrolling() ? " >>" : ""));
+					(unsigned)((half % 100000) / 1000), scrollMark);
 		}
 		else
 		{
-			sprintf(buffer, "+/-%ukHz%s", (unsigned)(half / 100),
-					(uiVFOModeSweepIsAutoScrolling() ? " >>" : ""));
+			sprintf(buffer, "+/-%ukHz%s", (unsigned)(half / 100), scrollMark);
 		}
 #else
 		int span = (VFO_SWEEP_SCAN_RANGE_SAMPLE_STEP_TABLE[uiDataGlobal.Scan.sweepStepSizeIndex] * VFO_SWEEP_NUM_SAMPLES) / (VFO_SWEEP_PIXELS_PER_STEP * 100);
