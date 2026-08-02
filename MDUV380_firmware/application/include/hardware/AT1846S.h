@@ -48,6 +48,24 @@ bool radioSetClearReg2byteWithMask(uint8_t reg, uint8_t mask1, uint8_t mask2, ui
 void I2C_AT1846S_send_Settings(const uint8_t settings[][AT1846_BYTES_PER_COMMAND], int numSettings);
 void I2C_AT1846_set_register_with_mask(uint8_t reg, uint16_t mask, uint16_t value, uint8_t shift);
 
+#if defined(ENABLE_FAST_SCAN) || defined(ENABLE_SPECTRUM)
+/* Register 0x5A is a power-of-two averager, one field per detection quantity. Bits
+ * [11:9] are rssi_ct_u, which sets the tracking bandwidth of the RSSI byte in 0x1B to
+ * MEASURED 1145 / 2^ct Hz -- the init table's 3 gives 144 Hz.
+ *
+ * ★ It does NOT touch the noise byte the squelch decides on. That was the first thing
+ * checked, because it is the only way this could cost sensitivity: sweeping rssi_ct_u
+ * leaves the noise byte's jitter flat (sd 1.51-1.78, no trend) and its false-stop
+ * behaviour unchanged. The two fields of 0x5A are independent, so this is a free knob in
+ * a way that noise_ct_u is emphatically not. */
+#define AT1846S_RSSI_COUNT_STOCK  3
+
+/* Set rssi_ct_u alone, preserving every other field of 0x5A. Cheap to call repeatedly:
+ * the masked write reads from registerCache rather than the bus, and an unchanged value
+ * is dropped by radioWriteReg2byte()'s per-register cache. */
+void AT1846sSetRssiCount(uint8_t count);
+#endif
+
 void AT1846sInit(void);
 void AT1846sPostInit(void);
 void AT1846sSetBandWidth(bool Is25K);

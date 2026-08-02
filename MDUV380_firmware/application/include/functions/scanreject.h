@@ -54,6 +54,29 @@
  * purpose -- see the asymmetry note above. */
 #define SCAN_REJECT_DEFAULT_MARGIN  8
 
+/* AT1846S rssi_ct_u (0x5A[11:9]) to hold while an analog scan is running: the RSSI
+ * tracking bandwidth is 1145 / 2^ct Hz, so the stock 3 is 144 Hz and this is 286 Hz.
+ *
+ * ★ This exists because the reject's whole decision is ONE RSSI reading taken ~3 ms after
+ * a retune, and at the stock bandwidth the reading has barely arrived by then. MEASURED
+ * at the reject's own sample point, carrier against empty, 50 steps per cell:
+ *
+ *   rssi_ct_u   no carrier      carrier      lift   lift/sd
+ *   3 (stock)   36.8 +-1.69   55.6 +-0.80   18.8      11.1
+ *   2           40.3 +-1.66   67.3 +-0.98   27.0      16.3   <- best separation
+ *   1           38.2 +-2.26   71.6 +-2.42   33.4      14.8
+ *   0           36.9 +-2.58   71.7 +-3.08   34.8      13.5
+ *
+ * The figure of merit is separation in units of the no-carrier spread, not the raw lift:
+ * a faster filter raises both, and below ct=2 the spread grows faster than the signal.
+ *
+ * ★★ It buys SAFETY, not speed. The reject's only sensitivity risk is throwing away a
+ * step that had a weak carrier in it; a 44% bigger lift at the instant of the decision is
+ * exactly what makes that less likely, and the margin of 8 still clears the no-carrier
+ * spread by 4.8 sd. Nothing here changes the arbiter, so per-visit sensitivity remains
+ * identical to stock by construction, as it was before. */
+#define SCAN_REJECT_RSSI_COUNT  2
+
 extern uint16_t scanRejectTicks;
 extern uint8_t  scanRejectMargin;
 

@@ -50,6 +50,19 @@ void radioPostinit(void);
 RadioDevice_t radioSetTRxDevice(RadioDevice_t deviceId);
 RadioDevice_t radioGetTRxDeviceId(void);
 void radioSetBandwidth(bool Is25K);
+#if defined(ENABLE_FAST_SCAN) || defined(ENABLE_SPECTRUM)
+/* RSSI tracking bandwidth (AT1846S rssi_ct_u): 1145 / 2^count Hz, stock count 3.
+ * Held lower while an analog scan or the sweep is running -- both sample the RSSI byte
+ * well before it has settled at the stock bandwidth. See SCAN_REJECT_RSSI_COUNT and
+ * VFO_SWEEP_RSSI_COUNT for the measurements that chose each value. Does not affect the
+ * noise byte the squelch decides on.
+ *
+ * The default is restored by its own call rather than by the caller naming a value: what
+ * "default" means is a property of the chip's init table, and a UI file holding its own
+ * copy of that number is one edit away from restoring something the radio never had. */
+void radioSetRssiCount(uint8_t count);
+void radioSetRssiCountDefault(void);
+#endif
 void radioSetCalibration(void);
 void radioSetIF(int band, bool wide);
 void radioSetMode(int mode);

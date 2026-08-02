@@ -179,6 +179,18 @@ void radioSetBandwidth(bool Is25K)
 	AT1846sSetBandWidth(Is25K);
 }
 
+#if defined(ENABLE_FAST_SCAN) || defined(ENABLE_SPECTRUM)
+void radioSetRssiCount(uint8_t count)
+{
+	AT1846sSetRssiCount(count);
+}
+
+void radioSetRssiCountDefault(void)
+{
+	AT1846sSetRssiCount(AT1846S_RSSI_COUNT_STOCK);
+}
+#endif
+
 void radioSetMode(int mode) // Called withing trx.c: in task critical sections
 {
 	if (mode == RADIO_MODE_ANALOG)

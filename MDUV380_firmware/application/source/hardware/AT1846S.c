@@ -107,7 +107,11 @@ static const uint8_t AT1846InitSettings[][AT1846_BYTES_PER_COMMAND] = {
 		{0x56, 0x0B, 0x02}, // SQ detection time (SQ setting)
 		{0x57, 0x1C, 0x00}, // bypass rssi_lpfilter
 		{0x58, 0x9C, 0xDD}, // Filters custom setting
-		{0x5A, 0x06, 0xDB}, // Unknown
+		{0x5A, 0x06, 0xDB}, // Detection counts: one power-of-two averager per quantity --
+		                    // [14:12] pkdet, [11:9] rssi, [8:6] modu, [5:3] sif,
+		                    // [2:0] noise. 0x06DB is rssi_ct_u = 3, noise_ct_u = 3.
+		                    // AT1846S_RSSI_COUNT_STOCK must match the rssi field; the
+		                    // static assert below enforces it.
 		{0x63, 0x16, 0xAD}, // Pre_emphasis bypass threshold (recommended value)
 		{0x0F, 0x8A, 0x24}, // Unknown
 		{0x05, 0x87, 0x63}, // Unknown
@@ -266,6 +270,30 @@ void AT1846sSetMode(int mode)
 		I2C_AT1846S_send_Settings(AT1846DMRSettings, sizeof(AT1846DMRSettings) / AT1846_BYTES_PER_COMMAND);
 	}
 }
+
+#if defined(ENABLE_FAST_SCAN) || defined(ENABLE_SPECTRUM)
+/* The value the init table actually programs, and the value radioSetRssiCountDefault()
+ * restores, are the same number written in two places. Tie them together here: nothing
+ * else writes 0x5A, so if the table changes and this does not, every scan would "restore"
+ * a bandwidth the radio never booted with -- and the symptom would be a slightly
+ * different S-meter, which nobody traces back to a scan. */
+#define AT1846S_INIT_DETECT_COUNTS  0x06DB
+_Static_assert(((AT1846S_INIT_DETECT_COUNTS >> 9) & 0x07) == AT1846S_RSSI_COUNT_STOCK,
+		"AT1846S_RSSI_COUNT_STOCK disagrees with the 0x5A value in AT1846InitSettings[]");
+
+void AT1846sSetRssiCount(uint8_t count)
+{
+	// 0x5A's fields are [14:12] pkdet_ct_u, [11:9] rssi_ct_u, [8:6] modu_ct_u,
+	// [5:3] sif_ct_u, [2:0] noise_ct_u. Only rssi_ct_u is touched here: noise_ct_u feeds
+	// the scanner's stop rule and shortening THAT was measured to cost squelch headroom
+	// and, at its shortest, to false-stop on real spectrum. This function must never be
+	// the thing that changes it -- hence a masked write rather than a whole-register one.
+	//
+	// The keep-mask is inverted by radioSetClearReg2byteWithMask()'s convention:
+	// tmp = val | (tmp & mask), so the mask names the bits to PRESERVE.
+	I2C_AT1846_set_register_with_mask(0x5A, 0xF1FF, (count & 0x07), 9);
+}
+#endif
 
 void AT1846sSetBandWidth(bool Is25K)
 {
