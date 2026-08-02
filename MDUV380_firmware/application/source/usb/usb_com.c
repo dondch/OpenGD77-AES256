@@ -1123,6 +1123,43 @@ static void cpsHandleCommand(void)
 				replyLength = 8 + (n * 4);
 			}
 			return;   /* NOT break -- see above */
+#if defined(ENABLE_FAST_SCAN)
+		case 0xB1: // DEV: the sweep's wide span and auto scroll.
+			//   [2]=action (0 = report, 1 = set runtime, 2 = set and persist),
+			//   [3]=flags: bit0 wide, bit1 autoScroll, [4]=step index 0..6 (>6 = leave alone).
+			//   Reply: [cmd, 0xB1, flags, spanBE(4)] -- span in 10 Hz units.
+			//
+			//   The wide span is selected with SK2 + UP on the radio, and SK2 is a BUTTON:
+			//   the keypad injector queues KEYS and BUTTONCHECK_DOWN() reads button state,
+			//   so this mode is otherwise unreachable on the dead-panel radio and could not
+			//   be verified from the host at all.
+			{
+				if (com_requestbuffer[2] != 0)
+				{
+					/* action 1 = runtime only, 2 = also persist. Persisting is opt-in
+					 * because the stored word packs sweepStepSizeIndex, which is only
+					 * valid while the sweep is running -- see uiVFOModeSweepSetModes(). */
+					uiVFOModeSweepSetModes(((com_requestbuffer[3] & 0x01) != 0),
+							((com_requestbuffer[3] & 0x02) != 0),
+							com_requestbuffer[4],
+							(com_requestbuffer[2] == 2));
+				}
+
+				uint32_t span = uiVFOModeSweepSpan();
+
+				usbComSendBuf[0] = com_requestbuffer[0];
+				usbComSendBuf[1] = 0xB1;
+				usbComSendBuf[2] = (uint8_t)((uiVFOModeSweepIsWide() ? 0x01 : 0) |
+						(uiVFOModeSweepIsAutoScrolling() ? 0x02 : 0));
+				usbComSendBuf[3] = (uint8_t)((span >> 24) & 0xFF);
+				usbComSendBuf[4] = (uint8_t)((span >> 16) & 0xFF);
+				usbComSendBuf[5] = (uint8_t)((span >> 8) & 0xFF);
+				usbComSendBuf[6] = (uint8_t)(span & 0xFF);
+				hasToReply = true;
+				replyLength = 7;
+			}
+			return;   /* NOT break -- cpsHandleCommand appends a generic '-' after the switch */
+#endif
 		case 0xB0: // DEV: AM envelope capture. Request (10 B):
 			//   [2..5]=freq BE (10 Hz units), [6..7]=sample count BE,
 			//   [8]=rssi_ct_u override (0..7, anything else = leave 0x5A alone).

@@ -101,15 +101,32 @@ static bool quickmenuNewChannelHandled = false; // Quickmenu new channel confirm
 
 static const int VFO_SWEEP_STEP_TIME  = 25;// 25ms
 
+#if defined(ENABLE_FAST_SCAN)
+// Per-measurement time when the wide span is selected. The stock 25 ms is chosen for a
+// 160-measurement pass; the wide span takes 1600, and 25 ms would make that a 40 second
+// pass, which is not a display any more.
+//
+// 6 ms is the measured floor that still works: the column-strip blit took the DISPLAY cost
+// to ~2.9 ms/sample (6 ms renders correctly, where it used to break up), and the sweep now
+// holds rssi_ct_u at 1, which is what stops a short dwell reading a half-settled level --
+// MEASURED, carrier height 22.2 counts at stock vs 34.9 at ct=1 for a 2.9 ms sample.
+// 1600 x 6 ms = ~9.6 s per 20 MHz pass.
+#define VFO_SWEEP_WIDE_STEP_TIME  6
+static int vfoSweepStepTime(void);
+#define VFO_SWEEP_STEP_TIME_BASE  vfoSweepStepTime()
+#else
+#define VFO_SWEEP_STEP_TIME_BASE  VFO_SWEEP_STEP_TIME
+#endif
+
 #if defined(ENABLE_SPECTRUM)
 // DEV: let the sweep step time be overridden at runtime so 25 ms and a faster value can
 // be compared on one image. 160 samples x 25 ms = a 4.0 s sweep; the measured settle
 // requirement is ~4.4 ms. See spectrum.h (included unconditionally at the top of this
 // file, for the SCANPROF_* profiler macros).
 #define VFO_SWEEP_STEP_TIME_ACTIVE \
-	((spectrumSweepStepTimeMs != 0) ? (int)spectrumSweepStepTimeMs : VFO_SWEEP_STEP_TIME)
+	((spectrumSweepStepTimeMs != 0) ? (int)spectrumSweepStepTimeMs : VFO_SWEEP_STEP_TIME_BASE)
 #else
-#define VFO_SWEEP_STEP_TIME_ACTIVE  VFO_SWEEP_STEP_TIME
+#define VFO_SWEEP_STEP_TIME_ACTIVE  VFO_SWEEP_STEP_TIME_BASE
 #endif
 
 #if defined(ENABLE_SPECTRUM)
@@ -257,12 +274,131 @@ static bool    vfoSweepAutoPrimed = false;
 static uint8_t vfoSweepAutoFloor = VFO_SWEEP_RSSI_NOISE_FLOOR_DEFAULT;
 static uint8_t vfoSweepAutoGain = VFO_SWEEP_GAIN_DEFAULT;
 
+// AT1846S rssi_ct_u (0x5A[11:9]) to hold while the sweep is running. The tracking
+// bandwidth is 1145 / 2^ct Hz, so the stock 3 is 144 Hz and this is 572 Hz.
+//
+// ★ The sweep has been paying for a filter it cannot afford. Since the column-strip blit
+// its floor is ~2.9 ms/sample, while RSSI takes ~5.7 ms to settle to +-2 counts at the
+// stock bandwidth -- so every sample is read part-way up the step response and the trace
+// is compressed towards the noise floor. MEASURED on the real sweep path (CPS 0xA0, 8
+// traces per cell, against the bench harmonic), carrier height above the floor:
+//
+//   rssi_ct_u   @2.9 ms/sample   @6.0 ms/sample
+//   3 (stock)        22.2             33.9
+//   2                28.6             35.9
+//   1                34.9             37.6      <- 2.9 ms now as good as stock at 6 ms
+//   0                32.4             38.0
+//
+// So this is contrast for free rather than speed for jitter: the sweep keeps its current
+// rate and recovers the ~35% of trace height it was losing to the filter. ct=0 is worse
+// than ct=1 -- past that point the added jitter costs more than the settle gains.
+//
+// A different value from the scanner's SCAN_REJECT_RSSI_COUNT on purpose: the reject
+// wants the best SEPARATION for one early sample, the sweep wants the best absolute
+// height at a fixed sample time. They optimise different things and measured differently.
+#define VFO_SWEEP_RSSI_COUNT  1
+
+// ---- wide span: more measurements than columns ----
+//
+// The sweep has always been capped at 160 columns x 12.5 kHz = 2 MHz, and the reason given
+// was the IF bandwidth. Half of that is right and half was an assumption.
+//
+// RIGHT: the receiver cannot be made to listen wider, so a COARSER STEP leaves holes.
+// Documented, AT1846S Programming Guide 1.4: 30H[13] filter_band_sel and 30H[12] band_mode
+// are single bits (25 kHz or 12.5 kHz, nothing else), and 15H[12:9] tuning_bit<3:0> --
+// "Tuning IF filter center frequency and bw" -- is a 4-bit field the 25 kHz table already
+// programs to its maximum of 15. MEASURED passband: flat to +-6.25 kHz at 12.5 kHz IF and
+// +-7.5 kHz at 25 kHz. So a 25 kHz step would leave a ~10 kHz hole in every column, ~19 dB
+// deep. That route is closed by the hardware.
+//
+// ASSUMPTION: that a column must be one measurement. Nothing requires it. VFO_SWEEP_NUM_SAMPLES
+// is used as both the array size and the pixel column throughout this file, and that coupling
+// was mistaken for a constraint.
+//
+// So: take N measurements per column at the SAME 12.5 kHz spacing and keep the loudest.
+// Every 12.5 kHz of the span is genuinely listened to, so the span grows with NO gaps and no
+// sensitivity cost -- and since only the column maximum is kept, it costs no extra RAM at all.
+// This is what a spectrum analyser does when the span exceeds its display points, and peak
+// detect is the right detector for finding narrow signals.
+//
+// (fagci's UV-K5 mod maps FEWER points onto more pixels -- `i = x >> stepsCount` -- and buys
+// its 12.8 MHz with a 100 kHz step on a comparable narrowband part, i.e. with the holes.
+// Studying it suggested the wrong direction.)
+//
+// The only cost is time, exactly linear: N times the retunes per pass.
+#define VFO_SWEEP_WIDE_FLAG        0x8000  // spare bit 15 of vfoSweepSettings (3+5+7 = 15 used)
+#define VFO_SWEEP_WIDE_SUBSAMPLES  10      // 160 columns x 10 x 12.5 kHz = 20 MHz
+#define VFO_SWEEP_WIDE_SUBSTEP_IDX 6       // the table entry whose per-sample step IS 12.5 kHz
+
+static bool    vfoSweepWide = false;
+static uint8_t vfoSweepSubIndex = 0;       // which measurement within the current column
+static uint8_t vfoSweepColumnPeak = 0;     // running max over that column's measurements
+
+// ---- auto scroll ----
+// A 20 MHz window still only covers a sixth of UHF. Advancing the centre by exactly one span
+// at the end of every pass tiles the whole band without overlap or omission, which turns the
+// sweep from "look at this window" into "survey everything the radio can hear".
+//
+// Deliberately NOT persisted: it is an action rather than a preference, and a radio that
+// silently starts marching across the band the next time you open the sweep would be a
+// surprise. vfoSweepWide IS persisted, because that one is a preference.
+static bool vfoSweepAutoScroll = false;
+static bool vfoSweepScrollPending = false;   // pass ended parked; advance once it resumes
+
+/* Longest the auto scroll will let a single park last.
+ *
+ * ★ MEASURED, not guessed: without this the survey stops permanently. The listen hold is
+ * "as long as the audio is open, plus a hang" -- deliberately, so a transmission is never
+ * cut off mid-sentence -- but a carrier that simply stays up holds the audio open for
+ * ever. On the bench the sweep parked at 490 MHz and was still sitting there 190 seconds
+ * later, having surveyed nothing.
+ *
+ * A plain sweep should keep that behaviour: you asked it to listen. A SURVEY must not,
+ * because the whole point is to get all the way round the band. Long enough to identify
+ * what you have found, short enough that one open repeater cannot eat the run. */
+#define VFO_SWEEP_SCROLL_MAX_PARK_MS  6000
+static ticksTimer_t vfoSweepParkLimitTimer = { 0, 0 };
+
+static int vfoSweepStepTime(void)
+{
+	return (vfoSweepWide ? VFO_SWEEP_WIDE_STEP_TIME : VFO_SWEEP_STEP_TIME);
+}
+
+// Rebuild the stored word without ever losing bit 15. Two places rebuild it from the three
+// named fields, and either would drop the wide flag silently -- the failure would be a mode
+// that switches itself off on the next gain adjustment, which nobody would trace back here.
+#define VFO_SWEEP_SETTINGS_WORD(stepIdx, floor, gain) \
+	((uint16_t)((((stepIdx) & 0x7) << 12) | (((floor) & 0x1F) << 7) | ((gain) & 0x7F) | \
+			(vfoSweepWide ? VFO_SWEEP_WIDE_FLAG : 0)))
+
+// Measurements per display column, and the frequency step between them.
+static uint8_t vfoSweepSubSamples(void)
+{
+	return (vfoSweepWide ? VFO_SWEEP_WIDE_SUBSAMPLES : 1);
+}
+
+static int vfoSweepSubStep(void)
+{
+	return VFO_SWEEP_SCAN_RANGE_SAMPLE_STEP_TABLE[vfoSweepWide
+			? VFO_SWEEP_WIDE_SUBSTEP_IDX : uiDataGlobal.Scan.sweepStepSizeIndex];
+}
+
+// Total width of the display, in OpenGD77 10 Hz units.
+static uint32_t vfoSweepSpan(void)
+{
+	return ((uint32_t)vfoSweepSubStep() * VFO_SWEEP_NUM_SAMPLES * vfoSweepSubSamples())
+			/ VFO_SWEEP_PIXELS_PER_STEP;
+}
+
 #define VFO_SWEEP_FLOOR_ACTIVE  (vfoSweepAutoScale ? vfoSweepAutoFloor : vfoSweepRssiNoiseFloor)
 // MAX(1, ...) because this is a divisor and VFO_SWEEP_GAIN_MIN is 0.
 #define VFO_SWEEP_GAIN_ACTIVE   MAX(1, (vfoSweepAutoScale ? vfoSweepAutoGain : vfoSweepGain))
 #else
 #define VFO_SWEEP_FLOOR_ACTIVE  vfoSweepRssiNoiseFloor
 #define VFO_SWEEP_GAIN_ACTIVE   vfoSweepGain
+// Stock builds have no wide flag to preserve, so this is the plain packing it always was.
+#define VFO_SWEEP_SETTINGS_WORD(stepIdx, floor, gain) \
+	((uint16_t)((((stepIdx) & 0x7) << 12) | (((floor) & 0x1F) << 7) | ((gain) & 0x7F)))
 #endif
 
 #if defined(ENABLE_FAST_SCAN)
@@ -957,6 +1093,20 @@ void uiVFOModeStopScanning(void)
 	vfoSweepStopListening();
 #endif
 
+#if defined(ENABLE_FAST_SCAN) || defined(ENABLE_SPECTRUM)
+	/* Put the RSSI filter back, whichever of the scan or the sweep set it.
+	 *
+	 * Unconditional on purpose: this is the single exit for both, and the conditions that
+	 * chose the value on the way in (analog, reject enabled, sweep vs scan) can all have
+	 * changed while scanning. Testing them again here would be a second chance to get the
+	 * bracket wrong, and the failure it protects against is silent -- a non-stock
+	 * rssi_ct_u left behind does not break reception, it just makes the S-meter twitchier
+	 * than the user set it to, which is exactly the kind of thing nobody traces back.
+	 * The write costs nothing when the value is already stock: radioWriteReg2byte() drops
+	 * it on the register cache. */
+	radioSetRssiCountDefault();
+#endif
+
 	if (uiDataGlobal.Scan.toneActive)
 	{
 		if (prevCSSTone != (CODEPLUG_CSS_TONE_NONE - 1))
@@ -1189,6 +1339,21 @@ static void handleEvent(uiEvent_t *ev)
 			// hang timer gives up, over and over, and the only way out is to leave the
 			// screen entirely. STAR is otherwise unused while sweeping -- the nuisance
 			// delete below excludes VFO_SCREEN_OPERATION_SWEEP.
+			// STAR with the sweep running and nothing parked: toggle the auto scroll.
+			// It is the only key already exempt from the "any key stops the scan" barrier
+			// below and otherwise unused on this screen, so it needs no new exemption --
+			// and a control that stopped the sweep in order to configure the sweep would
+			// be useless here.
+			if ((vfoSweepListening == false) && (ev->keys.key == KEY_STAR) &&
+					(screenOperationMode[nonVolatileSettings.currentVFONumber] == VFO_SCREEN_OPERATION_SWEEP))
+			{
+				vfoSweepAutoScroll = !vfoSweepAutoScroll;
+				uiDataGlobal.displayQSOState = QSO_DISPLAY_DEFAULT_SCREEN;
+				headerRowIsDirty = true;
+				keyboardReset();
+				return;
+			}
+
 			if (vfoSweepListening && (ev->keys.key == KEY_STAR))
 			{
 				vfoSweepStopListening();
@@ -1630,7 +1795,9 @@ static void handleEvent(uiEvent_t *ev)
 				vfoSweepAutoScale = true;
 				vfoSweepAutoPrimed = false;
 #endif
-				settingsSet(nonVolatileSettings.vfoSweepSettings, ((uiDataGlobal.Scan.sweepStepSizeIndex << 12) | (vfoSweepRssiNoiseFloor << 7) | vfoSweepGain));
+				settingsSet(nonVolatileSettings.vfoSweepSettings,
+						VFO_SWEEP_SETTINGS_WORD(uiDataGlobal.Scan.sweepStepSizeIndex,
+								vfoSweepRssiNoiseFloor, vfoSweepGain));
 				vfoSweepUpdateSamples(0, true, 0);
 			}
 			else if (
@@ -2446,11 +2613,102 @@ static void handleDownKey(uiEvent_t *ev)
 /* Frequency of sweep sample `index`, in OpenGD77's 10 Hz units. Same arithmetic
  * sweepScanStep() uses to tune each sample -- kept in one place so the marker can never
  * disagree with where the receiver actually was. */
+/* Move the display on by exactly one span, wrapping inside the band.
+ *
+ * Exactly one span is the point: less and consecutive windows overlap, which wastes the
+ * sweep time the wide span already spends a lot of; more and there are slices of the band
+ * it never looks at, which is worse because nothing on screen says so. */
+static void vfoSweepAdvanceWindow(void)
+{
+	uint32_t span = vfoSweepSpan();
+	uint32_t band = trxGetBandFromFrequency(currentChannelData->rxFreq);
+
+	vfoSweepScrollPending = false;
+
+	if (band == FREQUENCY_OUT_OF_BAND)
+	{
+		return;
+	}
+
+	// ★ HARDWARE bands, not USER_FREQUENCY_BANDS. The point of this mode is to survey
+	// everything the radio can hear, and the user bands are the amateur allocations --
+	// measured on this radio, UHF 420-450 against a hardware 400-520. Worse, the index
+	// comes from trxGetBandFromFrequency(), which looks up the HARDWARE table, so reading
+	// the user table with it mixes two different tables. That combination left a 20 MHz
+	// span with valid centres of only 430-440: every step overshot, it wrapped straight
+	// back, and the sweep sat on one window looking like it had hung.
+	uint32_t lo = RADIO_HARDWARE_FREQUENCY_BANDS[band].minFreq + (span / 2);
+	uint32_t hi = RADIO_HARDWARE_FREQUENCY_BANDS[band].maxFreq - (span / 2);
+	uint32_t next = currentChannelData->rxFreq + span;
+
+	if (hi <= lo)
+	{
+		// Span wider than the whole band: there is nothing to tile, so sit in the middle
+		// and let the edges fall outside rather than refusing to show anything.
+		currentChannelData->rxFreq = (RADIO_HARDWARE_FREQUENCY_BANDS[band].minFreq +
+				RADIO_HARDWARE_FREQUENCY_BANDS[band].maxFreq) / 2;
+	}
+	else if (next <= hi)
+	{
+		currentChannelData->rxFreq = next;
+	}
+	else if (currentChannelData->rxFreq < hi)
+	{
+		// Last window: clamp to the top edge instead of stepping past it. That overlaps
+		// the previous window a little, which costs a few seconds; the alternative is
+		// never looking at the top of the band at all, and nothing on screen would say so.
+		currentChannelData->rxFreq = hi;
+	}
+	else
+	{
+		// Already on the last window -- wrap. Clamping here instead would leave the sweep
+		// on the top window for ever, which on screen is indistinguishable from a crash.
+		currentChannelData->rxFreq = lo;
+	}
+
+	// ★ Move the TX frequency with it, exactly as stepFrequency() does for every other
+	// way the VFO is retuned. The sweep only ever receives, so leaving TX behind looks
+	// harmless -- it is not. MEASURED: with only rxFreq moved, the survey walked up to
+	// ~513 MHz and then snapped back to the stored VFO frequency every time, because the
+	// VFO is an rx/tx PAIR and something downstream re-synced the two. Chasing which
+	// resync it was would be beside the point: the established contract for moving this
+	// VFO is to move both, and not following it is the bug.
+	currentChannelData->txFreq = currentChannelData->rxFreq;
+	settingsSetVFODirty();
+
+	// Every bin now covers a different frequency, so nothing measured carries over. The
+	// hold especially: showing a held peak against the new window would be a claim about
+	// a frequency it was never measured at.
+	memset(vfoSweepSamples, 0x00, sizeof(vfoSweepSamples));
+	memset(vfoSweepHold, 0x00, sizeof(vfoSweepHold));
+	vfoSweepShownPeakLevel = 0;
+	vfoSweepShownPeakIndex = -1;
+	vfoSweepPeakLevel = 0;
+	vfoSweepPeakIndex = -1;
+	vfoSweepAutoPrimed = false;   // re-take the scale outright rather than slewing to it
+	uiDataGlobal.displayQSOState = QSO_DISPLAY_DEFAULT_SCREEN;
+}
+
+static uint32_t vfoSweepFreqForOrdinal(int32_t ordinal)
+{
+	// `ordinal` counts MEASUREMENTS across the whole pass, not columns: 0 .. (160*N - 1).
+	// With N == 1 this is the column index and the arithmetic is identical to what it has
+	// always been, which is what keeps every existing caller correct.
+	return currentChannelData->rxFreq +
+			((vfoSweepSubStep() *
+					(ordinal - ((VFO_SWEEP_NUM_SAMPLES * vfoSweepSubSamples()) / 2)))
+							/ VFO_SWEEP_PIXELS_PER_STEP);
+}
+
 static uint32_t vfoSweepFreqForSample(int16_t index)
 {
-	return currentChannelData->rxFreq +
-			((VFO_SWEEP_SCAN_RANGE_SAMPLE_STEP_TABLE[uiDataGlobal.Scan.sweepStepSizeIndex] *
-					(index - (VFO_SWEEP_NUM_SAMPLES / 2))) / VFO_SWEEP_PIXELS_PER_STEP);
+	// The CENTRE of the band this column covers. A column spans N measurements, so naming
+	// it by its first one would bias every peak label half a column low -- 62.5 kHz at the
+	// 20 MHz span, which is more than the label's own resolution and would look like a
+	// calibration error rather than an off-by-one.
+	uint8_t n = vfoSweepSubSamples();
+
+	return vfoSweepFreqForOrdinal(((int32_t)index * n) + (n / 2));
 }
 
 /* Re-derive the display scaling from the pass just finished.
@@ -2769,21 +3027,65 @@ static void setSweepIncDecSetting(sweepSetting_t type, bool increment)
 		case SWEEP_SETTING_STEP:
 			{
 				int oldStepIndex = uiDataGlobal.Scan.sweepStepSizeIndex;
-				if (increment)
+				int topIndex = ((sizeof(VFO_SWEEP_SCAN_RANGE_SAMPLE_STEP_TABLE) / sizeof(VFO_SWEEP_SCAN_RANGE_SAMPLE_STEP_TABLE[0])) - 1);
+#if defined(ENABLE_FAST_SCAN)
+				bool oldWide = vfoSweepWide;
+
+				// The wide span sits one notch above the widest table entry, so the single
+				// existing control walks 0..6 and then straight on into it -- no new key,
+				// and the ordering on screen stays monotonic in span.
+				if (increment && (uiDataGlobal.Scan.sweepStepSizeIndex == topIndex) && (vfoSweepWide == false))
 				{
-					uiDataGlobal.Scan.sweepStepSizeIndex = SAFE_MIN(((sizeof(VFO_SWEEP_SCAN_RANGE_SAMPLE_STEP_TABLE) / sizeof(VFO_SWEEP_SCAN_RANGE_SAMPLE_STEP_TABLE[0])) - 1), (uiDataGlobal.Scan.sweepStepSizeIndex + 1));
-					bandwidthRescaleDirection = 1;
+					vfoSweepWide = true;
+					bandwidthRescaleDirection = 0;   // not a rescale of the same span: a new one
 				}
-				else
+				else if ((increment == false) && vfoSweepWide)
 				{
-					uiDataGlobal.Scan.sweepStepSizeIndex = SAFE_MAX(0, (uiDataGlobal.Scan.sweepStepSizeIndex - 1));
-					bandwidthRescaleDirection = -1;
+					vfoSweepWide = false;
+					bandwidthRescaleDirection = 0;
+				}
+				else if (vfoSweepWide == false)
+#endif
+				{
+					if (increment)
+					{
+						uiDataGlobal.Scan.sweepStepSizeIndex = SAFE_MIN(topIndex, (uiDataGlobal.Scan.sweepStepSizeIndex + 1));
+						bandwidthRescaleDirection = 1;
+					}
+					else
+					{
+						uiDataGlobal.Scan.sweepStepSizeIndex = SAFE_MAX(0, (uiDataGlobal.Scan.sweepStepSizeIndex - 1));
+						bandwidthRescaleDirection = -1;
+					}
 				}
 
-				if (oldStepIndex != uiDataGlobal.Scan.sweepStepSizeIndex)
+				if ((oldStepIndex != uiDataGlobal.Scan.sweepStepSizeIndex)
+#if defined(ENABLE_FAST_SCAN)
+						|| (oldWide != vfoSweepWide)
+#endif
+				   )
 				{
 					apply = true;
-					setting = (uiDataGlobal.Scan.sweepStepSizeIndex << 12) | (nonVolatileSettings.vfoSweepSettings & 0xFFF);
+					setting = VFO_SWEEP_SETTINGS_WORD(uiDataGlobal.Scan.sweepStepSizeIndex,
+							((nonVolatileSettings.vfoSweepSettings >> 7) & 0x1F),
+							(nonVolatileSettings.vfoSweepSettings & 0x7F));
+#if defined(ENABLE_FAST_SCAN)
+					if (oldWide != vfoSweepWide)
+					{
+						// Entering or leaving the wide span changes what every bin covers,
+						// so nothing measured carries over -- same reasoning as a scroll.
+						memset(vfoSweepSamples, 0x00, sizeof(vfoSweepSamples));
+						memset(vfoSweepHold, 0x00, sizeof(vfoSweepHold));
+						vfoSweepShownPeakLevel = 0;
+						vfoSweepShownPeakIndex = -1;
+						vfoSweepPeakLevel = 0;
+						vfoSweepPeakIndex = -1;
+						vfoSweepSubIndex = 0;
+						vfoSweepColumnPeak = 0;
+						vfoSweepAutoPrimed = false;
+						uiDataGlobal.Scan.sweepSampleIndex = 0;
+					}
+#endif
 				}
 			}
 			break;
@@ -3767,6 +4069,79 @@ bool uiVFOModeSweepScanning(bool includePaused)
 			(screenOperationMode[nonVolatileSettings.currentVFONumber] == VFO_SCREEN_OPERATION_SWEEP));
 }
 
+#if defined(ENABLE_FAST_SCAN)
+uint32_t uiVFOModeSweepSpan(void)
+{
+	return vfoSweepSpan();
+}
+
+bool uiVFOModeSweepIsAutoScrolling(void)
+{
+	return vfoSweepAutoScroll;
+}
+#endif
+
+/* Needs BOTH flags: the modes it drives are ENABLE_FAST_SCAN state, so an
+ * ENABLE_SPECTRUM-only build (which build_spec.sh makes) would not compile without this.
+ * Caught by building that configuration, not by reading -- the two dev flags are usually
+ * set together and the broken combination is the one nobody exercises. */
+#if defined(ENABLE_SPECTRUM) && defined(ENABLE_FAST_SCAN)
+/* DEV: drive the two new sweep modes from the host (CPS 0xB1).
+ *
+ * Not a convenience. The wide span is selected with SK2 + UP, and SK2 is a BUTTON --
+ * the keypad injector queues KEYS, and BUTTONCHECK_DOWN() reads the button state, so on
+ * the dead-panel guinea-pig there is otherwise no way to reach this control at all and
+ * the feature could only ever be verified by eye on the other radio. Compiles to nothing
+ * in a release build. */
+void uiVFOModeSweepSetModes(bool wide, bool autoScroll, uint8_t stepIndex, bool persist)
+{
+	/* ★ Does NOT write the settings unless asked to, and that is not a detail.
+	 *
+	 * The stored word packs sweepStepSizeIndex, and that variable is only loaded from
+	 * settings when the sweep is ENTERED. Rebuilding the word from it at any other moment
+	 * persists a zero over whatever the user had chosen. This function is callable from
+	 * the host at any time, and the first version did exactly that: one call made outside
+	 * the sweep silently reset a stored span index of 6 to 0. The real UI paths cannot hit
+	 * this -- both are reachable only while sweeping -- so the hazard belongs to the host
+	 * hook alone, and it is fixed here rather than by remembering not to call it wrong. */
+	if (stepIndex <= 6)
+	{
+		uiDataGlobal.Scan.sweepStepSizeIndex = stepIndex;
+	}
+
+	if (wide != vfoSweepWide)
+	{
+		vfoSweepWide = wide;
+
+		// Same invalidation the SK2 path does: every bin covers a different frequency now.
+		memset(vfoSweepSamples, 0x00, sizeof(vfoSweepSamples));
+		memset(vfoSweepHold, 0x00, sizeof(vfoSweepHold));
+		vfoSweepShownPeakLevel = 0;
+		vfoSweepShownPeakIndex = -1;
+		vfoSweepPeakLevel = 0;
+		vfoSweepPeakIndex = -1;
+		vfoSweepSubIndex = 0;
+		vfoSweepColumnPeak = 0;
+		vfoSweepAutoPrimed = false;
+		uiDataGlobal.Scan.sweepSampleIndex = 0;
+	}
+
+	vfoSweepAutoScroll = autoScroll;
+
+	if (persist)
+	{
+		settingsSet(nonVolatileSettings.vfoSweepSettings,
+				VFO_SWEEP_SETTINGS_WORD(uiDataGlobal.Scan.sweepStepSizeIndex,
+						vfoSweepRssiNoiseFloor, vfoSweepGain));
+	}
+}
+
+bool uiVFOModeSweepIsWide(void)
+{
+	return vfoSweepWide;
+}
+#endif
+
 bool uiVFOModeFrequencyScanningIsActiveAndEnabled(uint32_t *lowFreq, uint32_t *highFreq)
 {
 	bool ret = ((menuSystemGetCurrentMenuNumber() == UI_VFO_MODE) && (screenOperationMode[nonVolatileSettings.currentVFONumber] == VFO_SCREEN_OPERATION_SCAN));
@@ -3909,6 +4284,14 @@ static void sweepScanInit(void)
 	uiDataGlobal.Scan.sweepStepSizeIndex = ((nonVolatileSettings.vfoSweepSettings >> 12) & 0x7);
 	vfoSweepRssiNoiseFloor = ((nonVolatileSettings.vfoSweepSettings >> 7) & 0x1F);
 	vfoSweepGain = (nonVolatileSettings.vfoSweepSettings & 0x7F);
+#if defined(ENABLE_FAST_SCAN)
+	vfoSweepWide = ((nonVolatileSettings.vfoSweepSettings & VFO_SWEEP_WIDE_FLAG) != 0);
+	vfoSweepSubIndex = 0;
+	vfoSweepColumnPeak = 0;
+	// Auto scroll always starts off -- see the note at its declaration.
+	vfoSweepAutoScroll = false;
+	vfoSweepScrollPending = false;   // a scroll owed by a previous visit is not owed now
+#endif
 
 	screenOperationMode[nonVolatileSettings.currentVFONumber] = VFO_SCREEN_OPERATION_SWEEP;
 
@@ -3917,6 +4300,10 @@ static void sweepScanInit(void)
 	memset(vfoSweepSamples, 0x00, VFO_SWEEP_NUM_SAMPLES * sizeof(uint8_t));
 
 #if defined(ENABLE_FAST_SCAN)
+	// The sweep samples far faster than the stock RSSI filter settles -- see
+	// VFO_SWEEP_RSSI_COUNT. Restored by uiVFOModeStopScanning().
+	radioSetRssiCount(VFO_SWEEP_RSSI_COUNT);
+
 	// Start clean: a stale peak from a previous visit would be marked, and worse, listened
 	// to, before this sweep has measured anything.
 	vfoSweepListening = false;
@@ -3969,6 +4356,18 @@ static void sweepScanStep(void)
 			ticksTimerStart(&vfoSweepListenTimer, VFO_SWEEP_LISTEN_HANG_MS);
 		}
 
+		// While surveying, a park is bounded regardless of the audio -- see
+		// VFO_SWEEP_SCROLL_MAX_PARK_MS. The hold above renews itself for as long as the
+		// squelch is open, so a carrier that just stays up stops the survey dead.
+		if (vfoSweepAutoScroll && ticksTimerHasExpired(&vfoSweepParkLimitTimer))
+		{
+			vfoSweepStopListening();
+			vfoSweepScrollPending = true;   // this window is done; move on
+			vfoSweepDrawPeakMarker();
+			displayRenderRows(1, ((8 + VFO_SWEEP_GRAPH_HEIGHT_Y) / 8) + 1);
+			return;
+		}
+
 		if (ticksTimerHasExpired(&vfoSweepListenTimer))
 		{
 			vfoSweepStopListening();
@@ -3985,6 +4384,16 @@ static void sweepScanStep(void)
 		return;
 	}
 
+#if defined(ENABLE_FAST_SCAN)
+	// A pass that ended by parking on a signal left its scroll owed. Pay it here, on the
+	// first scanning tick after the listen ended, so the window moves on however the
+	// listen finished -- timed out, squelch closed, or STAR-skipped by the operator.
+	if (vfoSweepScrollPending)
+	{
+		vfoSweepAdvanceWindow();
+	}
+#endif
+
 	if (ticksTimerHasExpired(&uiDataGlobal.Scan.timer))
 	{
 		ticksTimerStart(&uiDataGlobal.Scan.timer, VFO_SWEEP_STEP_TIME_ACTIVE);
@@ -3997,7 +4406,43 @@ static void sweepScanStep(void)
 			radioReadRSSIAndNoise();
 #endif
 
+#if defined(ENABLE_FAST_SCAN)
+			// One column may be several measurements (see VFO_SWEEP_WIDE_SUBSAMPLES). Keep
+			// the loudest and only commit the column once the last of them is in: peak
+			// detect, so a narrow signal anywhere inside the column still shows at full
+			// height instead of being averaged into the floor.
+			//
+			// Done as an early return rather than an inner loop on purpose. Each
+			// measurement needs its own retune and settle, and the sweep is cooperative --
+			// one measurement per main-loop tick. Looping here would block the loop for
+			// N x the settle time and stall the UI, the squelch and the USB.
+			if (radioDevices[RADIO_DEVICE_PRIMARY].trxRxSignal > vfoSweepColumnPeak)
+			{
+				vfoSweepColumnPeak = radioDevices[RADIO_DEVICE_PRIMARY].trxRxSignal;
+			}
+
+			vfoSweepSubIndex++;
+
+			if (vfoSweepSubIndex < vfoSweepSubSamples())
+			{
+				// Not done with this column: retune to the next measurement and come back.
+				uiDataGlobal.Scan.scanSweepCurrentFreq = vfoSweepFreqForOrdinal(
+						((int32_t)uiDataGlobal.Scan.sweepSampleIndex * vfoSweepSubSamples())
+								+ vfoSweepSubIndex);
+
+				trxSetFrequency(uiDataGlobal.Scan.scanSweepCurrentFreq, currentChannelData->txFreq,
+						(((currentChannelData->chMode == RADIO_MODE_DIGITAL) &&
+								codeplugChannelGetFlag(currentChannelData, CHANNEL_FLAG_FORCE_DMO))
+										? DMR_MODE_DMO : DMR_MODE_AUTO));
+				return;
+			}
+
+			vfoSweepSubIndex = 0;
+			vfoSweepSamples[uiDataGlobal.Scan.sweepSampleIndex] = vfoSweepColumnPeak;
+			vfoSweepColumnPeak = 0;
+#else
 			vfoSweepSamples[uiDataGlobal.Scan.sweepSampleIndex] = radioDevices[RADIO_DEVICE_PRIMARY].trxRxSignal;// Need to save the samples so for when the freq is changed and we need to scroll the display
+#endif
 
 #if defined(ENABLE_FAST_SCAN)
 			// Raise the hold BEFORE drawing: vfoSweepDrawSample() paints the level and the
@@ -4103,6 +4548,7 @@ static void sweepScanStep(void)
 				vfoSweepListenFreq = vfoSweepFreqForSample(vfoSweepShownPeakIndex);
 				vfoSweepListening = true;
 				ticksTimerStart(&vfoSweepListenTimer, VFO_SWEEP_LISTEN_MIN_MS);
+				ticksTimerStart(&vfoSweepParkLimitTimer, VFO_SWEEP_SCROLL_MAX_PARK_MS);
 
 				trxSetFrequency(vfoSweepListenFreq, currentChannelData->txFreq,
 						(((currentChannelData->chMode == RADIO_MODE_DIGITAL) &&
@@ -4114,10 +4560,53 @@ static void sweepScanStep(void)
 				uiDataGlobal.Scan.state = SCAN_STATE_PAUSED;
 			}
 #endif
+#if defined(ENABLE_FAST_SCAN)
+			// Auto scroll: step the centre on by exactly one span so consecutive passes
+			// tile the band edge to edge -- no overlap, no omission.
+			//
+			// Not while parked on a signal: moving the centre out from under a listen
+			// would retune away mid-transmission and leave the ">" label pointing at a
+			// frequency the receiver is no longer on.
+			// ★ Deferred when the pass ended by parking on a signal, NOT skipped.
+			//
+			// The listen-on-peak block immediately above has already set SCAN_STATE_PAUSED
+			// by the time this runs, and it fires on the loudest sample of the pass being
+			// VFO_SWEEP_LISTEN_MARGIN above the floor -- which plain noise clears most
+			// passes. MEASURED on the bench: the sweep parked at the end of EVERY pass, so
+			// a "only scroll while still scanning" test never once let it advance and the
+			// mode looked completely dead.
+			//
+			// Advancing anyway would be worse: it would wipe the trace and the ">" label
+			// naming what is being listened to, at exactly the moment the operator is
+			// listening to it. So remember, and advance on the first tick after the listen
+			// ends -- see the top of this function.
+			if (vfoSweepAutoScroll)
+			{
+				if (uiDataGlobal.Scan.state == SCAN_STATE_SCANNING)
+				{
+					vfoSweepAdvanceWindow();
+				}
+				else
+				{
+					vfoSweepScrollPending = true;
+				}
+			}
+#endif
 			uiDataGlobal.Scan.sweepSampleIndex = 0;
 			uiDataGlobal.Scan.sweepSampleIndexIncrement = 1;// go back to normal increment at the end of the special sweep step used just after the graph is zoomed in
+#if defined(ENABLE_FAST_SCAN)
+			vfoSweepSubIndex = 0;
+			vfoSweepColumnPeak = 0;
+#endif
 		}
 
+#if defined(ENABLE_FAST_SCAN)
+		// Same arithmetic as the sub-sample retune above, via the one helper, so the
+		// receiver and the peak label can never disagree about where a column is.
+		uiDataGlobal.Scan.scanSweepCurrentFreq = vfoSweepFreqForOrdinal(
+				((int32_t)uiDataGlobal.Scan.sweepSampleIndex * vfoSweepSubSamples())
+						+ vfoSweepSubIndex);
+#else
 		uiDataGlobal.Scan.scanSweepCurrentFreq = currentChannelData->rxFreq +
 				(VFO_SWEEP_SCAN_RANGE_SAMPLE_STEP_TABLE[uiDataGlobal.Scan.sweepStepSizeIndex] *
 						(uiDataGlobal.Scan.sweepSampleIndex -
@@ -4127,6 +4616,7 @@ static void sweepScanStep(void)
 								64
 #endif
 						)) / VFO_SWEEP_PIXELS_PER_STEP;
+#endif
 
 		trxSetFrequency(uiDataGlobal.Scan.scanSweepCurrentFreq, currentChannelData->txFreq, (((currentChannelData->chMode == RADIO_MODE_DIGITAL) && codeplugChannelGetFlag(currentChannelData, CHANNEL_FLAG_FORCE_DMO)) ? DMR_MODE_DMO : DMR_MODE_AUTO));
 	}
@@ -4159,6 +4649,20 @@ static void scanInit(void)
 	else
 	{
 		uiDataGlobal.Scan.dwellTime = uiDataGlobal.Scan.stepTimeMilliseconds;
+
+#if defined(ENABLE_FAST_SCAN) || defined(ENABLE_SPECTRUM)
+		/* Sharpen the RSSI filter for the fast reject's early sample -- see
+		 * SCAN_REJECT_RSSI_COUNT. Restored by uiVFOModeStopScanning().
+		 *
+		 * Conditions match the reject's own exactly, so the chip is only ever left in a
+		 * non-stock state when the thing that needs it is actually running: analog only
+		 * (this branch), and not when the reject is switched off. Dual Watch is already
+		 * excluded -- scanInit() returns before this for DUAL_SCAN. */
+		if (scanRejectTicks != 0)
+		{
+			radioSetRssiCount(SCAN_REJECT_RSSI_COUNT);
+		}
+#endif
 	}
 	uiDataGlobal.Scan.scanType = SCAN_TYPE_NORMAL_STEP;
 

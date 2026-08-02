@@ -1958,9 +1958,28 @@ void uiUtilityRenderHeader(bool isVFODualWatchScanning, bool isVFOSweepScanning,
 
 	if (isVFOSweepScanning)
 	{
+#if defined(ENABLE_FAST_SCAN)
+		// A column is no longer necessarily one measurement, so the span cannot be derived
+		// from the step table here any more -- ask the sweep itself. Printed in MHz once it
+		// runs to whole megahertz, because "+/-10000kHz" is not a legible way to say 20 MHz.
+		uint32_t half = uiVFOModeSweepSpan() / 2;   // 10 Hz units
+
+		if (half >= 100000)
+		{
+			sprintf(buffer, "+/-%u.%02uMHz%s", (unsigned)(half / 100000),
+					(unsigned)((half % 100000) / 1000),
+					(uiVFOModeSweepIsAutoScrolling() ? " >>" : ""));
+		}
+		else
+		{
+			sprintf(buffer, "+/-%ukHz%s", (unsigned)(half / 100),
+					(uiVFOModeSweepIsAutoScrolling() ? " >>" : ""));
+		}
+#else
 		int span = (VFO_SWEEP_SCAN_RANGE_SAMPLE_STEP_TABLE[uiDataGlobal.Scan.sweepStepSizeIndex] * VFO_SWEEP_NUM_SAMPLES) / (VFO_SWEEP_PIXELS_PER_STEP * 100);
 
 		sprintf(buffer, "+/-%dkHz", (span >> 1));
+#endif
 		displayPrintCore(MODE_TEXT_X_OFFSET, DISPLAY_Y_POS_HEADER, buffer, FONT_SIZE_1, TEXT_ALIGN_LEFT, false);
 	}
 

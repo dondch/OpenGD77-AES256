@@ -191,6 +191,20 @@ void uiVFOModeStopScanning(void);
 bool uiVFOModeIsScanning(void);
 bool uiVFOModeDualWatchIsScanning(void);
 bool uiVFOModeSweepScanning(bool includePaused);
+#if defined(ENABLE_FAST_SCAN)
+/* Total width of the sweep display in OpenGD77 10 Hz units, and whether it is marching
+ * across the band. The header draws both, and it cannot derive the span itself any more:
+ * a column is no longer necessarily one measurement. */
+uint32_t uiVFOModeSweepSpan(void);
+bool uiVFOModeSweepIsAutoScrolling(void);
+#endif
+#if defined(ENABLE_SPECTRUM) && defined(ENABLE_FAST_SCAN)
+/* DEV only, CPS 0xB1 -- the wide span is behind SK2, which is a button and therefore
+ * unreachable from the keypad injector. See the definition. Both flags: the modes it
+ * drives only exist under ENABLE_FAST_SCAN. */
+void uiVFOModeSweepSetModes(bool wide, bool autoScroll, uint8_t stepIndex, bool persist);
+bool uiVFOModeSweepIsWide(void);
+#endif
 void uiVFOSweepScanModePause(bool pause, bool forceDigitalOnPause);
 bool uiVFOModeFrequencyScanningIsActiveAndEnabled(uint32_t *lowFreq, uint32_t *highFreq);
 void uiChannelModeStopScanning(void);
