@@ -1123,6 +1123,42 @@ static void cpsHandleCommand(void)
 				replyLength = 8 + (n * 4);
 			}
 			return;   /* NOT break -- see above */
+		case 0xB0: // DEV: AM envelope capture. Request (10 B):
+			//   [2..5]=freq BE (10 Hz units), [6..7]=sample count BE,
+			//   [8]=rssi_ct_u override (0..7, anything else = leave 0x5A alone).
+			// Reply: [cmd, 0xB0, count BE(2), rateHz BE(2), elapsedUs BE(4)].
+			// The SAMPLES are not in this reply -- they are left in the display
+			// framebuffer and read out with the existing CPS 'R' area 6 read, which
+			// already knows how to move 40960 bytes. Read them BEFORE anything
+			// repaints the screen.
+			{
+				uint32_t freq = (com_requestbuffer[2] << 24) | (com_requestbuffer[3] << 16) |
+						(com_requestbuffer[4] << 8) | com_requestbuffer[5];
+				uint16_t nSamples = (com_requestbuffer[6] << 8) | com_requestbuffer[7];
+				uint8_t rssiCt = com_requestbuffer[8];
+				uint16_t rateHz = 0;
+				uint32_t elapsedUs = 0;
+				int n = 0;
+
+				if (trxGetBandFromFrequency(freq) != FREQUENCY_OUT_OF_BAND)
+				{
+					n = spectrumAmCapture(freq, nSamples, rssiCt, &rateHz, &elapsedUs);
+				}
+
+				usbComSendBuf[0] = com_requestbuffer[0];
+				usbComSendBuf[1] = 0xB0;
+				usbComSendBuf[2] = (uint8_t)((n >> 8) & 0xFF);
+				usbComSendBuf[3] = (uint8_t)(n & 0xFF);
+				usbComSendBuf[4] = (uint8_t)((rateHz >> 8) & 0xFF);
+				usbComSendBuf[5] = (uint8_t)(rateHz & 0xFF);
+				usbComSendBuf[6] = (uint8_t)((elapsedUs >> 24) & 0xFF);
+				usbComSendBuf[7] = (uint8_t)((elapsedUs >> 16) & 0xFF);
+				usbComSendBuf[8] = (uint8_t)((elapsedUs >> 8) & 0xFF);
+				usbComSendBuf[9] = (uint8_t)(elapsedUs & 0xFF);
+				hasToReply = true;
+				replyLength = 10;
+			}
+			return;   /* NOT break -- see above */
 		case 0xA2: // DEV: open a sweep session: [2..5]=anchor freq BE, [6]=mode.
 			//        Configures the receiver ONCE and leaves it running, so the 0xA0
 			//        sweeps that follow only move the PLL and skip the ~30 ms

@@ -24,6 +24,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include "hardware/HX8353E.h"   /* DISPLAY_SIZE_X/Y: the AM capture borrows the framebuffer */
 
 #if defined(ENABLE_SPECTRUM)
 
@@ -308,6 +309,28 @@ typedef struct
 
 int spectrumSettleProbe(uint32_t fA, uint32_t fB, uint8_t mode, uint16_t intervalUs,
 		uint8_t nSamples, uint8_t reg, spectrumSample_t *out, spectrumProbeInfo_t *info);
+
+/* ---- Stage 3: AM envelope capture ----
+ * Park on freq and record rssi_db as fast as I2C allows, straight into the display
+ * framebuffer, for long enough to LISTEN to. The host reads the samples back out with
+ * the CPS 'R' area 6 read that already exists for fbmirror.py.
+ *
+ * The framebuffer is the only buffer on this radio big enough: main RAM has ~1.8 kB of
+ * headroom above _ebss, while the framebuffer is 40960 B = ~5.8 s at ~7 kHz. The UI
+ * repaints it afterwards, so nothing is permanently disturbed -- but the host must read
+ * the samples out BEFORE anything redraws the screen.
+ *
+ * rssiCt 0..7 overrides 0x5A[11:9] rssi_ct_u for the capture and restores it after;
+ * anything else leaves it alone. Measured: f-3dB ~ 1145 / 2^rssi_ct_u Hz, so 0 is the
+ * only setting with enough bandwidth for speech.
+ *
+ * ⚠ This deliberately ignores SPECTRUM_MAX_BUSY_US -- a 250 ms cap is a quarter second
+ * of audio, which is not a listening test. The main loop is blocked for the whole
+ * capture and the caller chooses how long that is. */
+#define SPECTRUM_AM_MAX_SAMPLES  (DISPLAY_SIZE_X * DISPLAY_SIZE_Y * 2)
+
+int spectrumAmCapture(uint32_t freq, uint16_t nSamples, uint8_t rssiCt,
+		uint16_t *rateHzOut, uint32_t *elapsedUsOut);
 
 /* ---- Stage 1: sweep ----
  * nPoints readings starting at fStart, stepping by stepHz (also 10 Hz units), dwelling

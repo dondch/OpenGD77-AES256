@@ -646,6 +646,84 @@ int spectrumSettleProbe(uint32_t fA, uint32_t fB, uint8_t mode, uint16_t interva
 	return i;
 }
 
+/* ------------------------------------------------- Stage 3: AM capture ---- */
+
+/* Record the RSSI envelope long enough to listen to. See spectrum.h for why this uses
+ * the framebuffer and why it ignores the busy-time budget.
+ *
+ * The receiver is parked and NEVER retuned during the capture. That is the whole point:
+ * a retune restarts the receiver, and the restart transient (~2.4 ms of dead time plus
+ * the rssi_ct_u filter charging) is exactly what must not appear inside an envelope
+ * recording. */
+int spectrumAmCapture(uint32_t freq, uint16_t nSamples, uint8_t rssiCt,
+		uint16_t *rateHzOut, uint32_t *elapsedUsOut)
+{
+	spectrumSavedState_t saved;
+	uint8_t *buf = (uint8_t *)displayGetPrimaryScreenBuffer();
+	uint32_t t0, elapsedUs;
+	uint8_t rssi = 0, noise = 0;
+	uint16_t saved5A = 0;
+	bool ctChanged = false;
+	uint16_t i;
+
+	if (nSamples > SPECTRUM_AM_MAX_SAMPLES)
+	{
+		nSamples = SPECTRUM_AM_MAX_SAMPLES;
+	}
+
+	spectrumSessionEnd();
+	spectrumEnter(&saved, SPECTRUM_MODE_FORCE_FM);
+
+	radioSetFrequency(freq, false);
+	spectrumApplyOverrides();
+
+	/* rssi_ct_u is a power-of-two averager on rssi_db itself (measured: f-3dB ~
+	 * 1145 / 2^ct Hz). Stock 3 gives 144 Hz, which throws away everything above a
+	 * few hundred Hz of the modulation. */
+	if (rssiCt <= 7)
+	{
+		uint8_t hi = 0, lo = 0;
+
+		if (radioReadReg2byte(0x5A, &hi, &lo))
+		{
+			uint16_t v;
+
+			saved5A = ((uint16_t)hi << 8) | lo;
+			v = (uint16_t)((saved5A & ~0x0E00U) | ((uint16_t)rssiCt << 9));
+			radioWriteReg2byte(0x5A, (uint8_t)((v >> 8) & 0xFF), (uint8_t)(v & 0xFF));
+			ctChanged = true;
+		}
+	}
+
+	/* Let the receiver-restart transient finish before the first sample. */
+	t0 = spectrumCycles();
+	spectrumWaitCycles(t0, 30000U * s_cyclesPerUs);
+
+	t0 = spectrumCycles();
+	for (i = 0; i < nSamples; i++)
+	{
+		spectrumSampleReg(AT1846S_REG_RSSI, &rssi, &noise);
+		buf[i] = rssi;
+	}
+	elapsedUs = spectrumCyclesToUs(spectrumCycles() - t0);
+
+	if (ctChanged)
+	{
+		radioWriteReg2byte(0x5A, (uint8_t)((saved5A >> 8) & 0xFF), (uint8_t)(saved5A & 0xFF));
+	}
+
+	spectrumLeave(&saved);
+
+	*elapsedUsOut = elapsedUs;
+	/* 64-bit intermediate: nSamples * 1000000 overflows uint32 above 4295 samples, and
+	 * a full-length capture is 40960. It reported 2738 Hz for a genuine 7087 Hz run. */
+	*rateHzOut = (elapsedUs > 0U)
+			? (uint16_t)(((uint64_t)nSamples * 1000000ULL) / (uint64_t)elapsedUs)
+			: 0U;
+
+	return (int)nSamples;
+}
+
 /* -------------------------------------------------------- Stage 1: sweep -- */
 
 int spectrumSweep(uint32_t fStart, uint32_t stepHz, uint16_t nPoints, uint16_t dwellUs,

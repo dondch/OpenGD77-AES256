@@ -64,7 +64,21 @@ const frequencyHardwareBand_t RADIO_HARDWARE_FREQUENCY_BANDS[RADIO_BANDS_TOTAL_N
 													{
 														.calIQTableMinFreq = 13600000,
 														.calPowerTableMinFreq = 13500000,
+#if defined(ENABLE_SPECTRUM)
+														/* DEV ONLY -- gate-2 experiment: how low does this radio
+														 * ACTUALLY tune? Airband voice is 118-137 MHz; the chip is
+														 * specified to 134 and the front end built for 136-174, and
+														 * nobody ever derived the stock 127.0 from a datasheet.
+														 * Lowering this only makes trxGetBandFromFrequency() accept
+														 * the frequency -- it says nothing about whether the PLL
+														 * locks there, which is the thing being measured.
+														 * Calibration below 136 MHz extrapolates (index is CLAMPed
+														 * to 0, result to 0..4095) so it cannot crash, but every
+														 * level it produces down there is meaningless. */
+														.minFreq=10500000,
+#else
 														.minFreq=12700000,
+#endif
 														.maxFreq=17800000
 													},// VHF
 #if !(defined(PLATFORM_MD9600) || defined(PLATFORM_MD380))
