@@ -69,6 +69,8 @@ static int           s_rxBurstEnc DMR_AES_CCM;   /* 1 if the current burst is an
 static int           s_rxIvReady DMR_AES_CCM;    /* 0 = (re)generate IV from s_rx.mi on the next burst */
 static int           s_rxLastSeq DMR_AES_CCM;    /* previous burst's seq, to detect superframe wrap */
 static uint32_t      s_rxNextMi DMR_AES_CCM;     /* LFSR-advanced MI for the next superframe */
+static int           s_rxPredReal DMR_AES_CCM;   /* 1 = s_rxNextMi descends from a real MI (a PI seed or a
+                                                  * crc-valid late entry), not from the zeroed boot state */
 static uint32_t      s_rxInitMi DMR_AES_CCM;     /* the current call's CONSTANT initial MI (from its PI) */
 static uint8_t       s_rxFrag[7][3] DMR_AES_CCM; /* Late-Entry MI fragment nibbles read from the AMBE bits */
 static uint8_t       s_rxKeyId DMR_AES_CCM;      /* keyId of the last successful seed (late-entry bootstrap fallback) */
@@ -248,6 +250,7 @@ void dmrAesInit(void)
     s_rxIvReady = 0;
     s_rxLastSeq = -1;
     s_rxNextMi = 0;
+    s_rxPredReal = 0;
     s_rxInitMi = 0;
     memset(s_rxFrag, 0, sizeof s_rxFrag);
     s_rxKeyId = 0;
@@ -521,6 +524,7 @@ void dmrAesRxBurst(int seq)
          * s_rx.mi. Works whether we joined at burst A or mid-superframe (the absolute
          * seq-based offset below covers the partial superframe). */
         dmr_lfsr128d(s_rx.mi, s_rx.iv, &s_rxNextMi);
+        s_rxPredReal = 1;
         s_rxIvReady = 1;
 #ifdef DMR_AES_DIAG_RX
         rxd_log(5, 0, seq, s_rxLastSeq, s_rx.mi, s_rxInitMi);   /* IVGEN: first IV of this (re)seed */
@@ -557,11 +561,17 @@ void dmrAesRxBurst(int seq)
 #endif
         if (!s_rxActive)
         {
-            /* BOOTSTRAP a rapid call: only a DIVERGING late entry marks a genuinely new call,
-             * not the previous call's residual stream the chip may still be feeding. Reuse the
-             * last call's keyId (rapid calls share the channel/key); fall back to any loaded key. */
+            /* BOOTSTRAP a rapid call only when a crc-valid late entry CONFIRMS the prediction:
+             * it equals the LFSR self-advance of an earlier real MI. A single crc-valid late
+             * entry is not enough: on a CLEAR call these bits are ordinary AMBE voice data and
+             * pass Golay+CRC4 by chance on ~1% of superframes, which engaged decryption on
+             * unencrypted voice (issue #2); a chance match of the prediction is ~2^-36. A new
+             * call's first valid late entry diverges and becomes the prediction; the next valid
+             * one activates. Failed decodes in between keep self-advancing the prediction, so
+             * a noisy call still locks. Reuse the last call's keyId (rapid calls share the
+             * channel/key); fall back to any loaded key. */
             int act = 0;
-            if (diverge)
+            if (leok && !diverge && s_rxPredReal)
             {
                 dmr_pi_t p;
                 p.alg_id = DMR_ALG_AES256; p.mfid = DMR_MFID_DMRA;
@@ -572,6 +582,7 @@ void dmrAesRxBurst(int seq)
             }
             if (!act) { s_rx.mi = mi; }   /* rx_init already set s_rx.mi = leMi when act; else keep predicting */
             dmr_lfsr128d(s_rx.mi, s_rx.iv, &s_rxNextMi);  /* IV for the entering superframe (used once active) */
+            s_rxPredReal = s_rxPredReal || leok;   /* when leok, s_rx.mi == leMi */
             s_rxIvReady = 1;
 #ifdef DMR_AES_DIAG_RX
             rxd_log(6, (uint8_t)((leok ? 0x01 : 0) | (diverge ? 0x08 : 0) | (act ? 0x10 : 0)),
@@ -588,6 +599,7 @@ void dmrAesRxBurst(int seq)
             if (adopt) { s_rxInitMi = leMi; }
             s_rx.mi = adopt ? leMi : s_rxNextMi;
             dmr_lfsr128d(s_rx.mi, s_rx.iv, &s_rxNextMi);
+            s_rxPredReal = 1;
 #ifdef DMR_AES_DIAG_RX
             rxd_log(adopt ? 7 : 2, (uint8_t)((leok ? 0x01 : 0) | (diverge ? 0x08 : 0)), seq, s_rxLastSeq, s_rx.mi, leMi);
 #endif
@@ -627,7 +639,17 @@ void dmrAesRxCodecFrame(uint16_t *b49, int idxInBurst)
     if (!s_rxActive || !s_rxBurstEnc) { return; }
     dmr_aes_voice_frame(&s_rx, b49, s_rxBurstBase + (size_t)idxInBurst * 56);
 }
-void dmrAesRxEnd(void) { s_rxActive = 0; s_rxBurstEnc = 0; }
+/* Call boundary (CRC-valid Terminator, or the next call's Voice LC Header). Also drop the
+ * late-entry fragments and the superframe position: otherwise the next call's first burst
+ * reads as a superframe wrap and decodes the PREVIOUS call's last late entry, which matches
+ * the prediction and would engage decryption on whatever follows, clear voice included. */
+void dmrAesRxEnd(void)
+{
+    s_rxActive = 0;
+    s_rxBurstEnc = 0;
+    s_rxLastSeq = -1;
+    memset(s_rxFrag, 0, sizeof s_rxFrag);
+}
 
 /* ---- TX (mirror of RX: encrypt the 49 AMBE params at the codec layer) ---- */
 void dmrAesTxStart(uint8_t keyId, uint32_t miSeed)
