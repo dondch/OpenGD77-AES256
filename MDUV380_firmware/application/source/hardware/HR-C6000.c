@@ -1799,6 +1799,11 @@ void hrc6000TimeslotInterruptHandler(void)
 				// behave exactly like the proven clear-channel path (Voice-LC headers + data).
 				if (dmrDataTxActive()) { aesTxKeyId = 0; }
 #endif
+				// A hotspot relays network voice straight to the air: it never passes through the
+				// codec, so it cannot be encrypted. Starting an encrypted call here would still send
+				// the AES PI headers, and every radio holding that key would then "decrypt" the
+				// clear relayed voice into noise (issue #2).
+				if (settingsUsbMode == USB_MODE_HOTSPOT) { aesTxKeyId = 0; }
 				if (aesTxKeyId != 0)
 				{
 					dmrAesTxStart(aesTxKeyId, hrc6000AesRngSeed()); // begin encrypted call (fresh MI)
