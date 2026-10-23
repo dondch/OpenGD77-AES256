@@ -742,16 +742,18 @@ static volatile uint32_t s_diagBlkOk  DMR_AES_CCM; /* type-7 rate-1/2,   CRC OK 
 static volatile uint32_t s_diagBlkBad DMR_AES_CCM; /* type-7 rate-1/2,   CRC bad   */
 static volatile uint32_t s_diagPdu    DMR_AES_CCM; /* completed PDUs handed to main loop */
 static volatile uint32_t s_diagMsg    DMR_AES_CCM; /* successfully decrypted + stored    */
-/* snapshot of the last reassembled (encrypted) PDU, for offline inspection over USB. 88 bytes
- * covers any 4-block rate-3/4 PDU (64) or 7-block rate-1/2 PDU (84); the 32 bytes it gave up
+/* snapshot of the last reassembled (encrypted) PDU, for offline inspection over USB. 72 bytes
+ * covers any 4-block rate-3/4 PDU (64) or 6-block rate-1/2 PDU (72); the 48 bytes it gave up
  * went to the burst trace below, CCM being full to the last word in the DMR_DATA build. */
-static uint8_t  s_diagLastPdu[88] DMR_AES_CCM;
+static uint8_t  s_diagLastPdu[72] DMR_AES_CCM;
 /* Per-burst trace: the last SMS_TRACE_N bursts handed to dmrSmsRxBurst, newest last by write
- * index. Per entry: [type, state, payload byte 0, payload byte 1], state = count of blocks
- * held BEFORE this burst (bits 0..5) | haveHeader << 6 | pduReady << 7. Appended to the 0x93
- * reply. Built to see why a PDU that passes every chip CRC still fails to complete. */
-#define SMS_TRACE_N 8
-static uint8_t  s_trace[SMS_TRACE_N][4] DMR_AES_CCM;
+ * index. Per entry: [type, state, payload bytes 0..3], state = count of blocks held BEFORE
+ * this burst (bits 0..5) | haveHeader << 6 | pduReady << 7. Appended to the 0x93 reply.
+ * Built to see why a PDU that passes every chip CRC still fails to complete: whether every
+ * burst of a copy arrives, in order, with the bytes DSD-FME shows for it. */
+#define SMS_TRACE_N   8
+#define SMS_TRACE_LEN 6
+static uint8_t  s_trace[SMS_TRACE_N][SMS_TRACE_LEN] DMR_AES_CCM;
 static uint8_t  s_traceW DMR_AES_CCM;
 static volatile uint16_t s_diagLastPduLen DMR_AES_CCM;
 static volatile uint8_t  s_diagLastKeyId DMR_AES_CCM;
@@ -810,13 +812,13 @@ void dmrSmsRxReset(void)
 	s_rxConfirmed = 0; s_rxBlkLen = BLK_R12_LEN;
 }
 
-/* Copy the trace out: [writeIndex, SMS_TRACE_N x 4 bytes]. Returns bytes written. */
+/* Copy the trace out: [writeIndex, SMS_TRACE_N x SMS_TRACE_LEN bytes]. Returns bytes written. */
 int dmrSmsRxTrace(uint8_t *out, int maxlen)
 {
-	int n = 1 + (SMS_TRACE_N * 4);
+	int n = 1 + (SMS_TRACE_N * SMS_TRACE_LEN);
 	if (maxlen < n) { return 0; }
 	out[0] = s_traceW;
-	memcpy(out + 1, s_trace, (size_t)(SMS_TRACE_N * 4));
+	memcpy(out + 1, s_trace, (size_t)(SMS_TRACE_N * SMS_TRACE_LEN));
 	return n;
 }
 
@@ -826,8 +828,7 @@ void dmrSmsRxBurst(int rxDataType, const uint8_t *p)
 		uint8_t *t = s_trace[s_traceW % SMS_TRACE_N];
 		t[0] = (uint8_t)rxDataType;
 		t[1] = (uint8_t)((s_rxCount & 0x3F) | (s_rxHaveHeader ? 0x40 : 0) | (s_rxReady ? 0x80 : 0));
-		t[2] = p[0];
-		t[3] = p[1];
+		t[2] = p[0]; t[3] = p[1]; t[4] = p[2]; t[5] = p[3];
 		s_traceW++;
 	}
 

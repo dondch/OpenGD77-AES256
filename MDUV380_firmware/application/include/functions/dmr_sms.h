@@ -81,8 +81,8 @@ void dmrSmsRxDiagReset(void);
  * out = [pduLen_hi, pduLen_lo, keyId, expBlocks, peer(4 LE), rawPdu...]. Returns length. */
 int  dmrSmsRxLastPdu(uint8_t *out, int maxlen);
 /* Per-burst trace of the last 8 bursts handed to dmrSmsRxBurst(): out = [writeIndex, then
- * 8 x (type, state, payload[0], payload[1])], state = blocks held before the burst (bits
- * 0..5) | haveHeader << 6 | pduReady << 7. Returns bytes written (33), 0 if maxlen is short. */
+ * 8 x (type, state, payload[0..3])], state = blocks held before the burst (bits 0..5) |
+ * haveHeader << 6 | pduReady << 7. Returns bytes written (49), 0 if maxlen is short. */
 int  dmrSmsRxTrace(uint8_t *out, int maxlen);
 
 /* ---- RX (main-loop context) -------------------------------------------- *
