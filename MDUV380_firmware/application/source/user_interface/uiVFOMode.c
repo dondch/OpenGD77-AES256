@@ -3021,6 +3021,20 @@ static void vfoSweepUpdateSamples(int offset, bool forceRedraw, int bandwidthRes
 	{
 		memset(vfoSweepHold, 0x00, sizeof(vfoSweepHold));
 	}
+
+	// SHIFT_DISTANCE is the UP/DOWN frequency step expressed in NARROW columns. A wide
+	// column covers VFO_SWEEP_WIDE_SUBSAMPLES times more, so the same key step is a
+	// fraction of a column there: shifting the trace by the narrow distance would move it
+	// ten times too far and label every bin with a frequency it was not measured at.
+	// Start the trace afresh instead, from the new centre.
+	if (vfoSweepWide && (offset != 0))
+	{
+		memset(vfoSweepSamples, 0x00, sizeof(vfoSweepSamples));
+		memset(vfoSweepAvg, 0x00, sizeof(vfoSweepAvg));
+		uiDataGlobal.Scan.sweepSampleIndex = 0;
+		offset = 0;
+		forceRedraw = true;
+	}
 #endif
 
 	if (offset != 0)
@@ -3088,7 +3102,20 @@ static void vfoSweepUpdateSamples(int offset, bool forceRedraw, int bandwidthRes
 
 	if (uiDataGlobal.Scan.state == SCAN_STATE_SCANNING)
 	{
+#if defined(ENABLE_FAST_SCAN)
+		// The column's measurements start over: the sub-sample position and the running
+		// peak/sum belong to the column the sweep was in before the shift or rescale.
+		vfoSweepSubIndex = 0;
+		vfoSweepColumnPeak = 0;
+		vfoSweepColumnSum = 0;
+		// Same arithmetic as sweepScanStep(), through the one helper, so the wide span
+		// tunes its first measurement where the next column really starts rather than at
+		// the narrow-span frequency this line used to compute.
+		uiDataGlobal.Scan.scanSweepCurrentFreq = vfoSweepFreqForOrdinal(
+				(int32_t)uiDataGlobal.Scan.sweepSampleIndex * vfoSweepSubSamples());
+#else
 		uiDataGlobal.Scan.scanSweepCurrentFreq = currentChannelData->rxFreq + (VFO_SWEEP_SCAN_RANGE_SAMPLE_STEP_TABLE[uiDataGlobal.Scan.sweepStepSizeIndex] * (uiDataGlobal.Scan.sweepSampleIndex - (VFO_SWEEP_NUM_SAMPLES / 2))) / VFO_SWEEP_PIXELS_PER_STEP;
+#endif
 		trxSetFrequency(uiDataGlobal.Scan.scanSweepCurrentFreq, currentChannelData->txFreq, (((currentChannelData->chMode == RADIO_MODE_DIGITAL) && codeplugChannelGetFlag(currentChannelData, CHANNEL_FLAG_FORCE_DMO)) ? DMR_MODE_DMO : DMR_MODE_AUTO));
 		ticksTimerStart(&uiDataGlobal.Scan.timer, VFO_SWEEP_STEP_TIME_ACTIVE);
 	}

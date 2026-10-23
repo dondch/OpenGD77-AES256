@@ -23,5 +23,6 @@ run test_rx_bootstrap_diag -DENABLE_AES -DDMR_AES_DIAG_RX -Itests/stubs -Iapplic
 run test_rx_stale_pi  -DENABLE_AES -Itests/stubs -Iapplication/include tests/test_rx_stale_pi.c $HOOK $CRYPTO
 run test_tx_state     -DENABLE_AES -Itests/stubs -Iapplication/include tests/test_tx_state.c $HOOK $CRYPTO
 run test_sms_rx       -DENABLE_AES -DENABLE_DMR_DATA -Itests/stubs -Iapplication/include tests/test_sms_rx.c application/source/functions/dmr_sms.c $HOOK $CRYPTO
+run test_scanreject   -DENABLE_FAST_SCAN -Iapplication/include tests/test_scanreject.c application/source/functions/scanreject.c
 echo "$fails failing test program(s)"
 exit $fails

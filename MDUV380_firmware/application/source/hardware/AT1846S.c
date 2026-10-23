@@ -261,6 +261,19 @@ void AT1846sPostInit(void)
 
 void AT1846sSetMode(int mode)
 {
+#if defined(ENABLE_FAST_SCAN)
+	// The mode tables below rewrite registers the bandwidth tables also set: the DMR table
+	// (used for RADIO_MODE_DIGITAL and RADIO_MODE_NONE alike) programs 0x15 (IF tuning),
+	// 0x32 (AGC target) and 0x48 (noise squelch threshold) to their 12.5 kHz values. After
+	// that the chip no longer holds the bandwidth AT1846sSetBandWidth() last applied, so
+	// its cache must not let the next call skip the write. The case that bites: a 25 kHz
+	// FM channel, a CPS session (uiCPS -> RADIO_MODE_NONE), back to the channel -- the
+	// cache still says 25 kHz, the chip is tuned for 12.5, and wide FM stays degraded
+	// until the next bandwidth change or reboot. Costs one table write per mode change,
+	// which is exactly what stock does.
+	bandwidthCached[currentRadioDeviceId] = false;
+#endif
+
 	if (mode == RADIO_MODE_ANALOG)
 	{
 		I2C_AT1846S_send_Settings(AT1846FMSettings, sizeof(AT1846FMSettings) / AT1846_BYTES_PER_COMMAND);

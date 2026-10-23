@@ -660,7 +660,16 @@ int settingsGetScanStepTimeMilliseconds(void)
 #if defined(ENABLE_FAST_SCAN)
 	if (nonVolatileSettings.scanStepTime > SCAN_STEP_TIME_SLOWEST_INDEX)
 	{
-		return SCAN_STEP_FAST_MS[nonVolatileSettings.scanStepTime - (SCAN_STEP_TIME_SLOWEST_INDEX + 1)];
+		uint8_t fastIndex = (uint8_t)(nonVolatileSettings.scanStepTime - (SCAN_STEP_TIME_SLOWEST_INDEX + 1));
+
+		// The stored byte comes from flash and from CHIRP: a value above 19 (older or foreign
+		// image, bad write) would index past SCAN_STEP_FAST_MS. Treat it as the 30 ms default,
+		// the same value settingsGetAdjacentScanStepTime() snaps an unknown entry to.
+		if (fastIndex >= SCAN_STEP_TIME_NUM_FAST)
+		{
+			return TIMESLOT_DURATION;
+		}
+		return SCAN_STEP_FAST_MS[fastIndex];
 	}
 #endif
 	return TIMESLOT_DURATION + (nonVolatileSettings.scanStepTime * TIMESLOT_DURATION);
