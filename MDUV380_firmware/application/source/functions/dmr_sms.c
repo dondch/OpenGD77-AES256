@@ -734,6 +734,21 @@ static uint32_t s_lastRxPeer DMR_AES_CCM;
 static uint16_t s_lastRxIpId DMR_AES_CCM;
 static uint8_t  s_lastRxTmsSeq DMR_AES_CCM;
 static uint8_t  s_lastRxValid DMR_AES_CCM;
+/* Retransmission repair. The HR-C6000's CRC flag on a rate-3/4 block does not cover the
+ * per-block CRC-9, so a block with bit errors reaches us as "valid" and poisons the packet
+ * CRC32; the bench r3 replay (five copies of one stock private SMS) completed nothing although
+ * two of the copies between them carried every block intact. When a copy ends (Terminator)
+ * without completing, its blocks are kept in s_rxPdu (free while no PDU waits for the main
+ * loop); when the next copy of the same packet (same source, destination, header type, block
+ * count and rate) fails too, the block-wise combinations of the two are tried and the CRC32
+ * decides. The CRC-9 itself could not be reproduced from the captures. Main RAM: zero at boot. */
+static uint8_t  s_altCount;        /* blocks kept from the last failed copy (0 = none) */
+static uint8_t  s_altBlkLen;
+static uint8_t  s_altHdr;          /* identity of the kept copy: DPF | group bit ...        */
+static uint8_t  s_altEnc;          /* ... ENC header seen ...                               */
+static uint32_t s_altSrc;          /* ... source ...                                        */
+static uint32_t s_altDst;          /* ... and destination of its data header               */
+#define ALT_MAX_DIFF_BLOCKS  4     /* at most 2^4 - 2 = 14 CRC32 passes in the ISR          */
 /* diagnostic counters (visible on the Messages home screen) to localise RX failures */
 static volatile uint32_t s_diagData   DMR_AES_CCM; /* ALL data-sync-class bursts the chip delivered */
 static volatile uint32_t s_diagHdrOk  DMR_AES_CCM; /* type-6 data-header, CRC OK   */
@@ -806,10 +821,68 @@ void dmrSmsRxDiag(uint32_t out[7])
 	out[5] = s_diagPdu;   out[6] = s_diagMsg;
 }
 
-void dmrSmsRxReset(void)
+static void rxAccumReset(void)
 {
 	s_rxHaveHeader = 0; s_rxHaveEnc = 0; s_rxExpBlocks = 0; s_rxCount = 0;
 	s_rxConfirmed = 0; s_rxBlkLen = BLK_R12_LEN;
+}
+
+/* Terminator / call end: keep an incomplete copy's blocks for a merge with its retransmission
+ * (see s_altCount), then drop the accumulator. */
+void dmrSmsRxReset(void)
+{
+	int total = s_rxCount * s_rxBlkLen;
+	if (s_rxHaveHeader && (s_rxCount >= 2) && !s_rxReady && (total <= (int)sizeof s_rxPdu))
+	{
+		for (int i = 0; i < s_rxCount; i++)
+		{
+			memcpy(s_rxPdu + i * s_rxBlkLen, s_rxBlocks[i], s_rxBlkLen);
+		}
+		s_altCount = s_rxCount;
+		s_altBlkLen = s_rxBlkLen;
+		s_altHdr = (uint8_t)((s_rxConfirmed ? DPF_CONFIRMED : DPF_UNCONFIRMED) | (s_rxGroup ? 0x80 : 0));
+		s_altEnc = s_rxHaveEnc;
+		s_altSrc = s_rxSrc;
+		s_altDst = s_rxDst;
+	}
+	rxAccumReset();
+}
+
+/* Byte i of a candidate PDU: from the block just received (s_rxBlocks) when bit i/blkLen of
+ * newMask is set, else from the kept copy in s_rxPdu. */
+static inline uint8_t candByte(int i, uint32_t newMask, int blkLen)
+{
+	int b = i / blkLen;
+	return ((newMask >> b) & 1) ? s_rxBlocks[b][i - b * blkLen] : s_rxPdu[i];
+}
+
+/* crc32_dmr() over a candidate PDU assembled by candByte(), without copying it: the kept copy
+ * stays in s_rxPdu until a combination verifies. Returns 1 when the packet CRC32 matches. */
+static int candCrcOk(int total, uint32_t newMask, int blkLen)
+{
+	uint32_t crc = 0;
+	int nbits = total * 8 - 32;
+	int bitno = 0;
+	for (int i = 0; i + 1 < total; i += 2)
+	{
+		for (int pass = 0; pass < 2; pass++)
+		{
+			uint8_t byte = candByte((pass == 0) ? (i + 1) : i, newMask, blkLen);
+			for (int k = 7; k >= 0; k--)
+			{
+				if (bitno >= nbits) { goto done; }
+				int bit = (byte >> k) & 1;
+				if (((crc >> 31) & 1) ^ bit) { crc = (crc << 1) ^ 0x04C11DB7; }
+				else                         { crc = (crc << 1); }
+				bitno++;
+			}
+		}
+	}
+done:
+	crc = ((crc & 0xFF) << 24) | ((crc & 0xFF00) << 8) | ((crc >> 8) & 0xFF00) | ((crc >> 24) & 0xFF);
+	uint32_t want = ((uint32_t)candByte(total - 4, newMask, blkLen) << 24) | ((uint32_t)candByte(total - 3, newMask, blkLen) << 16) |
+			((uint32_t)candByte(total - 2, newMask, blkLen) << 8) | (uint32_t)candByte(total - 1, newMask, blkLen);
+	return crc == want;
 }
 
 /* Copy the trace out: [writeIndex, SMS_TRACE_N x SMS_TRACE_LEN bytes]. Returns bytes written. */
@@ -861,6 +934,12 @@ void dmrSmsRxBurst(int rxDataType, const uint8_t *p)
 			s_rxCount = 0;
 			s_rxHaveHeader = 1;
 			s_rxHaveEnc = 0;
+			/* a different packet: the kept copy cannot be a retransmission of this one */
+			if (s_altCount && ((s_rxSrc != s_altSrc) || (s_rxDst != s_altDst) ||
+					((uint8_t)((s_rxConfirmed ? DPF_CONFIRMED : DPF_UNCONFIRMED) | (s_rxGroup ? 0x80 : 0)) != s_altHdr)))
+			{
+				s_altCount = 0;
+			}
 		}
 		return;
 	}
@@ -893,17 +972,36 @@ void dmrSmsRxBurst(int rxDataType, const uint8_t *p)
 		{
 			int blkLen = s_rxBlkLen;
 			int total = s_rxCount * blkLen;
+			uint32_t mask = 0xFFFFFFFFu;   /* which blocks of the accepted PDU come from this copy */
 			if (total > (int)sizeof s_rxPdu) { return; }
-			for (int i = 0; i < s_rxCount; i++)
+			if (!candCrcOk(total, mask, blkLen))
 			{
-				memcpy(s_rxPdu + i * blkLen, s_rxBlocks[i], (size_t)blkLen);
+				/* Not a complete/clean PDU yet. If a copy of this packet was kept (same
+				 * identity, now the same length) and this copy differs from it in a few
+				 * blocks, one of the other combinations of the two may be the packet;
+				 * the all-kept combination already failed when it was kept. */
+				uint32_t diff = 0;
+				int ndiff = 0;
+				if ((s_altCount != s_rxCount) || (s_altBlkLen != blkLen) || (s_altEnc != s_rxHaveEnc) ||
+						(s_altSrc != s_rxSrc) || (s_altDst != s_rxDst) ||
+						(s_altHdr != (uint8_t)((s_rxConfirmed ? DPF_CONFIRMED : DPF_UNCONFIRMED) | (s_rxGroup ? 0x80 : 0))))
+				{
+					return;   /* keep accumulating */
+				}
+				for (int b = 0; b < s_rxCount; b++)
+				{
+					if (memcmp(s_rxBlocks[b], s_rxPdu + b * blkLen, (size_t)blkLen) != 0) { diff |= 1u << b; ndiff++; }
+				}
+				if ((ndiff == 0) || (ndiff > ALT_MAX_DIFF_BLOCKS)) { return; }
+				mask = 0;
+				for (uint32_t sub = (diff - 1) & diff; sub != 0; sub = (sub - 1) & diff)
+				{
+					if (candCrcOk(total, sub, blkLen)) { mask = sub; break; }
+				}
+				if (mask == 0) { return; }
 			}
-			uint32_t want = ((uint32_t)s_rxPdu[total - 4] << 24) | ((uint32_t)s_rxPdu[total - 3] << 16) |
-					((uint32_t)s_rxPdu[total - 2] << 8) | (uint32_t)s_rxPdu[total - 1];
-			if (crc32_dmr(s_rxPdu, total) != want)
-			{
-				return;   /* not a complete/clean PDU yet — keep accumulating */
-			}
+			for (int i = 0; i < total; i++) { s_rxPdu[i] = candByte(i, mask, blkLen); }
+			s_altCount = 0;
 			s_rxPduLen = (uint16_t)total;
 			s_rxPeer = s_rxSrc;
 			s_rxPeerDst = s_rxDst;
@@ -919,7 +1017,7 @@ void dmrSmsRxBurst(int rxDataType, const uint8_t *p)
 			s_diagLastExp = s_rxExpBlocks;
 			s_diagLastPeer = s_rxSrc;
 			for (int i = 0; i < total && i < (int)sizeof s_diagLastPdu; i++) { s_diagLastPdu[i] = s_rxPdu[i]; }
-			dmrSmsRxReset();
+			rxAccumReset();
 		}
 	}
 }
@@ -1020,7 +1118,8 @@ static void runtimeReset(void)
 	s_diagPdu = s_diagMsg = 0;
 	s_rxReady = 0;                   /* don't process stray garbage as a PDU */
 	s_lastRxValid = 0;               /* no "previous message" to de-duplicate against */
-	dmrSmsRxReset();                 /* clear the burst accumulator */
+	s_altCount = 0;                  /* no kept copy to merge with (CCM is not zeroed at boot) */
+	rxAccumReset();                  /* clear the burst accumulator */
 }
 
 #endif /* ENABLE_DMR_DATA && ENABLE_AES */
