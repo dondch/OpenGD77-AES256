@@ -292,20 +292,70 @@ static const uint8_t RECON_BLK[4][16] = {
     { 0x9C,0x04,0x0D,0x00,0x0A,0x00,0x48,0x00,0x65,0x00,0x6C,0x00,0x6C,0x00,0x6F,0x00 },
     { 0,0,0,0,0,0,0,0,0,0,0,0,0x63,0x53,0x4E,0x5D } };
 
-static void playReconPrivateHello(uint8_t ns)
+/* One copy of the recon "Hello" as the chip delivers it: header with N(S) ns from source src,
+ * four rate-3/4 blocks; payload byte badByte of block badBlock (if badBlock >= 0) XORed with
+ * badXor, the way the r3 bench replay showed bit errors that pass the chip's CRC flag
+ * (block 1: 0x0C -> 0x1C; block 3 differed too). Ends with the Terminator and a main-loop tick. */
+static void playReconCopy(uint8_t ns, uint32_t src, int badBlock, int badByte, uint8_t badXor)
 {
     uint8_t hdr[12];
     memcpy(hdr, RECON_HDR, 12);
+    hdr[5] = (uint8_t)(src >> 16); hdr[6] = (uint8_t)(src >> 8); hdr[7] = (uint8_t)src;
     hdr[9] = (uint8_t)((hdr[9] & 0x8F) | ((ns & 0x07) << 4));   /* S | N(S) | FSN */
     dmrSmsRxBurst(6, hdr);
     for (int b = 0; b < 4; b++)
     {
         uint8_t raw[18] = { (uint8_t)(b << 1), 0x5A };   /* stand-in DBSN/CRC-9 field */
         memcpy(raw + 2, RECON_BLK[b], 16);
+        if (b == badBlock) { raw[2 + badByte] ^= badXor; }
         dmrSmsRxBurst(8, raw);
     }
     dmrSmsRxReset();
     dmrSmsRxTick();
+}
+
+static void playReconPrivateHello(uint8_t ns)
+{
+    playReconCopy(ns, 12343, -1, 0, 0);
+}
+
+/* r3 on the bench: a stock radio that gets no ACK sends the whole PDU again, and the HR-C6000
+ * passes rate-3/4 blocks with bit errors as CRC-valid (its flag does not cover the per-block
+ * CRC-9), so no single copy had a valid CRC32 although two copies between them carried every
+ * block intact. The receiver keeps the last failed copy and, when the next copy of the same
+ * packet fails too, tries the block-wise combinations of the two; the CRC32 is the arbiter. */
+static void testStockRetransmitBlockMerge(void)
+{
+    fresh();
+    trxDMRID = 12342;
+    playReconCopy(3, 12343, 1, 0, 0x10);                       /* block 1: 0x0C -> 0x1C */
+    check(dmrSmsCount(0) == 0 && notifications == 0, "a copy with a bit error in block 1 does not decode");
+    playReconCopy(3, 12343, 3, 2, 0x80);                       /* block 3: a padding byte flipped */
+    check(dmrSmsCount(0) == 1 && inboxHas("Hello") && notifications == 1,
+          "two retransmissions with errors in different blocks merge into the message, shown once");
+    playReconCopy(3, 12343, 2, 5, 0x01);                       /* a third damaged copy of the same PDU */
+    check(dmrSmsCount(0) == 1 && notifications == 1, "a later damaged copy of the same packet adds nothing");
+
+    fresh();
+    trxDMRID = 12342;
+    playReconCopy(3, 12343, 1, 0, 0x10);
+    playReconCopy(3, 12343, 1, 0, 0x10);
+    check(dmrSmsCount(0) == 0 && notifications == 0, "the same error in both copies cannot be repaired");
+    playReconCopy(3, 12343, 1, 3, 0x40);
+    check(dmrSmsCount(0) == 0 && notifications == 0, "a different error in the same block cannot be repaired either");
+    playReconCopy(4, 12343, -1, 0, 0);
+    check(dmrSmsCount(0) == 1 && inboxHas("Hello") && notifications == 1, "a clean copy after the damaged ones still decodes once");
+
+    fresh();
+    trxDMRID = 12342;
+    playReconCopy(3, 12343, 1, 0, 0x10);
+    playReconCopy(3, 12399, 3, 2, 0x80);                       /* another sender's damaged packet */
+    check(dmrSmsCount(0) == 0 && notifications == 0, "blocks from a different sender's packet are never merged");
+    playReconCopy(3, 12343, 3, 2, 0x80);
+    check(dmrSmsCount(0) == 0 && notifications == 0, "the other sender's copy replaced the kept one; no merge with the first");
+    playReconCopy(3, 12343, 1, 0, 0x10);
+    check(dmrSmsCount(0) == 1 && inboxHas("Hello") && notifications == 1, "the next copy of the right packet merges with the kept one");
+    trxDMRID = 2345678;
 }
 
 static void testStockReconPrivateHello(void)
@@ -396,6 +446,7 @@ int main(void)
     testConfirmedPrivateRate34EncryptedSms();
     testConfirmedPrivateRate34ClearSms();
     testStockReconPrivateHello();
+    testStockRetransmitBlockMerge();
     testPrivateSmsToAnotherRadioIsNotOurs();
     testRetransmissionIsNotASecondMessage();
     testEncHeaderWithGroupBit();

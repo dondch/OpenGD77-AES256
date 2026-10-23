@@ -71,7 +71,8 @@ def main():
     leOk, leFail = struct.unpack_from("<2H", data, 20)
     lcReads, piValid, burstCalls = struct.unpack_from("<3H", data, 24)
     leInt = struct.unpack_from("<H", data, 30)[0] if len(data) >= 32 else 0
-    body = data[32:32 + ring * rec]
+    hdr = data[3] or 32                        # header length when the firmware states it (0 = the 32-byte layout)
+    body = data[hdr:hdr + ring * rec]
 
     print(f"port {port}  ring={ring} rec={rec} writeIdx={w}")
     print(f"counts: PI={cnt[0]} WRAP={cnt[1]} LCRESET={cnt[2]} RXEND={cnt[3]} IVGEN={cnt[4]} "
