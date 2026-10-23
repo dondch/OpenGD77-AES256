@@ -1801,7 +1801,7 @@ static void cpsHandleCommand(void)
 				}
 				usbComSendBuf[3 + n++] = (uint8_t)(dmrDataTxActive() ? 1 : 0);
 				// Appended (older hosts read the fixed 29 bytes above and ignore the rest):
-				// the per-burst trace, [writeIndex, 8 x (type, state, b0, b1)].
+				// the per-burst trace, [writeIndex, 8 x (type, state, b0..b3)].
 				n += dmrSmsRxTrace((uint8_t *)&usbComSendBuf[3 + n], COM_BUFFER_SIZE - (3 + n));
 				usbComSendBuf[0] = com_requestbuffer[0];
 				usbComSendBuf[1] = (uint8_t)((n >> 8) & 0xFF);
