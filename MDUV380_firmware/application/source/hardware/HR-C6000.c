@@ -2143,6 +2143,18 @@ void hrc6000TimeslotInterruptHandler(void)
 		{
 			HRC6000InitDigitalDmrRx();
 			HRC6000ClearActiveDMRID();
+#ifdef ENABLE_AES
+			// RX ended by silence: END_TICK_TIMEOUT timeslots (13 x 30 ms) without a CRC-valid
+			// burst. This is the path the chip takes when a carrier simply drops mid-call, and
+			// it does NOT go through hrc6000InitDigitalState(). The encrypted stream has ended
+			// with the carrier; otherwise a call that lost its Terminator (and whose successor
+			// has no Voice LC Header) keeps decrypting into the next, clear, call (bench: a
+			// 0.5 s gap, 18-36 clear frames decrypted).
+#ifdef DMR_AES_DIAG_RX
+			dmrAesDiagRxMark(9); // IDLE: RX end-tick timeout
+#endif
+			dmrAesRxEnd();
+#endif
 			audioAmpDisable(AUDIO_AMP_CHANNEL_RF);
 			if ((voicePromptsIsPlaying() == false) && (soundMelodyIsPlaying() == false))
 			{
@@ -2650,6 +2662,12 @@ static void hrc6000Tick(void)
 
 			if (hrc.interruptTimeout == INTERRUPT_TIMEOUT)
 			{
+#if defined(ENABLE_AES) && defined(DMR_AES_DIAG_RX)
+				// The DMR subsystem stopped interrupting for INTERRUPT_TIMEOUT ms. The AES stream
+				// is ended by hrc6000InitDigitalState() inside HRC6000InitDigital(); mark it here
+				// first so the ring records whether decryption was still active.
+				dmrAesDiagRxMark(9); // IDLE: interrupt timeout
+#endif
 				HRC6000InitDigital();// sets 	interruptTimeout=0;
 				HRC6000ClearActiveDMRID();
 				if (uiDataGlobal.displayQSOState != QSO_DISPLAY_DEFAULT_SCREEN)
