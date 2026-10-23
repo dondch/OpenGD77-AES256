@@ -79,6 +79,9 @@ def main():
           f"BOOTSTRAP={cnt[5]} RESEED={cnt[6]} LATEENTRY-int={leInt}   late-entry-decode: ok={leOk} fail={leFail}")
     print(f"        LC-reads={lcReads}  valid-PI={piValid}  RxBurst-calls={burstCalls}  "
           f"(non-PI LCs = {lcReads-piValid})")
+    if hdr >= 38:                              # 40-byte header: decoded frames while decrypting
+        frSil, frCcr, frXor = struct.unpack_from("<3H", data, 32)
+        print(f"        decoded frames while decrypting: XORed={frXor}  silence-skipped={frSil}  ccr-skipped={frCcr}")
     print("-" * 90)
     print(" # |   ts   dT | type   | seq last | mi        leMi      | flags")
     print("-" * 90)
