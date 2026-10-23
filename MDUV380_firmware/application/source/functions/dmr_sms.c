@@ -734,6 +734,14 @@ static uint32_t s_lastRxPeer DMR_AES_CCM;
 static uint16_t s_lastRxIpId DMR_AES_CCM;
 static uint8_t  s_lastRxTmsSeq DMR_AES_CCM;
 static uint8_t  s_lastRxValid DMR_AES_CCM;
+/* A stock radio that still gets no ACK after its link-layer repeats sends the message once
+ * more from the TMS layer, with a new IP identification and TMS sequence (bench r3: N(S) 3,3,3
+ * with 000A/92, then N(S) 4,4 with 000B/93, one user send). Those repeats are caught by the
+ * newest Inbox message: same sender, same text, within DMR_SMS_DUP_WINDOW_MS of storing it.
+ * The cost is that the same text sent twice on purpose inside that window shows once. Main
+ * RAM (CCM is full in the DMR_DATA build). */
+#define DMR_SMS_DUP_WINDOW_MS  60000u
+static uint32_t s_lastRxMs;
 /* Retransmission repair. The HR-C6000's CRC flag on a rate-3/4 block does not cover the
  * per-block CRC-9, so a block with bit errors reaches us as "valid" and poisons the packet
  * CRC32; the bench r3 replay (five copies of one stock private SMS) completed nothing although
@@ -1094,11 +1102,23 @@ void dmrSmsRxTick(void)
 	{
 		uint16_t ipId = (uint16_t)(((uint16_t)pt[4] << 8) | pt[5]);
 		uint8_t  tmsSeq = pt[32];
+		uint32_t now = ticksGetMillis();
 		if (s_lastRxValid && (peer == s_lastRxPeer) && (ipId == s_lastRxIpId) && (tmsSeq == s_lastRxTmsSeq))
 		{
 			return;
 		}
+		/* ... or the sender's TMS-layer repeat of the message we stored a moment ago */
+		if (s_lastRxValid && ((uint32_t)(now - s_lastRxMs) < DMR_SMS_DUP_WINDOW_MS))
+		{
+			const dmrSmsMessage_t *last = dmrSmsGet(0, 0);
+			if (last && (last->peerId == peer) && (last->textLen == got) && (memcmp(last->text, text, (size_t)got) == 0))
+			{
+				s_lastRxIpId = ipId; s_lastRxTmsSeq = tmsSeq;   /* its own link-layer repeats, too */
+				return;
+			}
+		}
 		s_lastRxPeer = peer; s_lastRxIpId = ipId; s_lastRxTmsSeq = tmsSeq; s_lastRxValid = 1;
+		s_lastRxMs = now;
 	}
 
 	store_add(DMR_SMS_FLAG_UNREAD | (group ? DMR_SMS_FLAG_GROUP : 0), peer, text, got);

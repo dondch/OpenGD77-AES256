@@ -44,7 +44,9 @@ bool codeplugGetOpenGD77CustomData(CodeplugCustomDataType_t t, uint8_t *b) { (vo
 bool codeplugGetOpenGD77CustomDataBounded(CodeplugCustomDataType_t t, uint8_t *b, int n) { (void)t; (void)b; (void)n; return false; }
 bool codeplugSetOpenGD77CustomData(CodeplugCustomDataType_t t, uint8_t *b, int n) { (void)t; (void)b; (void)n; return true; }
 uint8_t codeplugChannelGetFlag(CodeplugChannel_t *c, ChannelFlag_t f) { (void)c; (void)f; return 0; }
-uint32_t ticksGetMillis(void) { static uint32_t t = 1000; return t += 60; }
+static uint32_t s_nowMs = 1000;
+uint32_t ticksGetMillis(void) { return s_nowMs += 60; }   /* a tick per call, like a busy main loop */
+static void clockAdvance(uint32_t ms) { s_nowMs += ms; }
 
 static int notifications = 0;
 void uiNotificationShow(uiNotificationType_t type, uiNotificationID_t id, uint32_t ms, const char *msg, bool now)
@@ -401,10 +403,30 @@ static void testRetransmissionIsNotASecondMessage(void)
     playback(&c, 0);   /* the stock radio gets no ACK from us and sends the same packet again */
     playback(&c, 0);
     check(dmrSmsCount(0) == 1 && notifications == 1, "a retransmitted packet is stored and shown once");
-    sendAndCapture("ack me", trxDMRID, 0, 1, &s);   /* same text, new message (new IP id / TMS seq) */
+
+    /* Bench r3: after three unanswered link-layer repeats the stock radio sends the message
+     * once more from the TMS layer, with a new IP identification and TMS sequence; that is
+     * still the one message the user sent. */
+    sendAndCapture("ack me", trxDMRID, 0, 1, &s);   /* same text, new IP id / TMS seq */
     toConfirmed(&s, plaintextLen("ack me"), trxDMRID, &c);
     playback(&c, 0);
-    check(dmrSmsCount(0) == 2, "the same text sent again as a new message is stored");
+    playback(&c, 0);
+    check(dmrSmsCount(0) == 1 && notifications == 1, "the sender's TMS-layer repeat (new IP id / TMS seq, same text) within a minute is not a second message");
+
+    sendAndCapture("ack me", trxDMRID, 0, 1, &s);   /* the same text as a new message, later */
+    toConfirmed(&s, plaintextLen("ack me"), trxDMRID, &c);
+    clockAdvance(61000);
+    playback(&c, 0);
+    check(dmrSmsCount(0) == 2 && notifications == 2, "the same text sent again as a new message a minute later is stored");
+
+    sendAndCapture("ack me", trxDMRID, 0, 1, &s);   /* same text right away, from another radio */
+    toConfirmed(&s, plaintextLen("ack me"), trxDMRID, &c);
+    for (int i = 0; i < c.nhdr; i++)
+    {
+        if ((c.hdr[i][0] & 0x0F) == 0x03) { c.hdr[i][5] = 0x00; c.hdr[i][6] = 0x30; c.hdr[i][7] = 0x39; }   /* source 12345 */
+    }
+    playback(&c, 0);
+    check(dmrSmsCount(0) == 3, "the same text from a different sender right away is a new message");
 }
 
 static void testEncHeaderWithGroupBit(void)
