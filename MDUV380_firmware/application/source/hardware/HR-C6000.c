@@ -1091,17 +1091,24 @@ static inline void hrc6000SysReceivedDataInt(void)
 
 #if defined(ENABLE_DMR_DATA) && defined(ENABLE_AES)
 	// Encrypted-SMS RX: the chip BPTC-decodes + CRC-checks each data-sync burst and presents
-	// its 96 info bits at page 0x02 (the same path the PI header uses). Hand Data Header (6)
-	// and Rate-1/2 (7) bursts to the SMS reassembler; it accumulates the PDU and the main loop
-	// (dmrSmsRxTick) decrypts + stores it. Skip our own TX echoes.
+	// its 96 info bits at page 0x02 (the same path the PI header uses). Hand Data Header (6),
+	// Rate-1/2 (7) and Rate-3/4 (8) bursts to the SMS reassembler; it accumulates the PDU and
+	// the main loop (dmrSmsRxTick) decrypts + stores it. Skip our own TX echoes.
+	//
+	// Rate 3/4 is what a stock TYT uses for a PRIVATE (confirmed-delivery) SMS: 144 info
+	// bits = 18 bytes after the chip's trellis decode. UNVERIFIED on the bench: that the
+	// chip reports these bursts as type 8 with a valid CRC flag and that the 18 bytes sit
+	// at page 0x02 reg 0x00..0x11 like the BPTC output does. The dmrSmsRxDiag counters and
+	// the 0x95 raw-PDU snapshot are the way to find out from a replayed stock capture.
 	if ((hrc.transmissionEnabled == false) && (rxSyncClass == SYNC_CLASS_DATA))
 	{
 		int crcOk = hrc6000CrcIsValid() ? 1 : 0;
 		dmrSmsRxDiagBurst(rxDataType, crcOk);   // log every data-sync burst (any type/CRC)
-		if (crcOk && ((rxDataType == 6) || (rxDataType == 7)))
+		if (crcOk && ((rxDataType == 6) || (rxDataType == 7) || (rxDataType == 8)))
 		{
-			uint8_t dataBurst[LC_DATA_LENGTH];
-			if (SPI0ReadPageRegByteArray(0x02, 0x00, dataBurst, LC_DATA_LENGTH) == kStatus_Success)
+			uint8_t dataBurst[18];
+			int dataLen = (rxDataType == 8) ? 18 : LC_DATA_LENGTH;
+			if (SPI0ReadPageRegByteArray(0x02, 0x00, dataBurst, dataLen) == kStatus_Success)
 			{
 				dmrSmsRxBurst(rxDataType, dataBurst);
 			}
@@ -2211,6 +2218,15 @@ static void hrc6000InitDigitalState(void)
 	hrc.interruptTimeout = 0;
 	slotState = DMR_STATE_IDLE;
 	trxIsTransmitting = false;
+#ifdef ENABLE_AES
+	// The DMR slot machine is being reset to IDLE: at init, on a mode change, and when the
+	// receive interrupts have stopped for INTERRUPT_TIMEOUT (the air went quiet). Whatever
+	// encrypted stream was being decrypted has ended with it. Without this an encrypted call
+	// whose Terminator AND whose successor's Voice LC Header were both missed kept decrypting
+	// into the following clear call (bench: 51 of 54 clear frames decrypted). A gap shorter
+	// than INTERRUPT_TIMEOUT with both boundaries lost still is not caught here.
+	dmrAesRxEnd();
+#endif
 	hrc.tickCount = 0;
 	hrc.skipCount = 0;
 	hrc.tsAgreed = 0;

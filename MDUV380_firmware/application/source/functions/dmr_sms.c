@@ -26,14 +26,24 @@
 /* ETSI slot data types as reported in HR-C6000 reg 0x51 [7:4]. */
 #define DT_DATA_HEADER   6
 #define DT_RATE12_DATA   7
+#define DT_RATE34_DATA   8
 /* Data header DPF (byte 0 low nibble, ETSI TS 102 361-1 9.2). */
 #define DPF_UNCONFIRMED  0x02
 #define DPF_CONFIRMED    0x03
 #define DPF_PROPRIETARY  0x0F
-/* Rate-1/2 block payload: 12 bytes unconfirmed; confirmed blocks lead with a 2-byte
- * DBSN(7)+CRC-9 field, so 10 payload bytes (the packet CRC32 is over the payloads only). */
-#define BLK_UNCONFIRMED_LEN  12
-#define BLK_CONFIRMED_LEN    10
+/* Block payloads (ETSI TS 102 361-1 9.2.7/9.2.8). Unconfirmed: the whole block is payload,
+ * 12 bytes at rate 1/2, 18 at rate 3/4. Confirmed: the block leads with a 2-byte
+ * DBSN(7)+CRC-9 field, leaving 10 / 16 payload bytes. The packet CRC32 (and the ECB
+ * ciphertext) runs over the concatenated payloads only.
+ *
+ * The July 2026 stock recon captures (RADIO2 <-> RADIO3, documented on the bench in
+ * NEXT_SESSION_MSG_FORMATS.md "CONFIRMED DATA DECODED") show a stock TYT PRIVATE SMS as
+ * "Indiv - Confirmed Delivery - Response Requested" in RATE-3/4 confirmed blocks, and the
+ * group SMS as rate-1/2 unconfirmed. So rate 3/4 is the one that matters for a private
+ * message from a stock radio; rate-1/2 confirmed is handled for completeness. */
+#define BLK_MAX_LEN          18
+#define BLK_R12_LEN          12
+#define BLK_R34_LEN          18
 #define BLK_CONFIRMED_OFF    2
 /* Burst slot-type bytes we write on TX (page 0x04 reg 0x50: type<<4). */
 #define DTB_CSBK         0x30
@@ -705,9 +715,9 @@ static volatile uint8_t  s_rxGroup DMR_AES_CCM;
 static volatile uint8_t  s_rxKeyId DMR_AES_CCM;
 static volatile uint32_t s_rxSrc DMR_AES_CCM;
 static volatile uint32_t s_rxDst DMR_AES_CCM;
-static volatile uint8_t  s_rxBlkLen DMR_AES_CCM;      /* payload bytes per rate-1/2 block (12, or 10 confirmed) */
-static volatile uint8_t  s_rxBlkOff DMR_AES_CCM;      /* payload offset in the block (0, or 2 confirmed) */
-static uint8_t  s_rxBlocks[32][12] DMR_AES_CCM;
+static volatile uint8_t  s_rxConfirmed DMR_AES_CCM;   /* header DPF 3: blocks carry the DBSN/CRC-9 field */
+static volatile uint8_t  s_rxBlkLen DMR_AES_CCM;      /* payload bytes per block of this PDU (set by its blocks) */
+static uint8_t  s_rxBlocks[32][BLK_MAX_LEN] DMR_AES_CCM;
 /* hand-off to main loop */
 static volatile uint8_t  s_rxReady DMR_AES_CCM;       /* a complete PDU is waiting */
 static uint8_t  s_rxPdu[384] DMR_AES_CCM;
@@ -765,7 +775,7 @@ void dmrSmsRxDiagBurst(int rxDataType, int crcOk)
 {
 	s_diagData++;
 	if (rxDataType == DT_DATA_HEADER) { if (crcOk) s_diagHdrOk++; else s_diagHdrBad++; }
-	else if (rxDataType == DT_RATE12_DATA) { if (crcOk) s_diagBlkOk++; else s_diagBlkBad++; }
+	else if ((rxDataType == DT_RATE12_DATA) || (rxDataType == DT_RATE34_DATA)) { if (crcOk) s_diagBlkOk++; else s_diagBlkBad++; }
 }
 
 void dmrSmsRxDiagReset(void)
@@ -786,7 +796,7 @@ void dmrSmsRxDiag(uint32_t out[7])
 void dmrSmsRxReset(void)
 {
 	s_rxHaveHeader = 0; s_rxHaveEnc = 0; s_rxExpBlocks = 0; s_rxCount = 0;
-	s_rxBlkLen = BLK_UNCONFIRMED_LEN; s_rxBlkOff = 0;
+	s_rxConfirmed = 0; s_rxBlkLen = BLK_R12_LEN;
 }
 
 void dmrSmsRxBurst(int rxDataType, const uint8_t *p)
@@ -815,8 +825,8 @@ void dmrSmsRxBurst(int rxDataType, const uint8_t *p)
 			s_rxSrc = ((uint32_t)p[5] << 16) | ((uint32_t)p[6] << 8) | p[7];
 			uint8_t nblocks = (uint8_t)(p[8] & 0x7F);
 			s_rxExpBlocks = (uint8_t)((nblocks > 0) ? (nblocks - 1) : 0);  /* minus ENC header */
-			s_rxBlkLen = (dpf == DPF_CONFIRMED) ? BLK_CONFIRMED_LEN : BLK_UNCONFIRMED_LEN;
-			s_rxBlkOff = (dpf == DPF_CONFIRMED) ? BLK_CONFIRMED_OFF : 0;
+			s_rxConfirmed = (dpf == DPF_CONFIRMED) ? 1 : 0;
+			s_rxBlkLen = BLK_R12_LEN;   /* the blocks say which rate they are; see below */
 			s_rxCount = 0;
 			s_rxHaveHeader = 1;
 			s_rxHaveEnc = 0;
@@ -824,10 +834,18 @@ void dmrSmsRxBurst(int rxDataType, const uint8_t *p)
 		return;
 	}
 
-	if (rxDataType == DT_RATE12_DATA)
+	if ((rxDataType == DT_RATE12_DATA) || (rxDataType == DT_RATE34_DATA))
 	{
+		/* Payload geometry from the block's own rate and the header's DPF. A PDU is one
+		 * rate throughout, so the length taken at each block is the length used to
+		 * concatenate them all when the packet completes. p holds 12 (rate 1/2) or 18
+		 * (rate 3/4) info bytes. */
+		uint8_t raw = (rxDataType == DT_RATE34_DATA) ? BLK_R34_LEN : BLK_R12_LEN;
+		uint8_t off = s_rxConfirmed ? BLK_CONFIRMED_OFF : 0;
+
 		if (!s_rxHaveHeader || s_rxCount >= 32) { return; }
-		memcpy(s_rxBlocks[s_rxCount], p + s_rxBlkOff, s_rxBlkLen);
+		s_rxBlkLen = (uint8_t)(raw - off);
+		memcpy(s_rxBlocks[s_rxCount], p + off, s_rxBlkLen);
 		s_rxCount++;
 
 		/* Complete when the accumulated blocks form a CRC32-valid data PDU. This is

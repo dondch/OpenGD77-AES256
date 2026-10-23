@@ -92,16 +92,19 @@ done:
     return ((crc & 0xFF) << 24) | ((crc & 0xFF00) << 8) | ((crc >> 8) & 0xFF00) | ((crc >> 24) & 0xFF);
 }
 
-/* A captured stream, split into what the chip hands the ISR: headers (type 6) and blocks (type 7). */
+/* A captured stream, split into what the chip hands the ISR: headers (type 6) and blocks
+ * (type 7 = rate 1/2, 12 bytes; type 8 = rate 3/4, 18 bytes). */
 typedef struct
 {
     uint8_t hdr[4][12]; int nhdr;      /* data header [, ENC header] */
-    uint8_t blk[32][12]; int nblk;     /* rate-1/2 data blocks */
+    uint8_t blk[32][18]; int nblk;     /* data blocks */
+    int blkType;                       /* 7 or 8 */
 } stream_t;
 
 static void capture(stream_t *s)
 {
     memset(s, 0, sizeof *s);
+    s->blkType = 7;
     for (int i = 0; i < s_qn; i++)
     {
         uint8_t type = s_q[i * 13];
@@ -118,7 +121,7 @@ static void playback(const stream_t *s, int skipEncHeader)
         if (skipEncHeader && (s->hdr[i][0] & 0x0F) == 0x0F) { continue; }
         dmrSmsRxBurst(6, s->hdr[i]);
     }
-    for (int i = 0; i < s->nblk; i++) { dmrSmsRxBurst(7, s->blk[i]); }
+    for (int i = 0; i < s->nblk; i++) { dmrSmsRxBurst(s->blkType, s->blk[i]); }
     dmrSmsRxReset();      /* Terminator */
     dmrSmsRxTick();       /* main loop */
 }
@@ -133,15 +136,19 @@ static void sendAndCapture(const char *text, uint32_t dst, int group, uint8_t ke
     dmrSmsRxTick();       /* flush the deferred Sent-folder write so it doesn't count later */
 }
 
-/* Rewrite an unconfirmed stream as a stock radio's CONFIRMED delivery to one radio:
- * DPF 3, response requested, and 10-byte block payloads behind a 2-byte DBSN/CRC-9 field. */
-static void toConfirmed(const stream_t *in, int plaintextLen, uint32_t dst, stream_t *out)
+/* Rewrite an unconfirmed rate-1/2 stream as a stock radio's CONFIRMED delivery to one radio:
+ * DPF 3, response requested, and block payloads behind a 2-byte DBSN/CRC-9 field. blkType 8
+ * gives the rate-3/4 form a stock TYT actually uses for a private SMS (16 payload bytes per
+ * block); blkType 7 the rate-1/2 form (10 payload bytes). */
+static void toConfirmedRate(const stream_t *in, int plaintextLen, uint32_t dst, int blkType, stream_t *out)
 {
     uint8_t ct[400], pdu[400];
     int ctLen = plaintextLen;             /* ciphertext (or cleartext) length == IP packet length */
+    int pay = (blkType == 8) ? 16 : 10;   /* payload bytes per confirmed block */
     memset(out, 0, sizeof *out);
+    out->blkType = blkType;
     for (int i = 0; i < in->nblk; i++) { memcpy(ct + i * 12, in->blk[i], 12); }
-    int total = (((ctLen + 4) + 9) / 10) * 10;
+    int total = (((ctLen + 4) + (pay - 1)) / pay) * pay;
     int poc = total - ctLen - 4;
     memcpy(pdu, ct, ctLen);
     memset(pdu + ctLen, 0, (size_t)(total - ctLen));
@@ -157,19 +164,24 @@ static void toConfirmed(const stream_t *in, int plaintextLen, uint32_t dst, stre
             out->hdr[i][0] = 0x43;                       /* individual, response requested, DPF 3 */
             out->hdr[i][1] = (uint8_t)((in->hdr[i][1] & 0xF0) | (poc & 0x0F));
             out->hdr[i][2] = (uint8_t)(dst >> 16); out->hdr[i][3] = (uint8_t)(dst >> 8); out->hdr[i][4] = (uint8_t)dst;
-            out->hdr[i][8] = (uint8_t)(0x80 | ((total / 10) + (in->nhdr > 1 ? 1 : 0)));
+            out->hdr[i][8] = (uint8_t)(0x80 | ((total / pay) + (in->nhdr > 1 ? 1 : 0)));
             out->hdr[i][9] = 0x00;                       /* S=0, Ns=0, FSN=0 */
         }
     }
     out->nhdr = in->nhdr;
-    out->nblk = total / 10;
+    out->nblk = total / pay;
     for (int b = 0; b < out->nblk; b++)
     {
         uint16_t sn_crc9 = (uint16_t)((b & 0x7F) << 9) | (uint16_t)(0x1A5 ^ b);   /* DBSN + a CRC-9 we don't check */
         out->blk[b][0] = (uint8_t)(sn_crc9 >> 8);
         out->blk[b][1] = (uint8_t)sn_crc9;
-        memcpy(out->blk[b] + 2, pdu + b * 10, 10);
+        memcpy(out->blk[b] + 2, pdu + b * pay, (size_t)pay);
     }
+}
+
+static void toConfirmed(const stream_t *in, int plaintextLen, uint32_t dst, stream_t *out)
+{
+    toConfirmedRate(in, plaintextLen, dst, 7, out);
 }
 
 static int plaintextLen(const char *text) { return 20 + 8 + 10 + 2 * (int)strlen(text); }
@@ -239,6 +251,32 @@ static void testConfirmedPrivateClearSms(void)
     check(dmrSmsCount(0) == 1 && inboxHas("Where are you now?"), "confirmed (DPF 3) private cleartext SMS decodes");
 }
 
+/* The form the July 2026 stock recon captures show for a private SMS: Confirmed delivery in
+ * RATE-3/4 blocks (type 8), 16 payload bytes behind the DBSN/CRC-9 field. */
+static void testConfirmedPrivateRate34EncryptedSms(void)
+{
+    stream_t s, c;
+    fresh();
+    sendAndCapture("Rate three quarter", trxDMRID, 0, 1, &s);
+    toConfirmedRate(&s, plaintextLen("Rate three quarter"), trxDMRID, 8, &c);
+    check(c.blkType == 8 && c.nblk >= 3, "rate-3/4 stream built (type 8 blocks)");
+    playback(&c, 0);
+    check(dmrSmsCount(0) == 1 && inboxHas("Rate three quarter"), "confirmed rate-3/4 private encrypted SMS decodes");
+}
+
+static void testConfirmedPrivateRate34ClearSms(void)
+{
+    stream_t s, c;
+    CodeplugChannel_t ch = { 0xFF };
+    fresh();
+    currentChannelData = &ch;
+    sendAndCapture("Hi", trxDMRID, 0, 0, &s);
+    currentChannelData = NULL;
+    toConfirmedRate(&s, plaintextLen("Hi"), trxDMRID, 8, &c);
+    playback(&c, 0);
+    check(dmrSmsCount(0) == 1 && inboxHas("Hi"), "confirmed rate-3/4 private cleartext SMS decodes (shortest message)");
+}
+
 static void testPrivateSmsToAnotherRadioIsNotOurs(void)
 {
     stream_t s, c;
@@ -303,6 +341,8 @@ int main(void)
     testUnconfirmedClearRoundTrip();
     testConfirmedPrivateEncryptedSms();
     testConfirmedPrivateClearSms();
+    testConfirmedPrivateRate34EncryptedSms();
+    testConfirmedPrivateRate34ClearSms();
     testPrivateSmsToAnotherRadioIsNotOurs();
     testRetransmissionIsNotASecondMessage();
     testEncHeaderWithGroupBit();
