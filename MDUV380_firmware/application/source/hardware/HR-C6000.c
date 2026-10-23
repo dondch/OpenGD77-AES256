@@ -1804,10 +1804,11 @@ void hrc6000TimeslotInterruptHandler(void)
 				// the AES PI headers, and every radio holding that key would then "decrypt" the
 				// clear relayed voice into noise (issue #2).
 				if (settingsUsbMode == USB_MODE_HOTSPOT) { aesTxKeyId = 0; }
-				if (aesTxKeyId != 0)
-				{
-					dmrAesTxStart(aesTxKeyId, hrc6000AesRngSeed()); // begin encrypted call (fresh MI)
-				}
+				// Always called: key id 0 starts a CLEAR call and ends any encrypted state left
+				// behind by a previous call that never reached DMR_STATE_TX_END_1 (interrupt
+				// timeout, mode change, slot reset). Otherwise that stale state would put the
+				// encryption LC flags, PI headers and an encrypted codec stream on a clear call.
+				dmrAesTxStart(aesTxKeyId, (aesTxKeyId != 0) ? hrc6000AesRngSeed() : 0); // begin encrypted call (fresh MI), or clear
 			}
 #endif
 #if defined(ENABLE_DMR_DATA)

@@ -54,6 +54,15 @@ It prints **"Patching for DMR"** on success (vs **"Flashing FM Only firmware"** 
 ```
 CI (`.github/workflows/build.yml`) runs the same for `ENABLE_AES` 0 and 1 and asserts the merge-capable size.
 
+## Host tests (no radio, plain gcc)
+```sh
+cd MDUV380_firmware && sh tests/run_all.sh
+```
+Builds and runs every `tests/test_*.c` against the real `crypto/` and `functions/dmr_sms.c` sources with the
+small firmware stand-ins in `tests/stubs/` (each test's header carries its own gcc line). Covers the AES
+primitives, the late-entry MI and EMB codings, the RX bootstrap / PI seeding across call boundaries, the TX
+state at key-up, and the SMS receive path (unconfirmed and confirmed delivery, addressing, retransmissions).
+
 ## AES build
 `ENABLE_AES=1` compiles in DMRA (Motorola/Hytera-compatible) AES-256 encrypted voice — both **transmit and
 receive**, interoperable with a stock TYT MD-UV390 ("Universal" AES256). The default build is byte-for-byte

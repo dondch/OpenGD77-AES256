@@ -77,6 +77,12 @@ static uint8_t       s_rxKeyId DMR_AES_CCM;      /* keyId of the last successful
 static int           s_rxPiSeeded DMR_AES_CCM;   /* 1 = call seeded from the chip PI-LC (use pure self-advance,
                                                   * stable & RF-independent); 0 = late-entry-bootstrapped rapid call
                                                   * (adopt diverging late entries so a wrong bootstrap self-corrects) */
+static uint32_t      s_rxLastPiMi DMR_AES_CCM;   /* MI of the last valid PI the chip handed us (any state) */
+static int           s_rxLastPiValid DMR_AES_CCM;
+static uint32_t      s_rxStaleMi DMR_AES_CCM;    /* MI of the PI that belongs to the stream that just ENDED (our own
+                                                  * TX included): the chip's LC page still holds it and re-surfaces it
+                                                  * on the first bursts of the next call, which must not seed on it */
+static int           s_rxStaleValid DMR_AES_CCM;
 
 /* Shared scratch for the (non-reentrant, foreground-only) key-store helpers. One
  * buffer instead of three per-function statics keeps CCM usage down. */
@@ -255,6 +261,8 @@ void dmrAesInit(void)
     memset(s_rxFrag, 0, sizeof s_rxFrag);
     s_rxKeyId = 0;
     s_rxPiSeeded = 0;
+    s_rxLastPiMi = s_rxStaleMi = 0;
+    s_rxLastPiValid = s_rxStaleValid = 0;
     s_txPiMi = 0;
     s_txKeyId = 0;
     s_txFrameCnt = 0;
@@ -475,7 +483,18 @@ void dmrAesRxPI(const uint8_t *pi, int len)
         int wasActive = s_rxActive;
         int seeded = 0;
 #endif
-        if (!s_rxActive)
+        /* STALE PI: HR-C6000.c reads the chip's LC page on every voice burst, and the chip keeps
+         * returning the PREVIOUS transmission's LC on the first bursts of a new one (OpenGD77 skips
+         * those frames for the caller display for the same reason). After an encrypted call that
+         * page holds its PI header, so the next call, clear or not, is handed that PI again right
+         * after the Voice LC Header reset. Seeding on it would decrypt a clear call into noise, or
+         * lock a rapid encrypted call onto the old MI and ignore its own PI. A real new call always
+         * carries a fresh MI, so a PI equal to the one the just-ended stream was seeded with (our own
+         * TX included) is ignored until a different PI has seeded. */
+        int stale = (!s_rxActive && s_rxStaleValid && (p.mi == s_rxStaleMi));
+        s_rxLastPiMi = p.mi;
+        s_rxLastPiValid = 1;
+        if (!s_rxActive && !stale)
         {
             s_rxActive = (dmr_aes_rx_init(&s_rx, &p) == 0);  /* load key for keyId + seed MI */
             if (s_rxActive)
@@ -485,6 +504,7 @@ void dmrAesRxPI(const uint8_t *pi, int len)
                 s_rxPiSeeded = 1;      /* chip PI-LC seed: a normal call -> pure self-advance, stable */
                 s_rxIvReady = 0;     /* generate IV from the seeded MI on the next burst */
                 s_rxLastSeq = -1;
+                s_rxStaleValid = 0;  /* a new stream seeded: the previous one's PI is history */
 #ifdef DMR_AES_DIAG_RX
                 seeded = 1;
 #endif
@@ -498,7 +518,7 @@ void dmrAesRxPI(const uint8_t *pi, int len)
          * suppresses those without hiding the new-call transitions. */
         if (seeded || !wasActive || (p.mi != s_rxdLastPiMi))
         {
-            rxd_log(1, (uint8_t)(0x01 | (seeded ? 0x02 : 0) | (wasActive ? 0x04 : 0)),
+            rxd_log(1, (uint8_t)(0x01 | (seeded ? 0x02 : 0) | (wasActive ? 0x04 : 0) | (stale ? 0x08 : 0)),
                     0, s_rxLastSeq, p.mi, s_rxInitMi);
             s_rxdLastPiMi = p.mi;
         }
@@ -649,14 +669,28 @@ void dmrAesRxEnd(void)
     s_rxBurstEnc = 0;
     s_rxLastSeq = -1;
     memset(s_rxFrag, 0, sizeof s_rxFrag);
+    /* The PI the chip handed us during this stream is now stale (see dmrAesRxPI). Only the
+     * most recent one: a PI seen before an intervening stream is accepted again. */
+    if (s_rxLastPiValid)
+    {
+        s_rxStaleMi = s_rxLastPiMi;
+        s_rxStaleValid = 1;
+        s_rxLastPiValid = 0;
+    }
 }
 
 /* ---- TX (mirror of RX: encrypt the 49 AMBE params at the codec layer) ---- */
 void dmrAesTxStart(uint8_t keyId, uint32_t miSeed)
 {
     /* ISR context (HR-C6000 timeslot interrupt): keys are eager-loaded at boot; never
-     * do the blocking SPI-flash load here. Unloaded -> dmr_aes_tx_init fails -> clear TX. */
-    s_txActive = (dmr_aes_tx_init(&s_tx, DMR_ALG_AES256, keyId, miSeed) == 0); /* sets s_tx.mi = miSeed */
+     * do the blocking SPI-flash load here. Unloaded -> dmr_aes_tx_init fails -> clear TX.
+     * Called at EVERY key-up (DMR_STATE_TX_START_1), keyId 0 meaning a CLEAR call (no key
+     * selected, a data call, hotspot relay). It must positively end any encrypted state: a
+     * previous encrypted call can be aborted without DMR_STATE_TX_END_1 (interrupt timeout,
+     * mode change, slot reset), and a stale s_txActive would otherwise make the next clear
+     * call go out with the encryption LC flags, PI headers and an encrypted codec stream.
+     * keyId 0 is the "off" sentinel everywhere, never a key slot, even if slot 0 holds a key. */
+    s_txActive = (keyId != 0) && (dmr_aes_tx_init(&s_tx, DMR_ALG_AES256, keyId, miSeed) == 0); /* sets s_tx.mi = miSeed */
     s_txOff = 0;
     s_txPiMi = miSeed;     /* the call's CONSTANT initial MI: advertised for late entry, advanced by RX */
     s_txFrameCnt = 0;
@@ -723,7 +757,16 @@ void dmrAesTxStuffMI(uint16_t *b72)
 /* The old 27-byte FEC-octet TX crypt is gone — encryption is at the codec layer above. */
 void dmrAesTxVoice(uint8_t *ambe, int seq) { (void)ambe; (void)seq; }
 int  dmrAesTxActive(void) { return s_txActive; }
-void dmrAesTxEnd(void)    { s_txActive = 0; }
+void dmrAesTxEnd(void)
+{
+    if (s_txActive)
+    {
+        /* Our own PI header may still sit in the chip's LC page and be re-read by RX. */
+        s_rxStaleMi = s_txPiMi;
+        s_rxStaleValid = 1;
+    }
+    s_txActive = 0;
+}
 
 /* DMRA "Late Entry Single Block": the burst-F EMB that announces the encryption alg + key,
  * which a stock TYT (and our own RX via the chip's reconstructed PI-LC) reads to auto-engage
