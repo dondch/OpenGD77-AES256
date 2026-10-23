@@ -34,19 +34,20 @@ def main():
         tx = r[3 + 28]
         names = ["d", "hOk", "hBad", "bOk", "bBad", "pdu", "msg"]
         print("RX diag: " + "  ".join(f"{k}={v}" for k, v in zip(names, vals)) + f"  txActive={tx}")
-        # Per-burst trace (firmware with dmrSmsRxTrace): [writeIndex, 8 x (type, state, b0, b1)],
+        # Per-burst trace (firmware with dmrSmsRxTrace): [writeIndex, 8 x (type, state, b0..b3)],
         # printed oldest first. state = blocks held before the burst | haveHeader<<6 | pduReady<<7.
         n = (r[1] << 8) | r[2]
         body = r[3:3 + n]
-        if len(body) >= 29 + 33:
+        if len(body) >= 29 + 49:
             w = body[29]
-            ents = [body[30 + i * 4:34 + i * 4] for i in range(8)]
-            print("last bursts (oldest first): type cnt hdr rdy b0 b1")
+            ents = [body[30 + i * 6:36 + i * 6] for i in range(8)]
+            print("last bursts (oldest first): type cnt hdr rdy bytes0-3")
             for k in range(8):
                 e = ents[(w + k) % 8]
-                if e[0] == 0 and e[1] == 0 and e[2] == 0 and e[3] == 0:
+                if not any(e):
                     continue
-                print(f"  {e[0]:2d}   {e[1] & 0x3F:2d}   {(e[1] >> 6) & 1}   {(e[1] >> 7) & 1}  {e[2]:02x} {e[3]:02x}")
+                print(f"  {e[0]:2d}   {e[1] & 0x3F:2d}   {(e[1] >> 6) & 1}   {(e[1] >> 7) & 1}  "
+                      f"{e[2]:02x} {e[3]:02x} {e[4]:02x} {e[5]:02x}")
     else:
         print("unexpected reply (%d B): %s" % (len(r), r.hex()))
 
