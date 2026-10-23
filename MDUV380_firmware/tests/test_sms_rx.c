@@ -277,6 +277,58 @@ static void testConfirmedPrivateRate34ClearSms(void)
     check(dmrSmsCount(0) == 1 && inboxHas("Hi"), "confirmed rate-3/4 private cleartext SMS decodes (shortest message)");
 }
 
+/* A REAL stock TYT private SMS, from the July 2026 bench recon capture r4_pmc_conf_priv_clean
+ * (RADIO3 12343 -> RADIO2 12342, "Hello", clear channel). Data header: individual, response
+ * requested, DPF 3 Confirmed, SAP 4, POC 12, F=1 BTF 4, N(S) 0 FSN 8. Then four rate-3/4
+ * confirmed blocks whose 16 payload bytes DSD-FME printed (its own CRC checks flagged errors,
+ * but the CRC32 of these 64 bytes and the IPv4 header checksum both verify with the firmware's
+ * algorithms). The 2-byte DBSN/CRC-9 field in front of each block was not recorded; the
+ * receiver does not check it, so any value stands in. In r3 the sender repeated the whole PDU
+ * three times per attempt with N(S) 3,3,3 then 4,4 when it got no ACK. */
+static const uint8_t RECON_HDR[12] = { 0x43,0x4C,0x00,0x30,0x36,0x00,0x30,0x37,0x84,0x08,0xDB,0x47 };
+static const uint8_t RECON_BLK[4][16] = {
+    { 0x45,0x00,0x00,0x30,0x00,0x00,0x00,0x00,0x40,0x11,0x02,0x51,0x0C,0x00,0x30,0x37 },
+    { 0x0C,0x00,0x30,0x36,0x0F,0xA7,0x0F,0xA7,0x00,0x1C,0xE0,0xE1,0x00,0x12,0xE0,0x00 },
+    { 0x9C,0x04,0x0D,0x00,0x0A,0x00,0x48,0x00,0x65,0x00,0x6C,0x00,0x6C,0x00,0x6F,0x00 },
+    { 0,0,0,0,0,0,0,0,0,0,0,0,0x63,0x53,0x4E,0x5D } };
+
+static void playReconPrivateHello(uint8_t ns)
+{
+    uint8_t hdr[12];
+    memcpy(hdr, RECON_HDR, 12);
+    hdr[9] = (uint8_t)((hdr[9] & 0x8F) | ((ns & 0x07) << 4));   /* S | N(S) | FSN */
+    dmrSmsRxBurst(6, hdr);
+    for (int b = 0; b < 4; b++)
+    {
+        uint8_t raw[18] = { (uint8_t)(b << 1), 0x5A };   /* stand-in DBSN/CRC-9 field */
+        memcpy(raw + 2, RECON_BLK[b], 16);
+        dmrSmsRxBurst(8, raw);
+    }
+    dmrSmsRxReset();
+    dmrSmsRxTick();
+}
+
+static void testStockReconPrivateHello(void)
+{
+    fresh();
+    trxDMRID = 12342;                              /* we are RADIO2, the addressee */
+    playReconPrivateHello(0);
+    check(dmrSmsCount(0) == 1 && inboxHas("Hello"), "stock r4 capture: private 'Hello' in rate-3/4 confirmed blocks decodes");
+    const dmrSmsMessage_t *m = dmrSmsGet(0, 0);
+    check(m && (m->peerId == 12343) && !(m->flags & DMR_SMS_FLAG_GROUP), "from 12343, stored as private");
+
+    /* r3: the sender's unacknowledged repeats, N(S) 3,3,3 then 4,4 */
+    playReconPrivateHello(3); playReconPrivateHello(3); playReconPrivateHello(3);
+    playReconPrivateHello(4); playReconPrivateHello(4);
+    check(dmrSmsCount(0) == 1 && notifications == 1, "its five retransmissions (N(S) 3,3,3,4,4) add nothing");
+
+    fresh();
+    trxDMRID = 12343;                              /* we are RADIO3, the sender's own ID */
+    playReconPrivateHello(0);
+    check(dmrSmsCount(0) == 0, "the same PDU heard by a radio that is not the addressee is ignored");
+    trxDMRID = 2345678;
+}
+
 static void testPrivateSmsToAnotherRadioIsNotOurs(void)
 {
     stream_t s, c;
@@ -343,6 +395,7 @@ int main(void)
     testConfirmedPrivateClearSms();
     testConfirmedPrivateRate34EncryptedSms();
     testConfirmedPrivateRate34ClearSms();
+    testStockReconPrivateHello();
     testPrivateSmsToAnotherRadioIsNotOurs();
     testRetransmissionIsNotASecondMessage();
     testEncHeaderWithGroupBit();
