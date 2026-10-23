@@ -102,16 +102,21 @@ static bool quickmenuNewChannelHandled = false; // Quickmenu new channel confirm
 static const int VFO_SWEEP_STEP_TIME  = 25;// 25ms
 
 #if defined(ENABLE_FAST_SCAN)
-// Per-measurement time when the wide span is selected. The stock 25 ms is chosen for a
-// 160-measurement pass; the wide span takes 1600, and 25 ms would make that a 40 second
-// pass, which is not a display any more.
+// Per-measurement time, both spans. The stock 25 ms was chosen when a sample cost a
+// full-screen blit; the sweep now spends most of a 25 ms step waiting.
 //
-// 6 ms is the measured floor that still works: the column-strip blit took the DISPLAY cost
-// to ~2.9 ms/sample (6 ms renders correctly, where it used to break up), and the sweep now
-// holds rssi_ct_u at 1, which is what stops a short dwell reading a half-settled level --
-// MEASURED, carrier height 22.2 counts at stock vs 34.9 at ct=1 for a 2.9 ms sample.
-// 1600 x 6 ms = ~9.6 s per 20 MHz pass.
-#define VFO_SWEEP_WIDE_STEP_TIME  6
+// What a measurement actually needs: ~0.6 ms for the bare retune (radioSweepRetune), then
+// the receiver-restart settle. MEASURED with rssi_ct_u held at 1 (VFO_SWEEP_RSSI_COUNT):
+// a sample read 2.9 ms after the retune reaches 34.9 counts of carrier height against
+// 37.6 at 6 ms, i.e. 93%. 4 ms leaves ~3.4 ms of settle after the retune and keeps the
+// display blit (~2.9 ms per strip, now one strip per two columns) inside the step rather
+// than on top of it. The step timer is started before the retune and expires at the
+// next 1 ms main-loop tick, so the real period is 4-5 ms.
+//   narrow:  160 x ~4.5 ms = ~0.7 s per 2 MHz pass (was 4.0 s)
+//   wide:   1600 x ~4.5 ms = ~7 s per 20 MHz pass (was 9.6 s)
+// The remaining cost is the restart settle itself; only a retune that does not restart
+// the receiver (see the candidates in spectrum.h) can take this below ~3 ms.
+#define VFO_SWEEP_FAST_STEP_TIME  4
 static int vfoSweepStepTime(void);
 #define VFO_SWEEP_STEP_TIME_BASE  vfoSweepStepTime()
 #else
@@ -411,7 +416,90 @@ static ticksTimer_t vfoSweepParkLimitTimer = { 0, 0 };
 
 static int vfoSweepStepTime(void)
 {
-	return (vfoSweepWide ? VFO_SWEEP_WIDE_STEP_TIME : VFO_SWEEP_STEP_TIME);
+	return VFO_SWEEP_FAST_STEP_TIME;
+}
+
+// ---- retuning inside the sweep ----
+// A sweep sample only needs the PLL moved inside the band the sweep is already set up
+// for, so it uses radioSweepRetune() (4 I2C writes, one receiver restart) instead of
+// trxSetFrequency() (~2.2 ms, two restarts, calibration and HR-C6000 writes). That moves
+// the chip behind trx.c's back: trx.c compares the requested frequency with the one it
+// last set and skips the retune when they match, so after a bare retune the next FULL
+// retune must be forced. vfoSweepPllMoved remembers that a force is owed; every path
+// that needs the full receiver set-up (first sample of a pass after a scroll or rescale,
+// parking on a peak, leaving the sweep) goes through vfoSweepRetuneFull().
+static bool vfoSweepPllMoved = false;
+
+static void vfoSweepRetuneFull(uint32_t rxFreq)
+{
+	if (vfoSweepPllMoved)
+	{
+		currentRadioDevice->currentRxFrequency = FREQUENCY_UNSET;
+		currentRadioDevice->currentTxFrequency = FREQUENCY_UNSET;
+		vfoSweepPllMoved = false;
+	}
+
+	trxSetFrequency(rxFreq, currentChannelData->txFreq,
+			(((currentChannelData->chMode == RADIO_MODE_DIGITAL) &&
+					codeplugChannelGetFlag(currentChannelData, CHANNEL_FLAG_FORCE_DMO))
+							? DMR_MODE_DMO : DMR_MODE_AUTO));
+}
+
+static void vfoSweepRetuneFast(uint32_t rxFreq)
+{
+	int band = trxGetBandFromFrequency(rxFreq);
+
+	// The bare retune leaves the LNA, the IF and the calibration where the last full retune
+	// put them, which is only right inside that band. A sample outside it (a span that runs
+	// past the band edge) takes the full path, exactly as every sample used to.
+	if ((band == FREQUENCY_OUT_OF_BAND) || (band != currentRadioDevice->trxCurrentBand[TRX_RX_FREQ_BAND]))
+	{
+		vfoSweepRetuneFull(rxFreq);
+		return;
+	}
+
+	radioSweepRetune(rxFreq);
+	currentRadioDevice->currentRxFrequency = rxFreq;   // keep trx.c's idea of the RX frequency truthful
+	vfoSweepPllMoved = true;
+}
+
+// ---- display: blit a strip every few columns, not every sample ----
+// displayRenderColumns() can move up to 4 columns in one transfer at the same fixed cost
+// (~2.9 ms, mostly the window set-up). Each sample dirties its own column plus the
+// two-column cursor ahead of it, so two consecutive samples fit one strip: the blit now
+// lands once per two samples instead of once per sample, inside the 4 ms step rather than
+// on top of it. A range that wraps round the right edge is flushed at once (the fallback
+// inside displayRenderColumns() paints it as full rows).
+#define VFO_SWEEP_STRIP_COLS  4
+static int16_t vfoSweepDirtyLo = -1;
+static int16_t vfoSweepDirtyHi = -1;
+
+static void vfoSweepDirtyFlush(void)
+{
+	if (vfoSweepDirtyLo >= 0)
+	{
+		displayRenderColumns(vfoSweepDirtyLo, (vfoSweepDirtyHi + 1), 1, ((8 + VFO_SWEEP_GRAPH_HEIGHT_Y) / 8) + 1);
+		vfoSweepDirtyLo = vfoSweepDirtyHi = -1;
+	}
+}
+
+static void vfoSweepDirtyAdd(int16_t lo, int16_t hi)
+{
+	if (vfoSweepDirtyLo < 0)
+	{
+		vfoSweepDirtyLo = lo;
+		vfoSweepDirtyHi = hi;
+	}
+	else
+	{
+		vfoSweepDirtyLo = SAFE_MIN(vfoSweepDirtyLo, lo);
+		vfoSweepDirtyHi = SAFE_MAX(vfoSweepDirtyHi, hi);
+	}
+
+	if ((vfoSweepDirtyHi - vfoSweepDirtyLo + 1) >= VFO_SWEEP_STRIP_COLS)
+	{
+		vfoSweepDirtyFlush();
+	}
 }
 
 // Rebuild the stored word without ever losing bit 15. Two places rebuild it from the three
@@ -1184,7 +1272,11 @@ void uiVFOModeStopScanning(void)
 	else if (screenOperationMode[nonVolatileSettings.currentVFONumber] == VFO_SCREEN_OPERATION_SWEEP)
 	{
 		screenOperationMode[nonVolatileSettings.currentVFONumber] = VFO_SCREEN_OPERATION_NORMAL;
+#if defined(ENABLE_FAST_SCAN)
+		vfoSweepRetuneFull(currentChannelData->rxFreq);   // forces the full retune the bare sweep retunes owe
+#else
 		trxSetFrequency(currentChannelData->rxFreq, currentChannelData->txFreq, (((currentChannelData->chMode == RADIO_MODE_DIGITAL) && codeplugChannelGetFlag(currentChannelData, CHANNEL_FLAG_FORCE_DMO)) ? DMR_MODE_DMO : DMR_MODE_AUTO));
+#endif
 		HRC6000ClearColorCodeSynchronisation();
 	}
 
@@ -3113,10 +3205,13 @@ static void vfoSweepUpdateSamples(int offset, bool forceRedraw, int bandwidthRes
 		// the narrow-span frequency this line used to compute.
 		uiDataGlobal.Scan.scanSweepCurrentFreq = vfoSweepFreqForOrdinal(
 				(int32_t)uiDataGlobal.Scan.sweepSampleIndex * vfoSweepSubSamples());
+		// Full retune: a scroll, a rescale or the sweep's start may have changed the band,
+		// and this is the one retune per pass the bare sample retunes build on.
+		vfoSweepRetuneFull(uiDataGlobal.Scan.scanSweepCurrentFreq);
 #else
 		uiDataGlobal.Scan.scanSweepCurrentFreq = currentChannelData->rxFreq + (VFO_SWEEP_SCAN_RANGE_SAMPLE_STEP_TABLE[uiDataGlobal.Scan.sweepStepSizeIndex] * (uiDataGlobal.Scan.sweepSampleIndex - (VFO_SWEEP_NUM_SAMPLES / 2))) / VFO_SWEEP_PIXELS_PER_STEP;
-#endif
 		trxSetFrequency(uiDataGlobal.Scan.scanSweepCurrentFreq, currentChannelData->txFreq, (((currentChannelData->chMode == RADIO_MODE_DIGITAL) && codeplugChannelGetFlag(currentChannelData, CHANNEL_FLAG_FORCE_DMO)) ? DMR_MODE_DMO : DMR_MODE_AUTO));
+#endif
 		ticksTimerStart(&uiDataGlobal.Scan.timer, VFO_SWEEP_STEP_TIME_ACTIVE);
 	}
 }
@@ -4406,6 +4501,8 @@ static void sweepScanInit(void)
 	vfoSweepWide = ((nonVolatileSettings.vfoSweepSettings & VFO_SWEEP_WIDE_FLAG) != 0);
 	vfoSweepSubIndex = 0;
 	vfoSweepColumnPeak = 0;
+	vfoSweepColumnSum = 0;
+	vfoSweepDirtyLo = vfoSweepDirtyHi = -1;   // no strip is owed from a previous visit
 	// Auto scroll always starts off -- see the note at its declaration.
 	vfoSweepAutoScroll = false;
 	vfoSweepScrollPending = false;   // a scroll owed by a previous visit is not owed now
@@ -4554,10 +4651,7 @@ static void sweepScanStep(void)
 						((int32_t)uiDataGlobal.Scan.sweepSampleIndex * vfoSweepSubSamples())
 								+ vfoSweepSubIndex);
 
-				trxSetFrequency(uiDataGlobal.Scan.scanSweepCurrentFreq, currentChannelData->txFreq,
-						(((currentChannelData->chMode == RADIO_MODE_DIGITAL) &&
-								codeplugChannelGetFlag(currentChannelData, CHANNEL_FLAG_FORCE_DMO))
-										? DMR_MODE_DMO : DMR_MODE_AUTO));
+				vfoSweepRetuneFast(uiDataGlobal.Scan.scanSweepCurrentFreq);
 				return;
 			}
 
@@ -4626,6 +4720,7 @@ static void sweepScanStep(void)
 					vfoSweepPassComplete = false;
 					vfoSweepDrawPeakMarker();
 					displayRenderRows(1, ((8 + VFO_SWEEP_GRAPH_HEIGHT_Y) / 8) + 1);
+					vfoSweepDirtyLo = vfoSweepDirtyHi = -1;   // the full blit covered everything
 				}
 				else
 				{
@@ -4635,7 +4730,9 @@ static void sweepScanStep(void)
 					colLo = SAFE_MIN(colLo, SAFE_MIN(c1, c2));
 					colHi = SAFE_MAX(colHi, SAFE_MAX(c1, c2));
 
-					displayRenderColumns(colLo, (colHi + 1), 1, ((8 + VFO_SWEEP_GRAPH_HEIGHT_Y) / 8) + 1);
+					// Blitted once the strip is full (every second sample), or at once when
+					// the cursor wrapped round the right edge and the range is not a strip.
+					vfoSweepDirtyAdd(colLo, colHi);
 				}
 #else
 				displayRenderRows(1, ((8 + VFO_SWEEP_GRAPH_HEIGHT_Y) / 8) + 1);
@@ -4689,10 +4786,9 @@ static void sweepScanStep(void)
 				ticksTimerStart(&vfoSweepListenTimer, VFO_SWEEP_LISTEN_MIN_MS);
 				ticksTimerStart(&vfoSweepParkLimitTimer, VFO_SWEEP_SCROLL_MAX_PARK_MS);
 
-				trxSetFrequency(vfoSweepListenFreq, currentChannelData->txFreq,
-						(((currentChannelData->chMode == RADIO_MODE_DIGITAL) &&
-								codeplugChannelGetFlag(currentChannelData, CHANNEL_FLAG_FORCE_DMO))
-										? DMR_MODE_DMO : DMR_MODE_AUTO));
+				// Full retune: listening needs the whole receiver set up for this frequency,
+				// not just the PLL.
+				vfoSweepRetuneFull(vfoSweepListenFreq);
 
 				// Last, and only after the retune: this is what re-enables the squelch and
 				// audio path, and it must not do so while still tuned to the old sample.
@@ -4765,7 +4861,17 @@ static void sweepScanStep(void)
 						)) / VFO_SWEEP_PIXELS_PER_STEP;
 #endif
 
+#if defined(ENABLE_FAST_SCAN)
+		// The pass wrapped: the frequency moved back by a whole span, so give the column
+		// strip a clean slate too (the full-row blit at the wrap painted everything).
+		if (uiDataGlobal.Scan.sweepSampleIndex == 0)
+		{
+			vfoSweepDirtyLo = vfoSweepDirtyHi = -1;
+		}
+		vfoSweepRetuneFast(uiDataGlobal.Scan.scanSweepCurrentFreq);
+#else
 		trxSetFrequency(uiDataGlobal.Scan.scanSweepCurrentFreq, currentChannelData->txFreq, (((currentChannelData->chMode == RADIO_MODE_DIGITAL) && codeplugChannelGetFlag(currentChannelData, CHANNEL_FLAG_FORCE_DMO)) ? DMR_MODE_DMO : DMR_MODE_AUTO));
+#endif
 	}
 }
 
