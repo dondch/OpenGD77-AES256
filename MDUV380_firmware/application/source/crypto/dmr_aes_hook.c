@@ -157,6 +157,8 @@ static uint16_t  s_rxdCnt[9] DMR_AES_CCM;   /* per-type aggregate counters (surv
 static uint16_t  s_rxdLe[2] DMR_AES_CCM;    /* [0]=late-entry decode OK, [1]=fail */
 static uint16_t  s_rxdMisc[3] DMR_AES_CCM;  /* [0]=LC reads, [1]=valid PI parses, [2]=RxBurst calls */
 static uint32_t  s_rxdLastPiMi DMR_AES_CCM; /* PI dedup: last logged PI MI */
+static uint16_t  s_rxdFrames[3] DMR_AES_CCM;  /* decoded frames while decrypting: [0] left alone as
+                                               * silence, [1] left alone as comfort noise, [2] XORed */
 /* Raw-burst capture state (crack the RX late-entry bit layout — see dmrAesGetCapData). */
 #define CAP_BURSTS 6
 static uint8_t   s_capState DMR_AES_CCM;     /* 0 idle, 1 armed, 2 capturing, 3 done */
@@ -195,25 +197,28 @@ void dmrAesResetRxDiag(void)
     memset(s_rxdCnt, 0, sizeof s_rxdCnt);
     memset(s_rxdLe, 0, sizeof s_rxdLe);
     memset(s_rxdMisc, 0, sizeof s_rxdMisc);
+    memset(s_rxdFrames, 0, sizeof s_rxdFrames);
     s_capState = 0; s_capN = 0;
 }
-/* Copy a self-describing snapshot into out (<= max). Header (32 bytes, LE):
- *  [0]=0xA5 magic, [1]=ring size, [2]=record size, [3]=0, [4..5]=write index,
+/* Copy a self-describing snapshot into out (<= max). Header (40 bytes, LE):
+ *  [0]=0xA5 magic, [1]=ring size, [2]=record size, [3]=header length, [4..5]=write index,
  *  [6..19]=cnt[1..7] (u16 each), [20..21]=leOk, [22..23]=leFail, [24..25]=LC reads,
  *  [26..27]=valid PI parses, [28..29]=RxBurst calls, [30..31]=LATEENTRY count, then the
+ *  [32..37]=frames (silence-skipped, ccr-skipped, XORed; u16 each), then the
  *  raw ring (RXD_RING * 16 bytes, ring order; the host reorders chronologically). */
 int dmrAesGetRxDiag(uint8_t *out, int max)
 {
-    int hdr = 32, body = (int)sizeof s_rxd, n = hdr + body;
+    int hdr = 40, body = (int)sizeof s_rxd, n = hdr + body;
     if (n > max) { return 0; }
     memset(out, 0, hdr);
-    out[0] = 0xA5; out[1] = RXD_RING; out[2] = (uint8_t)sizeof(rxd_evt_t);
+    out[0] = 0xA5; out[1] = RXD_RING; out[2] = (uint8_t)sizeof(rxd_evt_t); out[3] = (uint8_t)hdr;
     out[4] = (uint8_t)(s_rxdW & 0xFF); out[5] = (uint8_t)((s_rxdW >> 8) & 0xFF);
     for (int i = 1; i <= 7; i++) { out[6 + (i - 1) * 2] = (uint8_t)(s_rxdCnt[i] & 0xFF); out[7 + (i - 1) * 2] = (uint8_t)((s_rxdCnt[i] >> 8) & 0xFF); }
     out[20] = (uint8_t)(s_rxdLe[0] & 0xFF); out[21] = (uint8_t)((s_rxdLe[0] >> 8) & 0xFF);
     out[22] = (uint8_t)(s_rxdLe[1] & 0xFF); out[23] = (uint8_t)((s_rxdLe[1] >> 8) & 0xFF);
     for (int i = 0; i < 3; i++) { out[24 + i * 2] = (uint8_t)(s_rxdMisc[i] & 0xFF); out[25 + i * 2] = (uint8_t)((s_rxdMisc[i] >> 8) & 0xFF); }
     out[30] = (uint8_t)(s_rxdCnt[8] & 0xFF); out[31] = (uint8_t)((s_rxdCnt[8] >> 8) & 0xFF); /* LATEENTRY count */
+    for (int i = 0; i < 3; i++) { out[32 + i * 2] = (uint8_t)(s_rxdFrames[i] & 0xFF); out[33 + i * 2] = (uint8_t)((s_rxdFrames[i] >> 8) & 0xFF); }
     memcpy(out + hdr, s_rxd, body);
     return n;
 }
@@ -657,6 +662,11 @@ void dmrAesRxLateEntry(int seq, const uint8_t *ambe27)
 void dmrAesRxCodecFrame(uint16_t *b49, int idxInBurst)
 {
     if (!s_rxActive || !s_rxBurstEnc) { return; }
+#ifdef DMR_AES_DIAG_RX
+    /* Which way dmr_aes_voice_frame will go with this frame (issue #4: do the firmware's
+     * inserted SILENCE_AUDIO frames get left alone?). Same tests, same order, as inside it. */
+    s_rxdFrames[dmr_ambe_is_silence(b49) ? 0 : (dmr_ambe_is_ccr(b49) ? 1 : 2)]++;
+#endif
     dmr_aes_voice_frame(&s_rx, b49, s_rxBurstBase + (size_t)idxInBurst * 56);
 }
 /* Call boundary (CRC-valid Terminator, or the next call's Voice LC Header). Also drop the
