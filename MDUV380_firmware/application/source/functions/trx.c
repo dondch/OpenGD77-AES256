@@ -161,6 +161,33 @@ const frequencyBand_t DEFAULT_USER_FREQUENCY_BANDS[RADIO_BANDS_TOTAL_NUM] =  {
 static volatile ticksTimer_t trxNextRssiNoiseSampleTimer = { 0, 0 };
 static volatile ticksTimer_t trxNextSquelchCheckingTimer = { 0, 0 };
 
+#if defined(ENABLE_DUAL_SCREEN)
+// While the dual screen's row watch listens to the other row, its squelch level and tone are the ones to use
+static bool trxSquelchOverride = false;
+static uint8_t trxSquelchOverrideSql = 0;
+static uint16_t trxSquelchOverrideRxTone = 0;
+
+void trxSetSquelchOverride(bool enabled, uint8_t sql, uint16_t rxTone)
+{
+	trxSquelchOverride = enabled;
+	trxSquelchOverrideSql = sql;
+	trxSquelchOverrideRxTone = rxTone;
+}
+
+static uint8_t trxChannelSql(void)
+{
+	return (trxSquelchOverride ? trxSquelchOverrideSql : currentChannelData->sql);
+}
+
+static uint16_t trxChannelRxTone(void)
+{
+	return (trxSquelchOverride ? trxSquelchOverrideRxTone : currentChannelData->rxTone);
+}
+#else
+#define trxChannelSql()     (currentChannelData->sql)
+#define trxChannelRxTone()  (currentChannelData->rxTone)
+#endif
+
 static uint8_t trxCssMeasureCount = 0;
 
 static uint8_t currentCC = 1;
@@ -423,9 +450,9 @@ bool trxCarrierDetected(RadioDevice_t deviceId)
 			break;
 
 		case RADIO_MODE_ANALOG:
-			if (currentChannelData->sql != 0)
+			if (trxChannelSql() != 0)
 			{
-				squelch = TRX_SQUELCH_MAX - ((currentChannelData->sql - 1) * TRX_SQUELCH_INC);
+				squelch = TRX_SQUELCH_MAX - ((trxChannelSql() - 1) * TRX_SQUELCH_INC);
 			}
 			else
 			{
@@ -561,9 +588,9 @@ bool trxCheckAnalogSquelch(void)
 		uint8_t squelch;
 
 		// check for variable squelch control
-		if (currentChannelData->sql != 0)
+		if (trxChannelSql() != 0)
 		{
-			squelch = TRX_SQUELCH_MAX - ((currentChannelData->sql - 1) * TRX_SQUELCH_INC);
+			squelch = TRX_SQUELCH_MAX - ((trxChannelSql() - 1) * TRX_SQUELCH_INC);
 		}
 		else
 		{
@@ -625,7 +652,7 @@ bool trxCheckAnalogSquelch(void)
 			}
 		}
 
-		bool cssFlag = (rxCSSactive ? trxCheckCSSFlag(currentChannelData->rxTone) : false);
+		bool cssFlag = (rxCSSactive ? trxCheckCSSFlag(trxChannelRxTone()) : false);
 
 		if (currentRadioDevice->analogSignalReceived)
 		{
