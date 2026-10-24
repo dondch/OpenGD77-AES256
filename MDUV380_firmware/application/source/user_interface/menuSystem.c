@@ -90,6 +90,15 @@ menuDataGlobal_t menuDataGlobal =
 #if !defined(PLATFORM_GD77S)
 				NULL,// APRS options
 #endif
+#if defined(ENABLE_AES)
+				NULL,// AES keys
+#endif
+#if defined(ENABLE_AES) && defined(ENABLE_DMR_DATA)
+				NULL,// Messages
+#endif
+#if defined(HAS_DUAL_WATCH_OPTIONS)
+				NULL,// Dual Watch options
+#endif
 				// *** Add new menus to be accessed using quickkey (ID: 0..31) above this line ***
 				NULL,// MessageBox
 				NULL,// hotspot mode
@@ -153,6 +162,9 @@ static menuFunctionData_t menuFunctions[] =
 #endif
 #if defined(ENABLE_AES) && defined(ENABLE_DMR_DATA)
 		{ menuMessages,             NULL, NULL, 0 },
+#endif
+#if defined(HAS_DUAL_WATCH_OPTIONS)
+		{ menuDualWatchOptions,     NULL, NULL, 0 },
 #endif
 		// *** Add new menus to be accessed using quickkey (ID: 0..31) above this line ***
 		{ uiMessageBox,             NULL, NULL, 0 },
@@ -699,6 +711,9 @@ static const menuItemNewData_t optionsMenuItems[] =
 #endif
 #if !defined(PLATFORM_GD77S)
 	{ 257, MENU_APRS            },
+#endif
+#if defined(HAS_DUAL_WATCH_OPTIONS)
+	{ 143, MENU_DUAL_WATCH },// stringOffset 143 = .dual_watch field
 #endif
 #if defined(ENABLE_AES)
 	// stringOffset = the ordinal of stringsTable_t.aes_keys (computed, so it can't drift)
