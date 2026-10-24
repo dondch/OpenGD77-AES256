@@ -77,6 +77,12 @@ static uint8_t       s_rxKeyId DMR_AES_CCM;      /* keyId of the last successful
 static int           s_rxPiSeeded DMR_AES_CCM;   /* 1 = call seeded from the chip PI-LC (use pure self-advance,
                                                   * stable & RF-independent); 0 = late-entry-bootstrapped rapid call
                                                   * (adopt diverging late entries so a wrong bootstrap self-corrects) */
+static uint32_t      s_rxLastPiMi DMR_AES_CCM;   /* MI of the last valid PI the chip handed us (any state) */
+static int           s_rxLastPiValid DMR_AES_CCM;
+static uint32_t      s_rxStaleMi DMR_AES_CCM;    /* MI of the PI that belongs to the stream that just ENDED (our own
+                                                  * TX included): the chip's LC page still holds it and re-surfaces it
+                                                  * on the first bursts of the next call, which must not seed on it */
+static int           s_rxStaleValid DMR_AES_CCM;
 
 /* Shared scratch for the (non-reentrant, foreground-only) key-store helpers. One
  * buffer instead of three per-function statics keeps CCM usage down. */
@@ -151,6 +157,8 @@ static uint16_t  s_rxdCnt[9] DMR_AES_CCM;   /* per-type aggregate counters (surv
 static uint16_t  s_rxdLe[2] DMR_AES_CCM;    /* [0]=late-entry decode OK, [1]=fail */
 static uint16_t  s_rxdMisc[3] DMR_AES_CCM;  /* [0]=LC reads, [1]=valid PI parses, [2]=RxBurst calls */
 static uint32_t  s_rxdLastPiMi DMR_AES_CCM; /* PI dedup: last logged PI MI */
+static uint16_t  s_rxdFrames[3] DMR_AES_CCM;  /* decoded frames while decrypting: [0] left alone as
+                                               * silence, [1] left alone as comfort noise, [2] XORed */
 /* Raw-burst capture state (crack the RX late-entry bit layout — see dmrAesGetCapData). */
 #define CAP_BURSTS 6
 static uint8_t   s_capState DMR_AES_CCM;     /* 0 idle, 1 armed, 2 capturing, 3 done */
@@ -189,25 +197,28 @@ void dmrAesResetRxDiag(void)
     memset(s_rxdCnt, 0, sizeof s_rxdCnt);
     memset(s_rxdLe, 0, sizeof s_rxdLe);
     memset(s_rxdMisc, 0, sizeof s_rxdMisc);
+    memset(s_rxdFrames, 0, sizeof s_rxdFrames);
     s_capState = 0; s_capN = 0;
 }
-/* Copy a self-describing snapshot into out (<= max). Header (32 bytes, LE):
- *  [0]=0xA5 magic, [1]=ring size, [2]=record size, [3]=0, [4..5]=write index,
+/* Copy a self-describing snapshot into out (<= max). Header (40 bytes, LE):
+ *  [0]=0xA5 magic, [1]=ring size, [2]=record size, [3]=header length, [4..5]=write index,
  *  [6..19]=cnt[1..7] (u16 each), [20..21]=leOk, [22..23]=leFail, [24..25]=LC reads,
  *  [26..27]=valid PI parses, [28..29]=RxBurst calls, [30..31]=LATEENTRY count, then the
+ *  [32..37]=frames (silence-skipped, ccr-skipped, XORed; u16 each), then the
  *  raw ring (RXD_RING * 16 bytes, ring order; the host reorders chronologically). */
 int dmrAesGetRxDiag(uint8_t *out, int max)
 {
-    int hdr = 32, body = (int)sizeof s_rxd, n = hdr + body;
+    int hdr = 40, body = (int)sizeof s_rxd, n = hdr + body;
     if (n > max) { return 0; }
     memset(out, 0, hdr);
-    out[0] = 0xA5; out[1] = RXD_RING; out[2] = (uint8_t)sizeof(rxd_evt_t);
+    out[0] = 0xA5; out[1] = RXD_RING; out[2] = (uint8_t)sizeof(rxd_evt_t); out[3] = (uint8_t)hdr;
     out[4] = (uint8_t)(s_rxdW & 0xFF); out[5] = (uint8_t)((s_rxdW >> 8) & 0xFF);
     for (int i = 1; i <= 7; i++) { out[6 + (i - 1) * 2] = (uint8_t)(s_rxdCnt[i] & 0xFF); out[7 + (i - 1) * 2] = (uint8_t)((s_rxdCnt[i] >> 8) & 0xFF); }
     out[20] = (uint8_t)(s_rxdLe[0] & 0xFF); out[21] = (uint8_t)((s_rxdLe[0] >> 8) & 0xFF);
     out[22] = (uint8_t)(s_rxdLe[1] & 0xFF); out[23] = (uint8_t)((s_rxdLe[1] >> 8) & 0xFF);
     for (int i = 0; i < 3; i++) { out[24 + i * 2] = (uint8_t)(s_rxdMisc[i] & 0xFF); out[25 + i * 2] = (uint8_t)((s_rxdMisc[i] >> 8) & 0xFF); }
     out[30] = (uint8_t)(s_rxdCnt[8] & 0xFF); out[31] = (uint8_t)((s_rxdCnt[8] >> 8) & 0xFF); /* LATEENTRY count */
+    for (int i = 0; i < 3; i++) { out[32 + i * 2] = (uint8_t)(s_rxdFrames[i] & 0xFF); out[33 + i * 2] = (uint8_t)((s_rxdFrames[i] >> 8) & 0xFF); }
     memcpy(out + hdr, s_rxd, body);
     return n;
 }
@@ -255,6 +266,8 @@ void dmrAesInit(void)
     memset(s_rxFrag, 0, sizeof s_rxFrag);
     s_rxKeyId = 0;
     s_rxPiSeeded = 0;
+    s_rxLastPiMi = s_rxStaleMi = 0;
+    s_rxLastPiValid = s_rxStaleValid = 0;
     s_txPiMi = 0;
     s_txKeyId = 0;
     s_txFrameCnt = 0;
@@ -475,7 +488,18 @@ void dmrAesRxPI(const uint8_t *pi, int len)
         int wasActive = s_rxActive;
         int seeded = 0;
 #endif
-        if (!s_rxActive)
+        /* STALE PI: HR-C6000.c reads the chip's LC page on every voice burst, and the chip keeps
+         * returning the PREVIOUS transmission's LC on the first bursts of a new one (OpenGD77 skips
+         * those frames for the caller display for the same reason). After an encrypted call that
+         * page holds its PI header, so the next call, clear or not, is handed that PI again right
+         * after the Voice LC Header reset. Seeding on it would decrypt a clear call into noise, or
+         * lock a rapid encrypted call onto the old MI and ignore its own PI. A real new call always
+         * carries a fresh MI, so a PI equal to the one the just-ended stream was seeded with (our own
+         * TX included) is ignored until a different PI has seeded. */
+        int stale = (!s_rxActive && s_rxStaleValid && (p.mi == s_rxStaleMi));
+        s_rxLastPiMi = p.mi;
+        s_rxLastPiValid = 1;
+        if (!s_rxActive && !stale)
         {
             s_rxActive = (dmr_aes_rx_init(&s_rx, &p) == 0);  /* load key for keyId + seed MI */
             if (s_rxActive)
@@ -485,6 +509,7 @@ void dmrAesRxPI(const uint8_t *pi, int len)
                 s_rxPiSeeded = 1;      /* chip PI-LC seed: a normal call -> pure self-advance, stable */
                 s_rxIvReady = 0;     /* generate IV from the seeded MI on the next burst */
                 s_rxLastSeq = -1;
+                s_rxStaleValid = 0;  /* a new stream seeded: the previous one's PI is history */
 #ifdef DMR_AES_DIAG_RX
                 seeded = 1;
 #endif
@@ -498,7 +523,7 @@ void dmrAesRxPI(const uint8_t *pi, int len)
          * suppresses those without hiding the new-call transitions. */
         if (seeded || !wasActive || (p.mi != s_rxdLastPiMi))
         {
-            rxd_log(1, (uint8_t)(0x01 | (seeded ? 0x02 : 0) | (wasActive ? 0x04 : 0)),
+            rxd_log(1, (uint8_t)(0x01 | (seeded ? 0x02 : 0) | (wasActive ? 0x04 : 0) | (stale ? 0x08 : 0)),
                     0, s_rxLastSeq, p.mi, s_rxInitMi);
             s_rxdLastPiMi = p.mi;
         }
@@ -637,6 +662,11 @@ void dmrAesRxLateEntry(int seq, const uint8_t *ambe27)
 void dmrAesRxCodecFrame(uint16_t *b49, int idxInBurst)
 {
     if (!s_rxActive || !s_rxBurstEnc) { return; }
+#ifdef DMR_AES_DIAG_RX
+    /* Which way dmr_aes_voice_frame will go with this frame (issue #4: do the firmware's
+     * inserted SILENCE_AUDIO frames get left alone?). Same tests, same order, as inside it. */
+    s_rxdFrames[dmr_ambe_is_silence(b49) ? 0 : (dmr_ambe_is_ccr(b49) ? 1 : 2)]++;
+#endif
     dmr_aes_voice_frame(&s_rx, b49, s_rxBurstBase + (size_t)idxInBurst * 56);
 }
 /* Call boundary (CRC-valid Terminator, or the next call's Voice LC Header). Also drop the
@@ -649,14 +679,28 @@ void dmrAesRxEnd(void)
     s_rxBurstEnc = 0;
     s_rxLastSeq = -1;
     memset(s_rxFrag, 0, sizeof s_rxFrag);
+    /* The PI the chip handed us during this stream is now stale (see dmrAesRxPI). Only the
+     * most recent one: a PI seen before an intervening stream is accepted again. */
+    if (s_rxLastPiValid)
+    {
+        s_rxStaleMi = s_rxLastPiMi;
+        s_rxStaleValid = 1;
+        s_rxLastPiValid = 0;
+    }
 }
 
 /* ---- TX (mirror of RX: encrypt the 49 AMBE params at the codec layer) ---- */
 void dmrAesTxStart(uint8_t keyId, uint32_t miSeed)
 {
     /* ISR context (HR-C6000 timeslot interrupt): keys are eager-loaded at boot; never
-     * do the blocking SPI-flash load here. Unloaded -> dmr_aes_tx_init fails -> clear TX. */
-    s_txActive = (dmr_aes_tx_init(&s_tx, DMR_ALG_AES256, keyId, miSeed) == 0); /* sets s_tx.mi = miSeed */
+     * do the blocking SPI-flash load here. Unloaded -> dmr_aes_tx_init fails -> clear TX.
+     * Called at EVERY key-up (DMR_STATE_TX_START_1), keyId 0 meaning a CLEAR call (no key
+     * selected, a data call, hotspot relay). It must positively end any encrypted state: a
+     * previous encrypted call can be aborted without DMR_STATE_TX_END_1 (interrupt timeout,
+     * mode change, slot reset), and a stale s_txActive would otherwise make the next clear
+     * call go out with the encryption LC flags, PI headers and an encrypted codec stream.
+     * keyId 0 is the "off" sentinel everywhere, never a key slot, even if slot 0 holds a key. */
+    s_txActive = (keyId != 0) && (dmr_aes_tx_init(&s_tx, DMR_ALG_AES256, keyId, miSeed) == 0); /* sets s_tx.mi = miSeed */
     s_txOff = 0;
     s_txPiMi = miSeed;     /* the call's CONSTANT initial MI: advertised for late entry, advanced by RX */
     s_txFrameCnt = 0;
@@ -723,7 +767,16 @@ void dmrAesTxStuffMI(uint16_t *b72)
 /* The old 27-byte FEC-octet TX crypt is gone — encryption is at the codec layer above. */
 void dmrAesTxVoice(uint8_t *ambe, int seq) { (void)ambe; (void)seq; }
 int  dmrAesTxActive(void) { return s_txActive; }
-void dmrAesTxEnd(void)    { s_txActive = 0; }
+void dmrAesTxEnd(void)
+{
+    if (s_txActive)
+    {
+        /* Our own PI header may still sit in the chip's LC page and be re-read by RX. */
+        s_rxStaleMi = s_txPiMi;
+        s_rxStaleValid = 1;
+    }
+    s_txActive = 0;
+}
 
 /* DMRA "Late Entry Single Block": the burst-F EMB that announces the encryption alg + key,
  * which a stock TYT (and our own RX via the chip's reconstructed PI-LC) reads to auto-engage

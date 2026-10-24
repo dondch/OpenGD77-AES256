@@ -35,6 +35,8 @@
 #include "user_interface/uiGlobals.h"
 #include "user_interface/menuSystem.h"
 #include "user_interface/uiLocalisation.h"
+#include "user_interface/uiTelemetry.h"
+#include "user_interface/uiCustomStrings.h"
 #include "user_interface/uiUtilities.h"
 
 
@@ -103,6 +105,9 @@ enum
 	DISPLAY_TIME_UTC_OR_LOCAL,
 	DISPLAY_SHOW_DISTANCE,
 	DISPLAY_DMR_LAST_TALKER_ON_SCREEN,
+#if defined(HAS_TELEMETRY)
+	DISPLAY_MAIN_SCREEN_STYLE, // Added at the end: the QuickKeys are storing the entries numbers
+#endif
 	NUM_DISPLAY_MENU_ITEMS
 };
 
@@ -337,10 +342,24 @@ static void updateScreen(bool isFirstRun)
 						rightSideConst = currentLanguage->off;
 					}
 					break;
+
+#if defined(HAS_TELEMETRY)
+				case DISPLAY_MAIN_SCREEN_STYLE:
+					leftSide = currentLanguage->mode; // only for the voice prompt, which needs a text of the language file
+					snprintf(rightSideVar, SCREEN_LINE_BUFFER_SIZE, "%s", uiCustomStringGet(settingsIsOptionBitSet(BIT_CLASSIC_MAIN_SCREEN) ? CUSTOM_STRING_CLASSIC : CUSTOM_STRING_NEW));
+					break;
+#endif
 			}
 
 			// workaround for non standard format of line for colour display
 			snprintf(buf, SCREEN_LINE_BUFFER_SIZE, "%s:%s", leftSide, (rightSideVar[0] ? rightSideVar : (rightSideConst ? rightSideConst : "")));
+
+#if defined(HAS_TELEMETRY)
+			if (mNum == DISPLAY_MAIN_SCREEN_STYLE)
+			{
+				snprintf(buf, SCREEN_LINE_BUFFER_SIZE, "%s:%s", uiCustomStringGet(CUSTOM_STRING_MAIN_SCREEN), rightSideVar);
+			}
+#endif
 
 			if (i == 0)
 			{
@@ -523,6 +542,15 @@ static void handleEvent(uiEvent_t *ev)
 					if (settingsIsOptionBitSet(BIT_UI_USES_DOUBLE_HEIGHT) == false)
 					{
 						settingsSetOptionBit(BIT_UI_USES_DOUBLE_HEIGHT, true);
+					}
+					break;
+#endif
+
+#if defined(HAS_TELEMETRY)
+				case DISPLAY_MAIN_SCREEN_STYLE:
+					if (settingsIsOptionBitSet(BIT_CLASSIC_MAIN_SCREEN) == false)
+					{
+						settingsSetOptionBit(BIT_CLASSIC_MAIN_SCREEN, true);
 					}
 					break;
 #endif
@@ -737,6 +765,15 @@ static void handleEvent(uiEvent_t *ev)
 					if (settingsIsOptionBitSet(BIT_UI_USES_DOUBLE_HEIGHT))
 					{
 						settingsSetOptionBit(BIT_UI_USES_DOUBLE_HEIGHT, false);
+					}
+					break;
+#endif
+
+#if defined(HAS_TELEMETRY)
+				case DISPLAY_MAIN_SCREEN_STYLE:
+					if (settingsIsOptionBitSet(BIT_CLASSIC_MAIN_SCREEN))
+					{
+						settingsSetOptionBit(BIT_CLASSIC_MAIN_SCREEN, false);
 					}
 					break;
 #endif
@@ -1110,6 +1147,9 @@ static void exitCallback(void *data)
 #endif
 #if defined(HAS_COLOURS)
 				BIT_UI_USES_DOUBLE_HEIGHT,
+#endif
+#if defined(HAS_TELEMETRY)
+				BIT_CLASSIC_MAIN_SCREEN,
 #endif
 				BIT_AUTO_NIGHT,
 				BIT_DISPLAY_CHANNEL_DISTANCE,

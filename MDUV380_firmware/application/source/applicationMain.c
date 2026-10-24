@@ -65,6 +65,9 @@
 
 // Couldn't declare into aprs.h, due to header cross-dependence.
 void aprsBeaconingTick(uiEvent_t *ev);
+#if defined(ENABLE_DUAL_SCREEN)
+#include "user_interface/uiDualScreen.h"
+#endif
 
 volatile bool mainIsRunning = true;
 static bool updateMessageOnScreen = false;
@@ -609,11 +612,13 @@ void applicationMainTask(void)
 		{
 			uint8_t injEvent;
 			char injKey;
-			if (usbKeyInjectTick(&injEvent, &injKey))
+			uint32_t injButtons;
+			if (usbKeyInjectTick(&injEvent, &injKey, &injButtons))
 			{
 				keys.event = injEvent;
 				keys.key = injKey;
 				key_event = EVENT_KEY_CHANGE;
+				buttons |= injButtons;   // SK2 reported as held with this key only (flags bit2)
 			}
 		}
 #endif
@@ -986,7 +991,13 @@ void applicationMainTask(void)
 
 		if(trxGetMode() == RADIO_MODE_ANALOG)
 		{
-			hasSignal = trxCheckAnalogSquelch();
+#if defined(ENABLE_DUAL_SCREEN)
+			// Not while the row watch looks at the other row for 80 ms: no LED, beeps or audio for what it sees
+			if (uiDualScreenWatchIsPeeking() == false)
+#endif
+			{
+				hasSignal = trxCheckAnalogSquelch();
+			}
 		}
 		else
 		{
@@ -1120,6 +1131,9 @@ void applicationMainTask(void)
 							if (currentChannelData->txFreq != 0)
 							{
 								rxPowerSavingSetState(ECOPHASE_POWERSAVE_INACTIVE);
+#if defined(ENABLE_DUAL_SCREEN)
+								uiDualScreenWatchAbort(); // PTT transmits on the active row: tune back to it first
+#endif
 
 								menuSystemPushNewMenu(UI_TX_SCREEN);
 							}
@@ -1433,6 +1447,9 @@ void applicationMainTask(void)
 		voxTick();
 		gpsTick();
 		aprsBeaconingTick(&ev);
+#if defined(ENABLE_DUAL_SCREEN)
+		uiDualScreenWatchTick();
+#endif
 		settingsSaveIfNeeded(false);
 #if defined(ENABLE_DMR_DATA) && defined(ENABLE_AES)
 		dmrSmsRxTick();   // decrypt + store + notify any received encrypted SMS

@@ -396,13 +396,20 @@ static void usbInjectJumpToBootloader(void)
 	while (1) { }   /* unreachable */
 }
 
-bool usbKeyInjectTick(uint8_t *outEvent, char *outKey)
+bool usbKeyInjectTick(uint8_t *outEvent, char *outKey, uint32_t *outButtons)
 {
 	if (s_injTail == s_injHead) { return false; }   /* nothing queued */
 	uint8_t key = s_injKey[s_injTail];
 	bool isLong = ((s_injFlags[s_injTail] & 0x01) != 0);
 	bool isHold = ((s_injFlags[s_injTail] & 0x02) != 0);
 	*outKey = (char)key;
+	/* flags bit2 = SK2 held while this key is pressed and released (BUTTON_SK2 = 0x20 in
+	 * io/buttons.h). The UI reads modifier buttons straight from ev->buttons with
+	 * BUTTONCHECK_DOWN(), never from a button event, so reporting the bit on the iterations
+	 * that carry this key's events is all a handler sees of a real held SK2. Reaches the
+	 * SK2+GREEN delete in the Messages menu and SK2+UP (wide span) in the sweep, neither of
+	 * which a key alone can. */
+	*outButtons = ((s_injFlags[s_injTail] & 0x04) != 0) ? 0x20u : 0u;
 
 	/* Replay the SAME event sequence the real keypad driver produces (the state machine
 	 * in keyboard.c), because the UI is written against it:
@@ -462,6 +469,22 @@ bool usbKeyInjectTick(uint8_t *outEvent, char *outKey)
 	return true;
 }
 
+/* keyboardReset() for the injected key: a handler that resets the keyboard after a key's
+ * DOWN expects to hear nothing more of that key -- the real driver goes to
+ * KEY_WAIT_RELEASED and the physical release produces no event. The injector used to go
+ * on and emit the release anyway, so a key that stopped the sweep (the "any key stops the
+ * scan" barrier resets the keyboard and returns on the DOWN) then delivered a SHORTUP to
+ * the normal screen: RED out of the sweep landed in Channel mode on the bench, twice.
+ * Drop the key whose DOWN has been delivered; keys still queued have not been pressed. */
+void usbKeyInjectReset(void)
+{
+	if ((s_injTail != s_injHead) && (s_injPhase != 0))
+	{
+		s_injPhase = 0;
+		s_injTail = (uint8_t)((s_injTail + 1) % INJ_RING);
+	}
+}
+
 void usbFuncInjectPush(uint16_t function)
 {
 	s_injFunction = function;
@@ -494,7 +517,14 @@ static void hexDump2(uint8_t *ptr, int len,char *msg)
 
 static bool addressInSegment(uint32_t address, uint32_t length, uint32_t segmentStart, uint32_t segmentSize)
 {
-	return ((address >= segmentStart) && ((address + length) <= (segmentStart + segmentSize)));
+	// Without "address + length": a wire-supplied address near the top of the 32-bit range
+	// would wrap the sum back below the segment end and pass.
+	if (address < segmentStart)
+	{
+		return false;
+	}
+	uint32_t offset = address - segmentStart;
+	return ((offset <= segmentSize) && (length <= (segmentSize - offset)));
 }
 
 void tick_com_request(void)
@@ -596,9 +626,23 @@ static void cpsHandleReadCommand(void)
 			break;
 
 		case CPS_ACCESS_MCU_ROM:
-			// Base address of MCU ROM on the STM32 is 0x8000000 not 0x00000000
-			memcpy((uint8_t *)&usbComSendBuf[3], (uint8_t *)address + 0x8000000, length);
-			result = true;
+			// Base address of MCU ROM on the STM32 is 0x8000000 not 0x00000000. The STM32F405
+			// has 1 MB of flash: a read past it would walk into unmapped address space.
+			if (addressInSegment(address, length, 0U, 0x100000U)
+#if defined(ENABLE_KEY_INJECTION)
+					// DEV builds: the bench tools read variables and registers through this area
+					// (the address is given minus the 0x8000000 flash base), so SRAM
+					// (0x20000000, 128 KB), CCM (0x10000000, 64 KB) and the peripheral space
+					// (0x40000000-0x5FFFFFFF) stay readable there. Release builds keep flash only.
+					|| addressInSegment(address, length, (0x20000000U - 0x8000000U), 0x20000U)
+					|| addressInSegment(address, length, (0x10000000U - 0x8000000U), 0x10000U)
+					|| addressInSegment(address, length, (0x40000000U - 0x8000000U), 0x20000000U)
+#endif
+				)
+			{
+				memcpy((uint8_t *)&usbComSendBuf[3], (uint8_t *)address + 0x8000000, length);
+				result = true;
+			}
 			break;
 
 		case CPS_ACCESS_DISPLAY_BUFFER:
@@ -607,20 +651,28 @@ static void cpsHandleReadCommand(void)
 			if (address < (DISPLAY_Y_OFFSET * DISPLAY_SIZE_X * 2))
 			{
 				memset((uint8_t *)&usbComSendBuf[3], 0xFF, length);// send white for blank area
+				result = true;
 			}
-			else
+			else if (addressInSegment(address, length, (DISPLAY_Y_OFFSET * DISPLAY_SIZE_X * 2), (DISPLAY_SIZE_X * DISPLAY_SIZE_Y * sizeof(uint16_t))))
 			{
 				memcpy((uint8_t *)&usbComSendBuf[3], (uint8_t *)displayGetPrimaryScreenBuffer() + address - (DISPLAY_Y_OFFSET * DISPLAY_SIZE_X * 2), length);
+				result = true;
 			}
 #else
-			memcpy((uint8_t *)&usbComSendBuf[3], (uint8_t *)displayGetPrimaryScreenBuffer() + address, length);
+			if (addressInSegment(address, length, 0U, (DISPLAY_SIZE_X * DISPLAY_SIZE_Y * sizeof(uint16_t))))
+			{
+				memcpy((uint8_t *)&usbComSendBuf[3], (uint8_t *)displayGetPrimaryScreenBuffer() + address, length);
+				result = true;
+			}
 #endif
-			result = true;
 			break;
 
 		case CPS_ACCESS_WAV_BUFFER:
-			memcpy((uint8_t *)&usbComSendBuf[3], (uint8_t *)&audioAndHotspotDataBuffer.rawBuffer[address], length);
-			result = true;
+			if (addressInSegment(address, length, 0U, sizeof(audioAndHotspotDataBuffer.rawBuffer)))
+			{
+				memcpy((uint8_t *)&usbComSendBuf[3], (uint8_t *)&audioAndHotspotDataBuffer.rawBuffer[address], length);
+				result = true;
+			}
 			break;
 
 		case CPS_COMPRESS_AND_ACCESS_AMBE_BUFFER:// read from ambe audio buffer
@@ -954,9 +1006,19 @@ static void cpsHandleWriteCommand(void)
 				uint32_t address = (com_requestbuffer[2] << 24) + (com_requestbuffer[3] << 16) + (com_requestbuffer[4] << 8) + (com_requestbuffer[5] << 0);
 				uint32_t length = (com_requestbuffer[6] << 8) + (com_requestbuffer[7] << 0);
 
-				wavbuffer_count = (address + length) / WAV_BUFFER_SIZE;
-				memcpy((uint8_t *)&audioAndHotspotDataBuffer.rawBuffer[address], (uint8_t *)&com_requestbuffer[8], length);
-				ok = true;
+				// The request carries at most COM_REQUESTBUFFER_SIZE - 8 payload bytes, and the
+				// raw buffer is only so big: a wire-supplied address/length pair must not write
+				// past either.
+				if (length > (COM_REQUESTBUFFER_SIZE - 8))
+				{
+					length = (COM_REQUESTBUFFER_SIZE - 8);
+				}
+				if (addressInSegment(address, length, 0U, sizeof(audioAndHotspotDataBuffer.rawBuffer)))
+				{
+					wavbuffer_count = (address + length) / WAV_BUFFER_SIZE;
+					memcpy((uint8_t *)&audioAndHotspotDataBuffer.rawBuffer[address], (uint8_t *)&com_requestbuffer[8], length);
+					ok = true;
+				}
 			}
 			break;
 
@@ -1514,7 +1576,31 @@ static void cpsHandleCommand(void)
 			return;   /* NOT break -- see above */
 #endif
 #ifdef ENABLE_KEY_INJECTION
-		case 0x96: // DEV: inject a keypad key: [2]=keycode, [3]=flags (bit0 = long press).
+		case 0x98: // DEV: write the settings (and VFOs) to flash now. On this platform the
+			//        firmware saves them only at power-off (settingsSaveIfNeeded() is a no-op
+			//        here), and the bench cannot power-cycle: a DFU reboot after this is the
+			//        nearest thing to a power cycle for a settings-persistence check.
+			//        (0x9E is the flash-word programmer below; this once shadowed it.)
+			//        The save erases and rewrites two SPI-flash sectors (the settings and the
+			//        VFOs, through EEPROM_Write -> SPI_Flash_write), whose busy polling sleeps
+			//        with osDelay(): inside the CPS TASK_LOCK_WRITE() critical section the
+			//        sleeps return at once, the poll runs out while the erase is still going,
+			//        the rewrite is skipped and the reply says 0 -- with the sectors left blank.
+			//        Bracket it like every other flash write in this file.
+			{
+				bool saved;
+				TASK_UNLOCK_WRITE();
+				saved = settingsSaveSettings(true);
+				TASK_LOCK_WRITE();
+				usbComSendBuf[0] = com_requestbuffer[0];
+				usbComSendBuf[1] = 0x98;
+				usbComSendBuf[2] = saved ? 1 : 0;
+			}
+			hasToReply = true;
+			replyLength = 3;
+			return;   /* NOT break -- the generic '-' reply would clobber this */
+		case 0x96: // DEV: inject a keypad key: [2]=keycode, [3]=flags (bit0 = long press,
+			//        bit1 = hold (no release), bit2 = SK2 held for this key).
 			//        Queued here; usbKeyInjectTick() feeds it to the normal UI (DOWN then UP)
 			//        from the main loop. Pairs with the USB display mirror (fbmirror.py).
 			usbKeyInjectPush(com_requestbuffer[2], com_requestbuffer[3]);
@@ -1799,6 +1885,9 @@ static void cpsHandleCommand(void)
 					usbComSendBuf[3 + n++] = (uint8_t)(d[i] >> 24);
 				}
 				usbComSendBuf[3 + n++] = (uint8_t)(dmrDataTxActive() ? 1 : 0);
+				// Appended (older hosts read the fixed 29 bytes above and ignore the rest):
+				// the per-burst trace, [writeIndex, 8 x (type, state, b0..b3)].
+				n += dmrSmsRxTrace((uint8_t *)&usbComSendBuf[3 + n], COM_BUFFER_SIZE - (3 + n));
 				usbComSendBuf[0] = com_requestbuffer[0];
 				usbComSendBuf[1] = (uint8_t)((n >> 8) & 0xFF);
 				usbComSendBuf[2] = (uint8_t)(n & 0xFF);
