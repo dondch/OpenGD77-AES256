@@ -74,7 +74,23 @@
 #if defined(PLATFORM_MD9600) || defined(PLATFORM_GD77) || defined(PLATFORM_GD77S) || defined(PLATFORM_DM1801) || defined(PLATFORM_DM1801A) || defined(PLATFORM_RD5R)
 static __attribute__((section(".data.$RAM2"))) uint8_t screenNotificationBufData[((DISPLAY_SIZE_X * DISPLAY_SIZE_Y) >> 3)];
 #else
-static  __attribute__((section(".ccmram"))) uint16_t screenNotificationBufData[DISPLAY_SIZE_X * DISPLAY_SIZE_Y];
+// Every popup is centred on YCENTER and none is taller than 72 rows (the bearing box is
+// BEARING_BOX_H + the drop shadow, a four-line message is 4 * FONT_SIZE_3_HEIGHT + 9), so
+// only an 80-row band of the framebuffer is saved behind it, not the whole screen: 25,600
+// bytes of CCM instead of 40,960. A popup that drew outside the band would leave its
+// traces on screen after it closed; the asserts below keep the geometry inside it.
+#define NOTIFICATION_BAND_ROWS  80
+#define NOTIFICATION_BAND_Y0    ((DISPLAY_SIZE_Y / 2) - (NOTIFICATION_BAND_ROWS / 2))
+#define NOTIFICATION_BAND_WORDS (NOTIFICATION_BAND_ROWS * DISPLAY_SIZE_X)
+static  __attribute__((section(".ccmram"))) uint16_t screenNotificationBufData[NOTIFICATION_BAND_WORDS];
+
+// Drop-shadow boxes span rows [y - 2, y + h): see displayDrawRoundRectWithDropShadow().
+_Static_assert((BEARING_BOX_Y - 2) >= NOTIFICATION_BAND_Y0, "bearing popup starts above the saved band");
+_Static_assert((BEARING_BOX_Y + BEARING_BOX_H) <= (NOTIFICATION_BAND_Y0 + NOTIFICATION_BAND_ROWS), "bearing popup ends below the saved band");
+_Static_assert((((DISPLAY_SIZE_Y - (4 * FONT_SIZE_3_HEIGHT)) / 2) - 3 - 1 - 2) >= NOTIFICATION_BAND_Y0, "4-line message popup starts above the saved band");
+_Static_assert((((DISPLAY_SIZE_Y - (4 * FONT_SIZE_3_HEIGHT)) / 2) - 3 - 1 + (4 * FONT_SIZE_3_HEIGHT) + 6) <= (NOTIFICATION_BAND_Y0 + NOTIFICATION_BAND_ROWS), "4-line message popup ends below the saved band");
+_Static_assert((YBOX - 2) >= NOTIFICATION_BAND_Y0, "bar popup starts above the saved band");
+_Static_assert((YBOX + INNERBOX_H) <= (NOTIFICATION_BAND_Y0 + NOTIFICATION_BAND_ROWS), "bar popup ends below the saved band");
 #endif
 
 typedef struct
@@ -165,10 +181,12 @@ void uiNotificationRefresh(void)
 	if (notificationData.visible)
 	{
 		// copy the primary screen content
-		memcpy(screenNotificationBufData, displayGetPrimaryScreenBuffer(), sizeof(screenNotificationBufData));
-
 #if defined(PLATFORM_MD9600) || defined(PLATFORM_GD77) || defined(PLATFORM_GD77S) || defined(PLATFORM_DM1801) || defined(PLATFORM_DM1801A) || defined(PLATFORM_RD5R)
+		memcpy(screenNotificationBufData, displayGetPrimaryScreenBuffer(), sizeof(screenNotificationBufData));
 		displayOverrideScreenBuffer(screenNotificationBufData);
+#else
+		// only the band the popup can touch
+		memcpy(screenNotificationBufData, (displayGetPrimaryScreenBuffer() + (NOTIFICATION_BAND_Y0 * DISPLAY_SIZE_X)), sizeof(screenNotificationBufData));
 #endif
 
 		// Draw whatever
@@ -327,7 +345,7 @@ void uiNotificationRefresh(void)
 #if defined(PLATFORM_MD9600) || defined(PLATFORM_GD77) || defined(PLATFORM_GD77S) || defined(PLATFORM_DM1801) || defined(PLATFORM_DM1801A) || defined(PLATFORM_RD5R)
 		displayRestorePrimaryScreenBuffer();
 #else
-		memcpy(displayGetPrimaryScreenBuffer(), screenNotificationBufData, sizeof(screenNotificationBufData));
+		memcpy((displayGetPrimaryScreenBuffer() + (NOTIFICATION_BAND_Y0 * DISPLAY_SIZE_X)), screenNotificationBufData, sizeof(screenNotificationBufData));
 #endif
 	}
 }
