@@ -34,6 +34,11 @@
 #include "user_interface/menuSystem.h"
 #include "user_interface/uiUtilities.h"
 #include "user_interface/uiLocalisation.h"
+#include "user_interface/uiTelemetry.h"
+#include "user_interface/uiHomeScreen.h"
+#if defined(HAS_DUAL_WATCH_OPTIONS)
+#include "user_interface/uiDualScreen.h"
+#endif
 #include "hardware/SPI_Flash.h"
 #include "functions/trx.h"
 #include "functions/rxPowerSaving.h"
@@ -61,6 +66,12 @@ static  __attribute__((section(".ccmram")))
 static  __attribute__((section(".data.$RAM2")))
 #endif
 LinkItem_t callsList[NUM_LASTHEARD_STORED];
+
+#if defined(HAS_TELEMETRY)
+// Signal strength of each entry of the Last Heard list (dBm, 0 means unknown), indexed like callsList[].
+// It is not part of LinkItem_t to keep the size of the firmware binary: this section is not stored in the Flash.
+static int8_t callsListRssi[NUM_LASTHEARD_STORED];   // main RAM: CCM is full in the DMR_DATA build
+#endif
 
 static uint32_t dmrIdDataArea_1_Size;
 const uint32_t DMRID_HEADER_LENGTH = 0x0C;
@@ -302,6 +313,10 @@ void lastHeardInitList(void)
 {
 	LinkHead = callsList;
 
+#if defined(HAS_TELEMETRY)
+	memset(callsListRssi, 0x00, sizeof(callsListRssi));
+#endif
+
 	for(int i = 0; i < NUM_LASTHEARD_STORED; i++)
 	{
 		callsList[i].id = 0;
@@ -336,6 +351,28 @@ void lastHeardInitList(void)
 	}
 
 	uiDataGlobal.lastHeardCount = 0;
+}
+
+void lastHeardSetRssi(const LinkItem_t *item, int dBm)
+{
+#if defined(HAS_TELEMETRY)
+	if ((item >= &callsList[0]) && (item <= &callsList[NUM_LASTHEARD_STORED - 1]))
+	{
+		callsListRssi[item - &callsList[0]] = (int8_t)CLAMP(dBm, -127, -1);
+	}
+#endif
+}
+
+int lastHeardGetRssi(const LinkItem_t *item)
+{
+#if defined(HAS_TELEMETRY)
+	if ((item >= &callsList[0]) && (item <= &callsList[NUM_LASTHEARD_STORED - 1]))
+	{
+		return callsListRssi[item - &callsList[0]];
+	}
+#endif
+
+	return 0;
 }
 
 LinkItem_t *lastHeardFindInList(uint32_t id)
@@ -859,6 +896,9 @@ bool lastHeardListUpdate(uint8_t *dmrDataBuffer, bool forceOnHotspot)
 						}
 
 						item->time = ticksGetMillis();
+#if defined(HAS_TELEMETRY)
+						lastHeardSetRssi(item, trxGetRSSIdBm(RADIO_DEVICE_PRIMARY));
+#endif
 						lastTG = talkGroupOrPcId;
 						dmrRxAGCrxPeakAverage = (float)item->rxAGCGain;
 
@@ -923,6 +963,9 @@ bool lastHeardListUpdate(uint8_t *dmrDataBuffer, bool forceOnHotspot)
 						item->id = id;
 						item->talkGroupOrPcId = talkGroupOrPcId;
 						item->time = ticksGetMillis();
+#if defined(HAS_TELEMETRY)
+						lastHeardSetRssi(item, trxGetRSSIdBm(RADIO_DEVICE_PRIMARY));
+#endif
 						item->receivedTS = (dmrMonitorCapturedTS != -1) ? dmrMonitorCapturedTS : trxGetDMRTimeSlot();
 						item->dmrMode = currentRadioDevice->trxDMRModeRx;
 						dmrRxAGCrxPeakAverage = DMR_RX_AGC_DEFAULT_PEAK_SAMPLES;
@@ -957,6 +1000,9 @@ bool lastHeardListUpdate(uint8_t *dmrDataBuffer, bool forceOnHotspot)
 							item->talkGroupOrPcId = talkGroupOrPcId;// update the TG in case they changed TG
 							updateLHItem(item);
 							item->time = ticksGetMillis();
+#if defined(HAS_TELEMETRY)
+						lastHeardSetRssi(item, trxGetRSSIdBm(RADIO_DEVICE_PRIMARY));
+#endif
 						}
 
 						lastTG = talkGroupOrPcId;
@@ -1857,6 +1903,15 @@ void uiUtilityRenderQSOData(void)
 
 void uiUtilityRenderHeader(bool isVFODualWatchScanning, bool isVFOSweepScanning, bool forceBatteryDisplay)
 {
+#if defined(HAS_TELEMETRY)
+	// The redesigned main screen has its own status bar
+	if (uiUtilityHomeScreenIsActive())
+	{
+		uiUtilityHomeScreenDrawStatusBar();
+		return;
+	}
+#endif
+
 	const int MODE_TEXT_X_OFFSET = 1;
 #if defined(PLATFORM_MD9600)
 	const int FILTER_TEXT_X_CENTER = 35;
@@ -2284,6 +2339,16 @@ void uiUtilityRenderHeader(bool isVFODualWatchScanning, bool isVFOSweepScanning,
 
 void uiUtilityRedrawHeaderOnly(bool isVFODualWatchScanning, bool isVFOSweepScanning, bool forceBatteryDisplay)
 {
+#if defined(HAS_TELEMETRY)
+	if (uiUtilityHomeScreenIsActive())
+	{
+		// The status bar fills its own area: clearing the two first rows would erase the top of the channel name
+		uiUtilityHomeScreenDrawStatusBar();
+		displayRenderRows(0, 2);
+		return;
+	}
+#endif
+
 	if (isVFOSweepScanning)
 	{
 		displayFillRect(0, 0, DISPLAY_SIZE_X, 9, true);
@@ -2303,26 +2368,58 @@ void uiUtilityRedrawHeaderOnly(bool isVFODualWatchScanning, bool isVFOSweepScann
 
 static void drawHeaderBar(int *barWidth, int16_t barHeight)
 {
+	int16_t y = DISPLAY_Y_POS_BAR;
+
+#if defined(HAS_TELEMETRY)
+	// The redesigned main screen has the Mic level bar in its Tx area
+	if (uiUtilityHomeScreenIsActive())
+	{
+		y = HOME_Y_POS_MIC_BAR;
+	}
+#endif
+
 	*barWidth = CLAMP(*barWidth, 0, DISPLAY_SIZE_X);
 
 	displayThemeApply(THEME_ITEM_FG_RSSI_BAR, THEME_ITEM_BG_HEADER_TEXT);
 	if (*barWidth)
 	{
-		displayFillRect(0, DISPLAY_Y_POS_BAR, *barWidth, barHeight, false);
+		displayFillRect(0, y, *barWidth, barHeight, false);
 	}
 
 	// Clear the end of the bar area, if needed
 	if (*barWidth < DISPLAY_SIZE_X)
 	{
-		displayFillRect(*barWidth, DISPLAY_Y_POS_BAR, (DISPLAY_SIZE_X - *barWidth), barHeight, true);
+		displayFillRect(*barWidth, y, (DISPLAY_SIZE_X - *barWidth), barHeight, true);
 	}
 
 	displayThemeResetToDefault();
 }
 
+// Renders the display rows of the bar graph drawn by uiUtilityDrawRSSIBarGraph() and uiUtilityDraw*MicLevelBarGraph()
+void uiUtilityRenderLevelBarRows(void)
+{
+#if defined(HAS_TELEMETRY)
+	if (uiUtilityHomeScreenIsActive())
+	{
+		displayRenderRows((HOME_Y_POS_MIC_BAR / 8), ((HOME_Y_POS_MIC_BAR + HOME_MIC_BAR_HEIGHT + 7) / 8));
+		return;
+	}
+#endif
+
+	displayRenderRows(1, 2);
+}
+
 void uiUtilityDrawRSSIBarGraph(void)
 {
 	int rssi = trxGetRSSIdBm(RADIO_DEVICE_PRIMARY);
+
+#if defined(HAS_TELEMETRY)
+	// The redesigned main screen has its own S-meter
+	if (uiUtilityHomeScreenIsActive())
+	{
+		return;
+	}
+#endif
 
 	if ((rssi > SMETER_S9) && (trxGetMode() == RADIO_MODE_ANALOG))
 	{
@@ -2375,6 +2472,360 @@ void uiUtilityDrawRSSIBarGraph(void)
 		xPos *= 2;
 
 		ucDrawFastVLine(xPos, (DISPLAY_Y_POS_BAR + 1), 2, false);
+	}
+#endif
+}
+
+#if defined(HAS_TELEMETRY)
+static void telemetryCollect(uiTelemetryData_t *data)
+{
+	uint8_t powerLevel = trxGetPowerLevel();
+
+	data->rssidBm = trxGetRSSIdBm(RADIO_DEVICE_PRIMARY);
+	data->noiseRaw = trxGetNoiseRaw(RADIO_DEVICE_PRIMARY);
+	data->batteryDeciVolts = (uint16_t)averageBatteryVoltage;
+	data->temperatureDeciCelsius = getTemperature();
+	data->powerLevel = getPowerLevel(powerLevel);
+	data->powerUnit = getPowerLevelUnit(powerLevel);
+}
+#endif
+
+// Draws the Rx technical data (S-meter, dBm, SNR...) in the screen buffer, if the current content of the Channel or VFO screen leaves the room for it.
+// The signal strength history graph is drawn at historyY, if not negative.
+// Returns true if something has been drawn.
+bool uiUtilityDrawTelemetryRx(int16_t y, int16_t historyY, int16_t historyHeight)
+{
+#if defined(HAS_TELEMETRY)
+	static uint32_t historyLastSampleTime = 0;
+	static uint32_t historyFrequency = 0;
+
+	bool isHomeScreen = uiUtilityHomeScreenIsActive(); // it has the room for everything, whatever is displayed
+
+	// On the classic screens, the double height font, the channel details and the notifications are using the same area
+	if ((isHomeScreen || ((settingsIsOptionBitSet(BIT_UI_USES_DOUBLE_HEIGHT) == false) && (uiDataGlobal.displayChannelSettings == false))) &&
+			(uiNotificationIsVisible() == false))
+	{
+		uiTelemetryData_t data;
+		uint32_t now = ticksGetMillis();
+
+		telemetryCollect(&data);
+		uiTelemetryDrawRx(&data, y, (isHomeScreen || (uiDataGlobal.isDisplayingQSOData == false))); // The second line of the caller's data uses the details line
+
+		// The history is about one frequency. It is not sampled while transmitting, or while another screen is displayed: this is leaving a gap in it.
+		if (historyFrequency != currentChannelData->rxFreq)
+		{
+			uiTelemetryHistoryClear();
+			historyFrequency = currentChannelData->rxFreq;
+			historyLastSampleTime = (now - TELEMETRY_HISTORY_SAMPLE_PERIOD_MS);
+		}
+		else if ((now - historyLastSampleTime) > (TELEMETRY_HISTORY_SAMPLE_PERIOD_MS * 10U))
+		{
+			uiTelemetryHistoryAddGap();
+			historyLastSampleTime = (now - TELEMETRY_HISTORY_SAMPLE_PERIOD_MS);
+		}
+
+		if ((now - historyLastSampleTime) >= TELEMETRY_HISTORY_SAMPLE_PERIOD_MS)
+		{
+			historyLastSampleTime = now;
+			uiTelemetryHistoryAdd(data.rssidBm);
+		}
+
+		if (historyY >= 0)
+		{
+			uiTelemetryHistoryDraw(historyY, historyHeight);
+		}
+
+		return true;
+	}
+#endif
+
+	return false;
+}
+
+// The redesigned main screen is used in Channel mode (including while transmitting), unless the classic one is selected in the Display options
+bool uiUtilityHomeScreenIsActive(void)
+{
+#if defined(HAS_TELEMETRY)
+#if defined(HAS_DUAL_WATCH_OPTIONS)
+	// The dual screen takes over the home screen while its option is on
+	if (uiDualScreenIsEnabled())
+	{
+		return false;
+	}
+#endif
+	if (settingsIsOptionBitSet(BIT_CLASSIC_MAIN_SCREEN) == false)
+	{
+		int currentMenu = menuSystemGetCurrentMenuNumber();
+
+		return ((menuSystemGetRootMenuNumber() == UI_CHANNEL_MODE) && ((currentMenu == UI_CHANNEL_MODE) || (currentMenu == UI_TX_SCREEN)));
+	}
+#endif
+
+	return false;
+}
+
+#if defined(HAS_TELEMETRY)
+// Storage of the texts of uiHomeScreenData_t
+typedef struct
+{
+	char name[SCREEN_LINE_BUFFER_SIZE];
+	char zone[SCREEN_LINE_BUFFER_SIZE];
+	char contact[SCREEN_LINE_BUFFER_SIZE];
+	char side[SCREEN_LINE_BUFFER_SIZE];
+	char flags[8];
+	char callsign[SCREEN_LINE_BUFFER_SIZE];
+	char callText[HOME_INFO_MAX_LEN + 1];
+} homeScreenTexts_t;
+
+// Reads from the radio, the codeplug and the settings everything displayed by the redesigned main screen
+static void homeScreenBuildData(uiHomeScreenData_t *data, homeScreenTexts_t *texts, int txTimeSecs, bool showCall, const char *zoneText)
+{
+	uint32_t rxFreq = (uiDataGlobal.reverseRepeaterChannel ? currentChannelData->txFreq : currentChannelData->rxFreq);
+	uint32_t txFreq = (uiDataGlobal.talkaround ? rxFreq : (uiDataGlobal.reverseRepeaterChannel ? currentChannelData->rxFreq : currentChannelData->txFreq));
+	char *p = texts->flags;
+
+	memset(data, 0x00, sizeof(uiHomeScreenData_t));
+	memset(texts, 0x00, sizeof(homeScreenTexts_t));
+
+	data->isDigital = (trxGetMode() == RADIO_MODE_DIGITAL);
+	data->isTransmitting = isTransmittingIgnoringAPRSBeaconing();
+	data->isScanning = (uiDataGlobal.Scan.active && (uiDataGlobal.Scan.state != SCAN_STATE_PAUSED));
+	data->timeSlot = (uint8_t)(trxGetDMRTimeSlot() + 1);
+	data->colourCode = trxGetDMRColourCode();
+	data->bandwidthIs25kHz = trxGetBandwidthIs25kHz();
+	data->rxFrequency = rxFreq;
+	data->txFrequency = txFreq;
+	data->batteryPercentage = (uint8_t)getBatteryPercentage();
+	data->txTimeSecs = (uint16_t)((txTimeSecs < 0) ? 0 : txTimeSecs);
+	data->totTotalSecs = (currentChannelData->tot * 15);
+
+	telemetryCollect(&data->telemetry);
+
+	codeplugUtilConvertBufToString(currentChannelData->name, texts->name, 16);
+	data->channelName = texts->name;
+
+	snprintf(texts->zone, sizeof(texts->zone), "%s", ((zoneText != NULL) ? zoneText : ""));
+	data->zoneText = texts->zone;
+
+	// Talkgroup, or CSS tone and squelch level
+	if (data->isDigital)
+	{
+		if (nonVolatileSettings.overrideTG != 0)
+		{
+			uiUtilityBuildTgOrPCDisplayName(texts->contact, sizeof(texts->contact));
+		}
+		else
+		{
+			codeplugUtilConvertBufToString(currentContactData.name, texts->contact, 16);
+		}
+	}
+	else
+	{
+		CodeplugCSSTypes_t type = codeplugGetCSSType(currentChannelData->rxTone);
+
+		if (type == CSS_TYPE_CTCSS)
+		{
+			snprintf(texts->contact, sizeof(texts->contact), "CTCSS %d.%d", (currentChannelData->rxTone / 10), (currentChannelData->rxTone % 10));
+		}
+		else if (type & CSS_TYPE_DCS)
+		{
+			dcsPrintf(texts->contact, sizeof(texts->contact), "DCS ", currentChannelData->rxTone);
+		}
+		else
+		{
+			snprintf(texts->contact, sizeof(texts->contact), "FM");
+		}
+
+		snprintf(texts->side, sizeof(texts->side), "SQL %d%%", (5 * (((currentChannelData->sql == 0) ?
+				nonVolatileSettings.squelchDefaults[currentRadioDevice->trxCurrentBand[TRX_RX_FREQ_BAND]] : currentChannelData->sql) - 1)));
+		data->sideText = texts->side;
+	}
+	data->contactText = texts->contact;
+
+	// Status letters
+	if (uiDataGlobal.reverseRepeaterChannel)
+	{
+		*p++ = 'R';
+	}
+	if (uiDataGlobal.talkaround)
+	{
+		*p++ = 'T';
+	}
+	if (monitorModeData.isEnabled)
+	{
+		*p++ = 'M';
+	}
+	if (currentChannelData->aprsConfigIndex != 0)
+	{
+		*p++ = 'A';
+	}
+	*p = 0;
+	data->statusFlags = texts->flags;
+
+	// Clock, like in the classic header
+	data->hours = -1;
+	data->minutes = -1;
+	if (settingsIsOptionBitSet(BIT_DISPLAY_TIME_IN_HEADER))
+	{
+		time_t_custom t = uiDataGlobal.dateTimeSecs + ((nonVolatileSettings.timezone & 0x80) ? ((nonVolatileSettings.timezone & 0x7F) - 64) * (15 * 60) : 0);
+		struct tm timeAndDate;
+
+		gmtime_r_Custom(&t, &timeAndDate);
+		data->hours = (int8_t)timeAndDate.tm_hour;
+		data->minutes = (int8_t)timeAndDate.tm_min;
+	}
+
+	// Received DMR call: same rules as uiUtilityRenderQSOData()
+	if (showCall && data->isDigital && (HRC6000GetReceivedTgOrPcId() != 0) && (LinkHead != NULL) && (LinkHead->id != 0))
+	{
+		const char *source = LinkHead->contact;
+		int32_t spacePos;
+		size_t callsignLen;
+		bool isPrivate = ((LinkHead->talkGroupOrPcId >> 24) == PC_CALL_FLAG);
+		bool different = (((LinkHead->talkGroupOrPcId & 0xFFFFFF) != trxTalkGroupOrPcId ) ||
+				(((currentRadioDevice->trxDMRModeRx != DMR_MODE_DMO) && (dmrMonitorCapturedTS != -1)) && (dmrMonitorCapturedTS != trxGetDMRTimeSlot())) ||
+				(trxGetDMRColourCode() != currentChannelData->txColor));
+
+		switch (nonVolatileSettings.contactDisplayPriority)
+		{
+			case CONTACT_DISPLAY_PRIO_CC_DB_TA:
+			case CONTACT_DISPLAY_PRIO_DB_CC_TA:
+				// No contact found in codeplug and DMRIDs, use TA as fallback, if any.
+				if ((strncmp(LinkHead->contact, "ID:", 3) == 0) && (LinkHead->talkerAlias[0] != 0x00))
+				{
+					source = LinkHead->talkerAlias;
+				}
+				break;
+
+			case CONTACT_DISPLAY_PRIO_TA_CC_DB:
+			case CONTACT_DISPLAY_PRIO_TA_DB_CC:
+				if (LinkHead->talkerAlias[0] != 0x00)
+				{
+					source = LinkHead->talkerAlias;
+				}
+				break;
+		}
+
+		// The callsign is the first word, the remaining goes on the line under it
+		spacePos = getFirstSpacePos(source);
+		callsignLen = ((spacePos != -1) ? (size_t)spacePos : strlen(source));
+		if (callsignLen > (sizeof(texts->callsign) - 1))
+		{
+			callsignLen = (sizeof(texts->callsign) - 1);
+		}
+		memcpy(texts->callsign, source, callsignLen);
+		texts->callsign[callsignLen] = 0;
+
+		if (spacePos != -1)
+		{
+			snprintf(texts->callText, sizeof(texts->callText), "%s", (source + spacePos + 1));
+		}
+
+		data->isReceivingCall = true;
+		data->callIsPrivate = isPrivate;
+		data->callMatchesTxSettings = (isPrivate || (different == false));
+		data->callTalkgroupText = (isPrivate ? currentLanguage->private_call : LinkHead->talkgroup);
+		data->callerCallsign = texts->callsign;
+		data->callerText = texts->callText;
+		data->callerId = (LinkHead->id & 0x00FFFFFF);
+		data->timeSlot = (uint8_t)(((dmrMonitorCapturedTS != -1) ? dmrMonitorCapturedTS : trxGetDMRTimeSlot()) + 1);
+	}
+}
+#endif
+
+// Draws the redesigned main screen in the screen buffer.
+// showCall: the data of the caller is displayed, if a DMR call is received.
+// zoneText: zone name and channel number, built by the Channel mode.
+void uiUtilityHomeScreenDraw(int txTimeSecs, bool showCall, const char *zoneText)
+{
+#if defined(HAS_TELEMETRY)
+	uiHomeScreenData_t data;
+	homeScreenTexts_t texts;
+
+	homeScreenBuildData(&data, &texts, txTimeSecs, showCall, zoneText);
+
+	if (data.isReceivingCall)
+	{
+		uiDataGlobal.receivedPcId = 0x00; //reset the received PcId
+
+		// Like the classic screen: a short beep tells the TG / TS / CC does not match the current Tx config
+		if ((data.callMatchesTxSettings == false) && (nonVolatileSettings.audioPromptMode >= AUDIO_PROMPT_MODE_VOICE_LEVEL_2))
+		{
+			soundSetMelody(MELODY_RX_TGTSCC_WARNING_BEEP);
+		}
+	}
+
+	uiHomeScreenDraw(&data);
+#endif
+}
+
+void uiUtilityHomeScreenDrawStatusBar(void)
+{
+#if defined(HAS_TELEMETRY)
+	uiHomeScreenData_t data;
+	homeScreenTexts_t texts;
+
+	homeScreenBuildData(&data, &texts, 0, uiDataGlobal.isDisplayingQSOData, NULL);
+	uiHomeScreenDrawStatusBar(&data);
+#endif
+}
+
+// Draws the TS, CC and DMR ID of the received group call, under the data of the caller.
+// (the same line is used by the talkgroup of the private calls)
+void uiUtilityDrawTelemetryDmr(void)
+{
+#if defined(HAS_TELEMETRY)
+	if ((trxGetMode() == RADIO_MODE_DIGITAL) && uiDataGlobal.isDisplayingQSOData && (HRC6000GetReceivedTgOrPcId() != 0) &&
+			((LinkHead->talkGroupOrPcId >> 24) != PC_CALL_FLAG) &&
+			(settingsIsOptionBitSet(BIT_UI_USES_DOUBLE_HEIGHT) == false) && (uiNotificationIsVisible() == false))
+	{
+		int timeSlot = ((dmrMonitorCapturedTS != -1) ? dmrMonitorCapturedTS : trxGetDMRTimeSlot());
+		uint8_t colourCode = HRC6000GetReceivedColourCode();
+		bool matchesTxSettings = ((timeSlot == trxGetDMRTimeSlot()) && (colourCode == currentChannelData->txColor));
+
+		uiTelemetryDrawDmr((uint8_t)(timeSlot + 1), colourCode, (LinkHead->id & 0x00FFFFFF), matchesTxSettings);
+	}
+#endif
+}
+
+// Draws the Tx technical data: timeout bar, Tx frequency (the VFO screen already displays it), TS and CC or CSS tone, power, battery and temperature.
+// It is called once per second while transmitting.
+void uiUtilityDrawTelemetryTx(int txTimeSecs, bool showTxFrequency)
+{
+#if defined(HAS_TELEMETRY)
+	// The double height font uses the same areas
+	if ((settingsIsOptionBitSet(BIT_UI_USES_DOUBLE_HEIGHT) == false) && (uiNotificationIsVisible() == false))
+	{
+		uiTelemetryData_t data;
+		char modeText[SCREEN_LINE_BUFFER_SIZE];
+
+		if (trxGetMode() == RADIO_MODE_DIGITAL)
+		{
+			snprintf(modeText, sizeof(modeText), "TS%d CC%u", (trxGetDMRTimeSlot() + 1), trxGetDMRColourCode());
+		}
+		else
+		{
+			CodeplugCSSTypes_t type = codeplugGetCSSType(currentChannelData->txTone);
+
+			if (type == CSS_TYPE_CTCSS)
+			{
+				snprintf(modeText, sizeof(modeText), "%d.%dHz", (currentChannelData->txTone / 10), (currentChannelData->txTone % 10));
+			}
+			else if (type & CSS_TYPE_DCS)
+			{
+				dcsPrintf(modeText, sizeof(modeText), NULL, currentChannelData->txTone);
+			}
+			else
+			{
+				snprintf(modeText, sizeof(modeText), "%s", (trxGetBandwidthIs25kHz() ? "25kHz" : "12.5kHz"));
+			}
+		}
+
+		// With a timeout, txTimeSecs is the remaining time
+		uiTelemetryDrawTxDetails((showTxFrequency ? currentChannelData->txFreq : 0U), modeText, txTimeSecs, (currentChannelData->tot * 15));
+
+		telemetryCollect(&data);
+		uiTelemetryDrawTx(&data);
 	}
 #endif
 }

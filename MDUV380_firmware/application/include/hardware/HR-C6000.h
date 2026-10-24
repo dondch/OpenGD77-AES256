@@ -98,6 +98,9 @@ void HRC6000InitTask(void);
 void HRC6000ResyncTimeSlot(void);
 uint32_t HRC6000GetReceivedTgOrPcId(void);
 uint32_t HRC6000GetReceivedSrcId(void);
+#if defined(ENABLE_TA2TWC_SCREENS)
+uint8_t HRC6000GetReceivedColourCode(void);
+#endif
 void HRC6000ClearTimecodeSynchronisation(void);
 void HRC6000ClearColorCodeSynchronisation(void);
 void HRC6000SetTalkerAlias(const char *text);

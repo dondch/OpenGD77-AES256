@@ -38,6 +38,7 @@
 #include "user_interface/uiUtilities.h"
 #include "user_interface/uiDualScreen.h"
 #include "user_interface/uiLocalisation.h"
+#include "user_interface/uiTelemetry.h"
 #include "utils.h"
 
 typedef enum
@@ -70,6 +71,10 @@ static bool dualWatchHomeIsChannel = false;
 static bool dualWatchChannelSide = false; // second side is the zone channel (dwChannelData) instead of the other VFO
 static bool dualWatchOnChannel = false;   // currently tuned to the channel side (currentChannelData == &dwChannelData)
 static CodeplugChannel_t dwChannelData;
+#endif
+#if defined(HAS_TELEMETRY)
+static bool telemetryRxIsDisplayable(void);
+static bool telemetryRxDraw(void);
 #endif
 static void handleQuickMenuEvent(uiEvent_t *ev);
 static void updateQuickMenuScreen(bool isFirstRun);
@@ -800,6 +805,9 @@ menuStatus_t uiVFOMode(uiEvent_t *ev, bool isFirstRun)
 					if (rxPowerSavingIsRxOn())
 					{
 						bool doRendering = true;
+#if defined(HAS_TELEMETRY)
+						bool telemetryUpdated = false;
+#endif
 
 						if (uiDataGlobal.Scan.active && (screenOperationMode[nonVolatileSettings.currentVFONumber] != VFO_SCREEN_OPERATION_SWEEP) && (uiDataGlobal.Scan.state == SCAN_STATE_PAUSED))
 						{
@@ -824,6 +832,13 @@ menuStatus_t uiVFOMode(uiEvent_t *ev, bool isFirstRun)
 							}
 						}
 
+#if defined(HAS_TELEMETRY)
+						if (telemetryRxIsDisplayable())
+						{
+							telemetryUpdated = telemetryRxDraw();
+						}
+#endif
+
 						// Only render the second row which contains the bar graph, if we're not scanning,
 						// as there is no need to redraw the rest of the screen
 						if (doRendering)
@@ -835,6 +850,16 @@ menuStatus_t uiVFOMode(uiEvent_t *ev, bool isFirstRun)
 							else
 							{
 								displayRenderRows(((uiDataGlobal.Scan.active && (uiDataGlobal.Scan.state == SCAN_STATE_PAUSED)) ? 0 : 1), 2);
+#if defined(HAS_TELEMETRY)
+								if (telemetryUpdated)
+								{
+									displayRenderRows(TELEMETRY_RX_FIRST_ROW(TELEMETRY_Y_POS_RX_VFO), TELEMETRY_RX_LAST_ROW(TELEMETRY_Y_POS_RX_VFO));
+									if (uiDataGlobal.isDisplayingQSOData == false)
+									{
+										displayRenderRows(TELEMETRY_HISTORY_FIRST_ROW(TELEMETRY_HISTORY_Y_POS_VFO), TELEMETRY_HISTORY_LAST_ROW(TELEMETRY_HISTORY_Y_POS_VFO, TELEMETRY_HISTORY_HEIGHT_VFO));
+									}
+								}
+#endif
 							}
 						}
 					}
@@ -923,6 +948,21 @@ menuStatus_t uiVFOMode(uiEvent_t *ev, bool isFirstRun)
 	}
 	return menuVFOExitStatus;
 }
+
+#if defined(HAS_TELEMETRY)
+// The sweep graph, the two frequencies of the Dual Watch and the frequencies input are using the areas of the Rx technical data
+static bool telemetryRxIsDisplayable(void)
+{
+	return ((screenOperationMode[nonVolatileSettings.currentVFONumber] != VFO_SCREEN_OPERATION_SWEEP) && (uiVFOModeDualWatchIsScanning() == false) &&
+			(uiDataGlobal.FreqEnter.index == 0));
+}
+
+// The caller's data could use the line of the signal strength history graph
+static bool telemetryRxDraw(void)
+{
+	return uiUtilityDrawTelemetryRx(TELEMETRY_Y_POS_RX_VFO, (uiDataGlobal.isDisplayingQSOData ? -1 : TELEMETRY_HISTORY_Y_POS_VFO), TELEMETRY_HISTORY_HEIGHT_VFO);
+}
+#endif
 
 void uiVFOModeUpdateScreen(int txTimeSecs)
 {
@@ -1300,6 +1340,16 @@ void uiVFOModeUpdateScreen(int txTimeSecs)
 
 				}
 			}
+#if defined(HAS_TELEMETRY)
+			if (isTransmitting)
+			{
+				uiUtilityDrawTelemetryTx(txTimeSecs, false);
+			}
+			else if (telemetryRxIsDisplayable())
+			{
+				telemetryRxDraw();
+			}
+#endif
 			displayRender();
 			break;
 
@@ -1309,6 +1359,13 @@ void uiVFOModeUpdateScreen(int txTimeSecs)
 			uiDataGlobal.isDisplayingQSOData = true;
 			uiDataGlobal.displayChannelSettings = false;
 			uiUtilityRenderQSOData();
+#if defined(HAS_TELEMETRY)
+			if (telemetryRxIsDisplayable())
+			{
+				telemetryRxDraw();
+				uiUtilityDrawTelemetryDmr();
+			}
+#endif
 			displayRender();
 			break;
 
