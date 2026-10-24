@@ -75,8 +75,9 @@ void USB_DEBUG_printf(const char *format, ...) __attribute__((format(__printf__,
 #if defined(ENABLE_KEY_INJECTION)
 /* Dev-only USB remote keypad. usbKeyInjectTick() is called once per main-loop
  * iteration; when a USB-injected key is pending (and no real key is active) it
- * fills *outEvent (keyboardCode_t.event bits) + *outKey and returns true. */
-bool usbKeyInjectTick(uint8_t *outEvent, char *outKey);
+ * fills *outEvent (keyboardCode_t.event bits) + *outKey, sets *outButtons to the
+ * modifier buttons to report as held with it (BUTTON_SK2 or 0), and returns true. */
+bool usbKeyInjectTick(uint8_t *outEvent, char *outKey, uint32_t *outButtons);
 
 /* Inject a UI FUNCTION event (menuSystem.h FUNC_*), the same mechanism a quick-key
  * uses. Injecting a KEY event cannot reliably reach every handler: the UI tests keys in
