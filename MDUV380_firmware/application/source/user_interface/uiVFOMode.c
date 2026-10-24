@@ -3752,6 +3752,12 @@ static void setSweepIncDecSetting(sweepSetting_t type, bool increment)
 						vfoSweepColumnPeak = 0;
 						vfoSweepAutoPrimed = false;
 						uiDataGlobal.Scan.sweepSampleIndex = 0;
+#if defined(VFO_SWEEP_WATERFALL)
+						if (vfoSweepWaterfallOn)
+						{
+							vfoSweepWaterfallClear();   // the Hz per column changed tenfold: the old rows mean nothing here
+						}
+#endif
 					}
 #endif
 				}
@@ -3830,10 +3836,12 @@ static void setSweepIncDecSetting(sweepSetting_t type, bool increment)
 	if (apply)
 	{
 #if defined(VFO_SWEEP_WATERFALL)
-		if (bandwidthRescaleDirection != 0)
+		if (type == SWEEP_SETTING_STEP)
 		{
-			// The span changed: the edge labels under the graph say the old one until the
-			// screen is redrawn (the update below repaints the bars, and clears the history).
+			// The span changed (a zoom, or the wide span entered or left -- which is not a
+			// rescale, so it is not told by bandwidthRescaleDirection): the edge labels under
+			// the graph say the old span until the screen is redrawn. The update below
+			// repaints the bars; the history was cleared above or is cleared by the rescale.
 			uiDataGlobal.displayQSOState = QSO_DISPLAY_DEFAULT_SCREEN;
 			uiVFOModeUpdateScreen(0);
 		}
@@ -4810,6 +4818,12 @@ void uiVFOModeSweepSetModes(bool wide, bool autoScroll, uint8_t stepIndex, bool 
 		vfoSweepColumnPeak = 0;
 		vfoSweepAutoPrimed = false;
 		uiDataGlobal.Scan.sweepSampleIndex = 0;
+#if defined(VFO_SWEEP_WATERFALL)
+		if (vfoSweepWaterfallOn)
+		{
+			vfoSweepWaterfallClear();   // as on the key path: the old rows belong to another span
+		}
+#endif
 	}
 
 	vfoSweepAutoScroll = autoScroll;
