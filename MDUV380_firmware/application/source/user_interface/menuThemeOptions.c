@@ -389,12 +389,12 @@ static void updateBrowerScreen(bool isFirstRun)
 
 		// Draw the color rectangle
 		int16_t x = (DISPLAY_X_POS_MENU_TEXT_OFFSET + (16 * 8) + 2);
-		int16_t y = DISPLAY_Y_POS_MENU_ENTRY_HIGHLIGHT + (i * MENU_ENTRY_HEIGHT) + 2;
+		int16_t y = MENU_LIST_Y_POS_HIGHLIGHT + (i * MENU_LIST_ENTRY_HEIGHT) + 2;
 		uint16_t fgColour, bgColour;
 
 		displayGetForegroundAndBackgroundColours(&fgColour, &bgColour);
 		displaySetForegroundAndBackgroundColours(userThemeData[mNum], themeItems[DAYTIME_CURRENT][THEME_ITEM_BG]);
-		displayFillRect(x, y, 14, 12, false);
+		displayFillRect(x, y, 14, (MENU_LIST_ENTRY_HEIGHT - 4), false);
 
 		// Outline the color rectangle when it's equal to background or menu focused colour
 		if (((i != 0) && (bgColour == userThemeData[mNum])) ||
@@ -403,7 +403,7 @@ static void updateBrowerScreen(bool isFirstRun)
 			uint32_t invertedColour = (0xFFFFFF - __builtin_bswap16(PLATFORM_COLOUR_FORMAT_TO_RGB888(userThemeData[mNum])));
 
 			displaySetForegroundAndBackgroundColours(displayConvertRGB888ToNative(invertedColour), themeItems[DAYTIME_CURRENT][THEME_ITEM_BG_MENU_ITEM_SELECTED]);
-			displayDrawRect(x, y, 14, 12, true);
+			displayDrawRect(x, y, 14, (MENU_LIST_ENTRY_HEIGHT - 4), true);
 		}
 
 		displayThemeResetToDefault();

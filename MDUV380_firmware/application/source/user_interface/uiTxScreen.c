@@ -37,6 +37,7 @@
 #endif
 #if !defined(PLATFORM_GD77S)
 #include "functions/aprs.h"
+#include "user_interface/uiTelemetry.h"
 #endif
 
 static void updateScreen(void);
@@ -307,7 +308,11 @@ menuStatus_t menuTxScreen(uiEvent_t *ev, bool isFirstRun)
 							uiUtilityDrawFMMicLevelBarGraph();
 						}
 
+#if defined(HAS_TELEMETRY)
+						uiUtilityRenderLevelBarRows();//return;// don't do anything as it will affect the transmission !
+#else
 						displayRenderRows(1, 2);;//return;// don't do anything as it will affect the transmission !
+#endif
 
 						micm = ev->time;
 					}
