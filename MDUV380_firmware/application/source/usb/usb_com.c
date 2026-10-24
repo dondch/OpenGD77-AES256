@@ -1577,12 +1577,13 @@ static void cpsHandleCommand(void)
 			return;   /* NOT break -- see above */
 #endif
 #ifdef ENABLE_KEY_INJECTION
-		case 0x9E: // DEV: write the settings (and VFOs) to flash now. On this platform the
+		case 0x98: // DEV: write the settings (and VFOs) to flash now. On this platform the
 			//        firmware saves them only at power-off (settingsSaveIfNeeded() is a no-op
 			//        here), and the bench cannot power-cycle: a DFU reboot after this is the
 			//        nearest thing to a power cycle for a settings-persistence check.
+			//        (0x9E is the flash-word programmer below; this once shadowed it.)
 			usbComSendBuf[0] = com_requestbuffer[0];
-			usbComSendBuf[1] = 0x9E;
+			usbComSendBuf[1] = 0x98;
 			usbComSendBuf[2] = settingsSaveSettings(true) ? 1 : 0;
 			hasToReply = true;
 			replyLength = 3;
