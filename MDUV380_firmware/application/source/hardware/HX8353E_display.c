@@ -37,6 +37,7 @@
 #endif
 #include "functions/settings.h"
 #include "functions/spectrum.h"   /* SCANPROF_*: dev-only scan-step profiler, no-ops otherwise */
+#include "functions/featureArena.h" /* the sweep's strip staging buffer */
 #include "user_interface/uiLocalisation.h"
 #include "user_interface/menuSystem.h"
 #include "utils.h"
@@ -1343,8 +1344,16 @@ void displayRenderRows(int16_t startRow, int16_t endRow)
  * corrupt every later displayRenderRows(), which does not set CASET itself. */
 // 4 is what the sweep needs (a sample column plus a two-column cursor, worst case four
 // wide) and RAM is tight on this target -- 8 columns overflowed the linker's RAM region.
-#define DISPLAY_STRIP_MAX_COLS  4
-static uint16_t stripBuf[DISPLAY_STRIP_MAX_COLS * DISPLAY_SIZE_Y];
+// The buffer itself is the sweep's share of the feature arena (featureArena.h): the sweep
+// hands it over with displaySetStripBuffer() for as long as it runs. With no buffer, a
+// strip is painted as full rows -- correct, just slower.
+#define DISPLAY_STRIP_MAX_COLS  FEATURE_ARENA_STRIP_MAX_COLS
+static uint16_t *stripBuf = NULL;
+
+void displaySetStripBuffer(uint16_t *buffer)
+{
+	stripBuf = buffer;
+}
 
 void displayRenderColumns(int16_t startCol, int16_t endCol, int16_t startRow, int16_t endRow)
 {
@@ -1367,7 +1376,7 @@ void displayRenderColumns(int16_t startCol, int16_t endCol, int16_t startRow, in
 	y1 = (endRow * 8);
 	nRows = (y1 - y0);
 
-	if ((nCols <= 0) || (nCols > DISPLAY_STRIP_MAX_COLS) || (nRows <= 0) ||
+	if ((stripBuf == NULL) || (nCols <= 0) || (nCols > DISPLAY_STRIP_MAX_COLS) || (nRows <= 0) ||
 			(y1 > DISPLAY_SIZE_Y))
 	{
 		// Out of what the staging buffer can hold: fall back rather than truncate the

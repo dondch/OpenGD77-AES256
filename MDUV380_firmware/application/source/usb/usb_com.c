@@ -49,6 +49,7 @@
 #endif
 #if defined(ENABLE_SPECTRUM)
 #include "functions/spectrum.h"   /* swept-RSSI receiver (CPS 0xA0 / 0xA1) */
+#include "functions/featureArena.h" /* the probe's sample buffer */
 #include "functions/scanreject.h" /* the fast reject (CPS 0xAE) */
 #endif
 #include "interfaces/gps.h"
@@ -1153,11 +1154,15 @@ static void cpsHandleCommand(void)
 				uint8_t nSamples = com_requestbuffer[11];
 				uint16_t intervalUs = (com_requestbuffer[12] << 8) | com_requestbuffer[13];
 				uint8_t reg = com_requestbuffer[14];
-				static spectrumSample_t samples[SPECTRUM_PROBE_MAX_SAMPLES];
+				// The sample buffer is borrowed from the feature arena for the length of
+				// this command. Refused (n = 0) while a screen holds it.
+				spectrumSample_t *samples = (spectrumSample_t *)featureArenaClaim(FEATURE_ARENA_SPECTRUM_PROBE,
+						(sizeof(spectrumSample_t) * SPECTRUM_PROBE_MAX_SAMPLES));
 				spectrumProbeInfo_t info = { 0, 0, 0 };
 				int n = 0;
 
-				if ((trxGetBandFromFrequency(fA) != FREQUENCY_OUT_OF_BAND) &&
+				if ((samples != NULL) &&
+						(trxGetBandFromFrequency(fA) != FREQUENCY_OUT_OF_BAND) &&
 						(trxGetBandFromFrequency(fB) != FREQUENCY_OUT_OF_BAND))
 				{
 					n = spectrumSettleProbe(fA, fB, mode, intervalUs, nSamples, reg, samples, &info);
@@ -1180,6 +1185,7 @@ static void cpsHandleCommand(void)
 				}
 				hasToReply = true;
 				replyLength = 8 + (n * 4);
+				featureArenaRelease(FEATURE_ARENA_SPECTRUM_PROBE);
 			}
 			return;   /* NOT break -- see above */
 #if defined(ENABLE_FAST_SCAN)

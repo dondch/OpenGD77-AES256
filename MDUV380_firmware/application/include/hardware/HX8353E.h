@@ -207,6 +207,10 @@ void displayRenderRows(int16_t startRow, int16_t endRow);
 // why: the VFO sweep changes three columns per sample and pays for 160 of them.
 // startCol/endCol are pixel columns, endCol exclusive; rows are 8-pixel rows as above.
 void displayRenderColumns(int16_t startCol, int16_t endCol, int16_t startRow, int16_t endRow);
+// The staging buffer displayRenderColumns() gathers a strip into: FEATURE_ARENA_STRIP_MAX_COLS
+// columns of DISPLAY_SIZE_Y pixels, supplied by the sweep from the feature arena while it
+// runs, NULL otherwise (strips then fall back to full rows).
+void displaySetStripBuffer(uint16_t *buffer);
 #endif
 void displayPrintCentered(uint16_t y, const char *text, ucFont_t fontSize);
 void displayPrintCenteredDoubleHeight(uint16_t y, const char *text, ucFont_t fontSize, bool doubleHeight);

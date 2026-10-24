@@ -1366,7 +1366,16 @@ void aprsBeaconingResetTimers(void)
 void aprsBeaconingPrepareSatelliteConfig(void)
 {
 	bool hasAprsConfig = false;
-	int APRSConfigIndex = codeplugAPRSGetIndexOfName(currentActiveSatellite->name);
+	int APRSConfigIndex;
+
+	if ((satelliteDataNative == NULL) || (currentActiveSatellite == NULL))
+	{
+		// Satellite table not loaded (the satellite screen is not up): no satellite config.
+		aprsBeaconingStateSetEnable(APRS_BEACONING_STATE_HAS_APRS_SATELLITE_CONFIG, false);
+		return;
+	}
+
+	APRSConfigIndex = codeplugAPRSGetIndexOfName(currentActiveSatellite->name);
 
 	if (APRSConfigIndex != 0)
 	{

@@ -33,6 +33,7 @@
 #include "interfaces/clockManager.h"
 #include "interfaces/pit.h"
 #include "functions/satellite.h"
+#include "functions/featureArena.h"
 #include "hardware/radioHardwareInterface.h"
 #if defined(PLATFORM_MDUV380) || defined(PLATFORM_MD380) || defined(PLATFORM_RT84_DM1701) || defined(PLATFORM_MD2017)
 #include "interfaces/batteryAndPowerManagement.h"
@@ -145,10 +146,23 @@ menuStatus_t menuSatelliteScreen(uiEvent_t *ev, bool isFirstRun)
 				return MENU_STATUS_SUCCESS;
 			}
 
-			if (!hasSatelliteKeps)
+			// The Keps table lives in the feature arena from here until exitCallback().
+			// A VFO sweep that was left running holds the arena; stop it first, as the
+			// MENU key would have.
+			if (uiDataGlobal.Scan.active && (menuSystemGetRootMenuNumber() == UI_VFO_MODE))
 			{
-				loadKeps();
+				uiVFOModeStopScanning();
 			}
+
+			satelliteDataNative = (satelliteData_t *)featureArenaClaim(FEATURE_ARENA_SATELLITE, (sizeof(satelliteData_t) * NUM_SATELLITES));
+			if (satelliteDataNative == NULL)
+			{
+				// Held by someone else: nothing to show, back out.
+				menuSystemPopPreviousMenu();
+				return MENU_STATUS_SUCCESS;
+			}
+			// The arena was zeroed on claim, so the Keps are (re)loaded on every entry.
+			loadKeps();
 
 			if (hasSatelliteKeps) // No Keps data, no computation
 			{
@@ -1416,6 +1430,15 @@ void menuSatelliteScreenClearPredictions(bool reloadKeps)
 	numTotalSatellitesPredicted = 0;
 	currentlyDisplayedListPosition = 0; //reset the list display position if the predictions have been cleared.
 
+	if (satelliteDataNative == NULL)
+	{
+		// Satellite screen not up: the table does not exist. The next entry reloads the
+		// Keps and starts with empty predictions anyway.
+		hasSatelliteKeps = false;
+		uiDataGlobal.SatelliteAndAlarmData.alarmType = ALARM_TYPE_NONE;
+		return;
+	}
+
 	for(int s = 0; s < NUM_SATELLITES; s++)
 	{
 		memset(&satelliteDataNative[s].predictions, 0x00, sizeof(satellitePredictions_t));
@@ -1532,6 +1555,12 @@ static void exitCallback(void *data)
 
 	aprsBeaconingResetTimers();
 	displayMode = SATELLITE_SCREEN_ALL_PREDICTIONS_LIST;
+
+	// Give the arena back. Everything in the table is gone with it.
+	satelliteDataNative = NULL;
+	currentActiveSatellite = NULL;
+	hasSatelliteKeps = false;
+	featureArenaRelease(FEATURE_ARENA_SATELLITE);
 }
 
 static void calculateActiveSatelliteData(bool forceFrequencyUpdate)
