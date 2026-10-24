@@ -305,8 +305,15 @@ static uint8_t vfoSweepAutoGain = VFO_SWEEP_GAIN_DEFAULT;
 // above the quiet-half mean (a cheap stand-in for the noise spread, ~2 counts here) plus
 // 4: about mean + 12 on this radio, against a measured noise maximum of mean + 6 or 7 and
 // a carrier at +35. The auto floor and gain are unchanged by this.
+//
+// The ceiling is a statistic of the pass, not a drawing setting, so it is computed every pass
+// and used whether or not the operator has taken the scaling over. It used to fall back to the
+// manual noise floor once a floor or gain key had been touched -- FRONT_UP/DOWN in the sweep --
+// and that floor (14 here) plus the listen margin is a level ordinary noise (57) clears on
+// every pass: measured on the bench, one FRONT_UP + FRONT_DOWN turned a 0.66 s pass into a
+// 1.88 s one, parked 1.2 s on a noise column at every pass end until the sweep was re-entered.
 static uint8_t vfoSweepNoiseCeil = VFO_SWEEP_RSSI_NOISE_FLOOR_DEFAULT;
-#define VFO_SWEEP_PEAK_BASE  (vfoSweepAutoScale ? vfoSweepNoiseCeil : vfoSweepRssiNoiseFloor)
+#define VFO_SWEEP_PEAK_BASE  vfoSweepNoiseCeil
 
 // AT1846S rssi_ct_u (0x5A[11:9]) to hold while the sweep is running. The tracking
 // bandwidth is 1145 / 2^ct Hz, so the stock 3 is 144 Hz and this is 572 Hz.
@@ -3244,6 +3251,14 @@ static void vfoSweepUpdateAutoScale(void)
 		span = 255;
 	}
 
+	// Up to here this pass's statistics, kept whoever owns the scaling (the noise ceiling above
+	// is what the peak marker and the listen park test against). From here the drawing scale,
+	// which is the operator's once a floor or gain key has been touched.
+	if (vfoSweepAutoScale == false)
+	{
+		return;
+	}
+
 	if (vfoSweepAutoPrimed)
 	{
 		// Slew, or the whole trace jumps every pass as the peak comes and goes.
@@ -5277,10 +5292,9 @@ static void sweepScanStep(void)
 			vfoSweepPeakIndex = -1;
 			vfoSweepPassComplete = true;
 
-			if (vfoSweepAutoScale)
-			{
-				vfoSweepUpdateAutoScale();
-			}
+			// Every pass: the noise ceiling the park and the marker depend on comes from here;
+			// the function leaves the drawing scale alone once the operator has taken it over.
+			vfoSweepUpdateAutoScale();
 
 #if (VFO_SWEEP_HOLD_DECAY > 0)
 			// Fade the hold one step per pass. Bins below their live level are raised
