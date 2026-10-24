@@ -629,7 +629,17 @@ static void cpsHandleReadCommand(void)
 		case CPS_ACCESS_MCU_ROM:
 			// Base address of MCU ROM on the STM32 is 0x8000000 not 0x00000000. The STM32F405
 			// has 1 MB of flash: a read past it would walk into unmapped address space.
-			if (addressInSegment(address, length, 0U, 0x100000U))
+			if (addressInSegment(address, length, 0U, 0x100000U)
+#if defined(ENABLE_KEY_INJECTION)
+					// DEV builds: the bench tools read variables and registers through this area
+					// (the address is given minus the 0x8000000 flash base), so SRAM
+					// (0x20000000, 128 KB), CCM (0x10000000, 64 KB) and the peripheral space
+					// (0x40000000-0x5FFFFFFF) stay readable there. Release builds keep flash only.
+					|| addressInSegment(address, length, (0x20000000U - 0x8000000U), 0x20000U)
+					|| addressInSegment(address, length, (0x10000000U - 0x8000000U), 0x10000U)
+					|| addressInSegment(address, length, (0x40000000U - 0x8000000U), 0x20000000U)
+#endif
+				)
 			{
 				memcpy((uint8_t *)&usbComSendBuf[3], (uint8_t *)address + 0x8000000, length);
 				result = true;
