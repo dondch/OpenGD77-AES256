@@ -728,9 +728,8 @@ static const uint8_t ambebuffer_encode_init_RLE32[] = {
 		0x27, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0c
 };
 
-uint8_t ambebuffer_decode[CODEC_DECODE_CONFIG_DATA_LENGTH];
-uint8_t ambebuffer_encode[CODEC_ENCODE_CONFIG_DATA_LENGTH];
-uint8_t ambebuffer_encode_ecc[CODEC_ECC_CONFIG_DATA_LENGTH];
+// TX (encoder + FEC) and RX (decoder) state share one allocation, see codec.h.
+codecState_t codecState __attribute__((aligned(4)));
 
 
 static const uint32_t CREATOR_DATA_ARRAY[12] = { 0x063A, 0x031D, 0x07B4, 0x03DA, 0x01ED, 0x06CC, 0x0366, 0x01B3, 0x06E3, 0x054B, 0x049F, 0x0475};

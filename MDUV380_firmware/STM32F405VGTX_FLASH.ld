@@ -187,8 +187,9 @@ SECTIONS
     _sccmram = .;       /* create a global symbol at ccmram start */
     *(.ccmram)
     *(.ccmram*)
-    /* AES buffers live in CCM (after the codec's ccmram data) so they don't shift
-     * the main-RAM .bss layout the AMBE codec hardcodes (ambebuffer_* addresses).
+    /* AES buffers live in CCM to spare main SRAM, which is the tighter budget.
+     * (They were first put here on the belief that the AMBE codec hardcodes its
+     * ambebuffer_* addresses; it does not, it uses the pointers passed in r1.)
      * KEEP() so --gc-sections doesn't discard them (they're only referenced by name). */
     KEEP(*(.aes_ccmram))
 
