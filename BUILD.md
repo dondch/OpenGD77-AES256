@@ -41,6 +41,59 @@ The `Makefile` mirrors the CubeIDE `MDUV380_10W_PLUS_FW` release config (-Os, `-
 GITVERSION=<git short hash>`, linker
 `STM32F405VGTX_FLASH.ld`) and auto-creates the empty codec placeholder via `tools/codec_cleaner.Linux -C`.
 
+## Build flags
+
+Plain `make` is the release build: AES-256 voice is always compiled in and every optional flag is off. A flag is
+on only when set to `1` on the make command line (`make ENABLE_FAST_SCAN=1`) or through a named profile
+(`make PROFILE=full`). The Makefile refuses combinations that cannot work (`ENABLE_SCAN_PROFILER` without
+`ENABLE_SPECTRUM`, both TX pattern diagnostics at once, an unknown profile) and prints a size report after every
+link that fails the build when SRAM headroom drops under `RAM_FLOOR` (default 1,024 bytes; `make RAM_FLOOR=0`
+to inspect an over-full build). `make profiles` lists the profiles, `make flags PROFILE=x` shows what a profile
+turns on, and `make REPRODUCIBLE=1` pins the compiled-in build time to the commit time so two builds of one
+commit are byte-identical.
+
+Main SRAM (128 KB) and CCM RAM (64 KB) are the binding constraints, not flash: the release build has 7,008 bytes
+of SRAM and 3,188 bytes of CCM spare, and about 111 KB of flash before the fixed AMBE codec slot. Costs below are
+measured on this tree with arm-none-eabi-gcc 14.2.1 at -Os (2026-10-24) and are deltas against the release build.
+
+**Feature flags** (user-facing; a build without the flag is unchanged):
+
+| Flag | What it adds | Code | SRAM | CCM |
+| --- | --- | --- | --- | --- |
+| `ENABLE_DMR_DATA` | Encrypted DMR SMS (Messages menu, store, confirmed delivery) and the raw data-frame TX harness (`tools/dmr_data_tx.py`) | +11,336 | +1,432 | +3,188, fills CCM to the last byte |
+| `ENABLE_FAST_SCAN` | Sub-30 ms analog scan steps (20/15/10/6 ms) in the "Scan dwell time" setting, also via CHIRP | +4,800 | +1,552 | 0 |
+| `ENABLE_DUAL_SCREEN` | Anytone-style dual screen, row watch, Dual Watch options menu (see "Dual screen build") | +5,080 | +152 | 0 |
+| `ENABLE_TA2TWC_SCREENS` | The TA2TWC redesigned screens, animations and theme (see "TA2TWC screens build") | +14,412 | +96 | 0 |
+
+**Dev flags** (bench and diagnostics; never in a release image):
+
+| Flag | What it adds | Code | SRAM | CCM | Needs |
+| --- | --- | --- | --- | --- | --- |
+| `ENABLE_SPECTRUM` | Swept-RSSI receiver over USB (`tools/sweep.py`, `settle.py`) and the VFO sweep waterfall | about +4,400 | about +900 | 0 | |
+| `ENABLE_SCAN_PROFILER` | DWT scan-step profiler, CPS 0xA9 (`tools/scanprof.py`) | about +700 | +544 | 0 | `ENABLE_SPECTRUM` (Makefile error otherwise) |
+| `ENABLE_KEY_INJECTION` | USB display mirror, remote key injection and DFU jump (`fbmirror.py`, `rkey.py`) | about +1,800 | +168 | 0 | |
+| `ENABLE_GPS_NMEA_LOG` | GPS NMEA logging to SPI flash (defines `LOG_GPS_DATA`) | +664 | +4,132 | 0 | |
+| `DMR_AES_DIAG_RX` | AES RX event ring and raw-burst capture (`tools/rxdiag.py`, `fragcap.py`) | about +1,400 | +12 | +624 | not with `ENABLE_DMR_DATA` (CCM overflows at link) |
+| `DMR_AES_DIAG_PATTERN` | TX diagnostic: known AMBE parameters instead of voice | small | 0 | 0 | not with `DMR_AES_DIAG_ENCPAT` |
+| `DMR_AES_DIAG_ENCPAT` | TX diagnostic: constant plaintext, then encrypted | small | 0 | 0 | not with `DMR_AES_DIAG_PATTERN` |
+
+The "about" figures for the three sweep-bench flags were measured on the pre-merge tree; the others on this one.
+
+**Build profiles** (`make PROFILE=<name>`, also `./flash.sh <donor> <name>`); CI and `test_build.sh` build all of them:
+
+| Profile | Flags | SRAM spare | CCM spare |
+| --- | --- | --- | --- |
+| `release` (default) | none | 7,008 | 3,188 |
+| `full` | all four feature flags | 3,784 | 0 |
+| `dev-sweep` | `ENABLE_SPECTRUM ENABLE_FAST_SCAN ENABLE_KEY_INJECTION` | 4,392 | 3,188 |
+| `dev-prof` | `ENABLE_SPECTRUM ENABLE_SCAN_PROFILER ENABLE_KEY_INJECTION` | 5,384 | 3,188 |
+| `dev-aes` | `DMR_AES_DIAG_RX ENABLE_KEY_INJECTION` | 6,828 | 2,564 |
+| `dev-gps` | `ENABLE_GPS_NMEA_LOG` | 2,876 | 3,192 |
+
+`full` plus `ENABLE_SPECTRUM` and `ENABLE_KEY_INJECTION` still links, with 2,724 bytes of SRAM and 8 bytes of CCM
+spare; adding `DMR_AES_DIAG_RX` to any `ENABLE_DMR_DATA` build overflows CCM. The CCM ceiling is the next thing
+the RAM work has to move.
+
 ## Manual flash
 ```sh
 cd MDUV380_firmware
@@ -51,9 +104,10 @@ It prints **"Patching for DMR"** on success (vs **"Flashing FM Only firmware"** 
 
 ## Build test
 ```sh
-./test_build.sh [optional-donor.bin]   # builds the firmware, asserts it is codec-merge-capable
+./test_build.sh [optional-donor.bin]   # builds every profile into build-<profile>/, asserts each is codec-merge-capable
 ```
-CI (`.github/workflows/build.yml`) runs the same build and asserts the merge-capable size.
+It also checks that the Makefile refuses the forbidden flag combinations. CI (`.github/workflows/build.yml`)
+builds the same profiles with `REPRODUCIBLE=1` and asserts the merge-capable size.
 
 ## Host tests (no radio, plain gcc)
 ```sh
