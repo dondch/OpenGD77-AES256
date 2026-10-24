@@ -729,7 +729,10 @@ static const uint8_t ambebuffer_encode_init_RLE32[] = {
 };
 
 // TX (encoder + FEC) and RX (decoder) state share one allocation, see codec.h.
-codecState_t codecState __attribute__((aligned(4)));
+// In CCM: the blob reaches this state only through the pointer in r1 (CPU accesses, no DMA),
+// and each side's image is written in full by codecPrepareDecode()/codecPrepareEncode()
+// before use, so the startup code's not clearing .ccmram does not matter here.
+codecState_t codecState __attribute__((section(".ccmram"), aligned(4)));
 
 
 static const uint32_t CREATOR_DATA_ARRAY[12] = { 0x063A, 0x031D, 0x07B4, 0x03DA, 0x01ED, 0x06CC, 0x0366, 0x01B3, 0x06E3, 0x054B, 0x049F, 0x0475};

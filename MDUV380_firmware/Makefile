@@ -77,9 +77,10 @@ INCS  = -I. -ICore/Inc \
 #   dev-aes    DMR_AES_DIAG_RX ENABLE_KEY_INJECTION  -- AES RX diagnostics
 #   dev-gps    ENABLE_GPS_NMEA_LOG
 #
-# There is no "everything" profile: ENABLE_DMR_DATA fills CCM RAM to the last byte, so it
-# cannot be combined with DMR_AES_DIAG_RX (CCM overflow at link time), and the full feature
-# set plus ENABLE_SPECTRUM and ENABLE_KEY_INJECTION leaves 8 bytes of CCM (measured 2026-10-24).
+# There is no "everything" profile. Since the notification save buffer shrank to an 80-row
+# band and the AMBE codec state moved to CCM (2026-10-24), every flag combination links
+# (all flags: 14,756 B SRAM spare, "full" profile: 15,556 B SRAM / 6,920 B CCM spare), but the
+# dev flags are still meant to be enabled one at a time on top of a feature profile.
 # ---------------------------------------------------------------------------
 FEATURE_FLAGS = ENABLE_DMR_DATA ENABLE_FAST_SCAN ENABLE_DUAL_SCREEN ENABLE_TA2TWC_SCREENS
 DEV_FLAGS     = ENABLE_SPECTRUM ENABLE_SCAN_PROFILER ENABLE_KEY_INJECTION ENABLE_GPS_NMEA_LOG \
