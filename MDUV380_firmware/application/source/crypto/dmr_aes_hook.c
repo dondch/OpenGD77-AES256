@@ -82,6 +82,11 @@ static uint32_t      s_rxStaleMi DMR_AES_CCM;    /* MI of the PI that belongs to
                                                   * TX included): the chip's LC page still holds it and re-surfaces it
                                                   * on the first bursts of the next call, which must not seed on it */
 static int           s_rxStaleValid DMR_AES_CCM;
+static int           s_rxLcSeen DMR_AES_CCM;      /* a CRC-valid voice LC (group/private call) was handed to us since
+                                                  * the last call boundary: the chip's embedded-LC page of THIS stream */
+static int           s_rxLcPrivacy DMR_AES_CCM;   /* ...and its service options carry the Privacy bit: the transmitter
+                                                  * says the call is encrypted (a stock radio sets it on every encrypted
+                                                  * call, and never on a clear one) */
 
 /* Shared scratch for the (non-reentrant, foreground-only) key-store helpers. One
  * buffer instead of three per-function statics keeps CCM usage down. */
@@ -267,6 +272,7 @@ void dmrAesInit(void)
     s_rxPiSeeded = 0;
     s_rxLastPiMi = s_rxStaleMi = 0;
     s_rxLastPiValid = s_rxStaleValid = 0;
+    s_rxLcSeen = s_rxLcPrivacy = 0;
     s_txPiMi = 0;
     s_txKeyId = 0;
     s_txFrameCnt = 0;
@@ -528,6 +534,30 @@ void dmrAesRxPI(const uint8_t *pi, int len)
         }
 #endif
     }
+    else if ((len >= 3) && (((pi[0] & 0x3F) == 0x00) || ((pi[0] & 0x3F) == 0x03)) && ((pi[1] == 0x00) || (pi[1] == DMR_MFID_DMRA)))
+    {
+        /* A voice LC (FLCO group or private call, standard or DMRA feature set): the embedded LC
+         * the chip reassembles from bursts B..E of every superframe, so it is there within one
+         * superframe of joining a call, PI header or not. Its service options Privacy bit (0x40)
+         * is the transmitter's own statement that the voice is encrypted: a stock radio sets it on
+         * every encrypted call and never on a clear one. The late-entry bootstrap below relies on
+         * it, and a bootstrapped stream is dropped when the LC of the stream says clear. The chip
+         * can hand us the PREVIOUS call's LC on the first bursts of a new one; a wrong early read
+         * is replaced by the fresh LC a superframe later, and the bootstrap self-corrects with it. */
+        int privacy = ((pi[2] & 0x40) != 0);
+        s_rxLcSeen = 1;
+        s_rxLcPrivacy = privacy;
+        if (s_rxActive && !s_rxPiSeeded && !privacy)
+        {
+            /* Bootstrapped from the voice bits, but the stream's own LC says clear: a chance
+             * late-entry match on clear voice (issue #2), or the stale LC case above resolving. */
+            s_rxActive = 0;
+            s_rxBurstEnc = 0;
+#ifdef DMR_AES_DIAG_RX
+            rxd_log(10, 0, 0, s_rxLastSeq, s_rx.mi, s_rxInitMi);   /* LCCLEAR: dropped a bootstrap */
+#endif
+        }
+    }
 }
 /* Called per voice burst from the HR-C6000 ISR. seq is the 1..6 burst sequence
  * (A..F); each burst carries 3 AMBE frames, 6 bursts = one 18-frame superframe. */
@@ -585,17 +615,22 @@ void dmrAesRxBurst(int seq)
 #endif
         if (!s_rxActive)
         {
-            /* BOOTSTRAP a rapid call only when a crc-valid late entry CONFIRMS the prediction:
-             * it equals the LFSR self-advance of an earlier real MI. A single crc-valid late
+            /* BOOTSTRAP a call the chip surfaced no PI header for (a rapid re-PTT after the
+             * previous call, or one joined late: the preamble was missed). When the stream's own
+             * LC has been seen, it decides: Privacy set, and the FIRST crc-valid late entry
+             * activates (a stock radio bootstraps the same way); Privacy clear, and nothing
+             * does, however the voice bits look. Without an LC yet, a single crc-valid late
              * entry is not enough: on a CLEAR call these bits are ordinary AMBE voice data and
              * pass Golay+CRC4 by chance on ~1% of superframes, which engaged decryption on
-             * unencrypted voice (issue #2); a chance match of the prediction is ~2^-36. A new
-             * call's first valid late entry diverges and becomes the prediction; the next valid
-             * one activates. Failed decodes in between keep self-advancing the prediction, so
-             * a noisy call still locks. Reuse the last call's keyId (rapid calls share the
-             * channel/key); fall back to any loaded key. */
+             * unencrypted voice (issue #2); so it must CONFIRM the prediction (equal the LFSR
+             * self-advance of an earlier real MI, a chance match of ~2^-36): the first valid late
+             * entry diverges and becomes the prediction, the next valid one activates. That wait
+             * cost a second or more of noise at the start of every rapid call, and a whole call
+             * when the bits kept failing (bench, 2026-10-24). Failed decodes in between keep
+             * self-advancing the prediction, so a noisy call still locks. Reuse the last call's
+             * keyId (rapid calls share the channel/key); fall back to any loaded key. */
             int act = 0;
-            if (leok && !diverge && s_rxPredReal)
+            if (leok && (s_rxLcSeen ? s_rxLcPrivacy : (!diverge && s_rxPredReal)))
             {
                 dmr_pi_t p;
                 p.alg_id = DMR_ALG_AES256; p.mfid = DMR_MFID_DMRA;
@@ -609,7 +644,7 @@ void dmrAesRxBurst(int seq)
             s_rxPredReal = s_rxPredReal || leok;   /* when leok, s_rx.mi == leMi */
             s_rxIvReady = 1;
 #ifdef DMR_AES_DIAG_RX
-            rxd_log(6, (uint8_t)((leok ? 0x01 : 0) | (diverge ? 0x08 : 0) | (act ? 0x10 : 0)),
+            rxd_log(6, (uint8_t)((leok ? 0x01 : 0) | (diverge ? 0x08 : 0) | (act ? 0x10 : 0) | (s_rxLcSeen ? 0x20 : 0) | (s_rxLcPrivacy ? 0x40 : 0)),
                     seq, s_rxLastSeq, s_rx.mi, leMi);
 #endif
         }
@@ -678,6 +713,8 @@ void dmrAesRxEnd(void)
     s_rxBurstEnc = 0;
     s_rxLastSeq = -1;
     memset(s_rxFrag, 0, sizeof s_rxFrag);
+    s_rxLcSeen = 0;      /* the next stream's LC decides for the next stream */
+    s_rxLcPrivacy = 0;
     /* The PI the chip handed us during this stream is now stale (see dmrAesRxPI). Only the
      * most recent one: a PI seen before an intervening stream is accepted again. */
     if (s_rxLastPiValid)
