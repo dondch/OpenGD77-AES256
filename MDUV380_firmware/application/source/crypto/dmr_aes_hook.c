@@ -1,5 +1,4 @@
 #include "crypto/dmr_aes_hook.h"
-#ifdef ENABLE_AES
 #include "crypto/dmr_aes.h"
 #include "functions/codeplug.h"
 #include "hardware/SPI_Flash.h"
@@ -790,4 +789,3 @@ int dmrAesTxEmbSb(uint8_t out4[4])
     dmr_emb_sb_build(s_tx.key_id, (uint8_t)(s_tx.alg_id & 0x07), out4);
     return 1;
 }
-#endif

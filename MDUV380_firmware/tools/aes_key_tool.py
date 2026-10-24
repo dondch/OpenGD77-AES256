@@ -3,7 +3,7 @@
 
 Sends a custom CPS command (C / 0x80 / keyId / 32-byte key) which the AES firmware stores
 safely in the codeplug custom-data region via codeplugSetOpenGD77CustomData() and reloads.
-Requires an ENABLE_AES firmware build. Needs pyserial (pip install -r requirements.txt).
+Requires this fork's firmware (AES is always built in). Needs pyserial (pip install -r requirements.txt).
 
   python3 aes_key_tool.py --key <64-hex-chars> [--keyid 1] [--port /dev/ttyACM0]
   python3 aes_key_tool.py --tx-key <id>      # select the key to transmit with (0 = enc TX off)
@@ -22,7 +22,7 @@ AES_VID, AES_PID = 0x1FC9, 0x0094
 CMD = ord('C')
 SUB_SHOW_CPS = 0
 SUB_CLOSE    = 5
-SUB_SET_AES_KEY = 0x80   # added by the ENABLE_AES firmware (cpsHandleCommand)
+SUB_SET_AES_KEY = 0x80   # added by this fork's firmware (cpsHandleCommand)
 SUB_SET_TX_KEY  = 0x81   # select active TX key id (0 = encrypted TX disabled)
 
 def find_port():
