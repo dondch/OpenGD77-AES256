@@ -56,9 +56,28 @@
 #define AMBE_ENCODE 0x00054F94;
 #define AMBE_ENCODE_ECC 0x0005534C;
 #endif
-extern uint8_t ambebuffer_decode[CODEC_DECODE_CONFIG_DATA_LENGTH];
-extern uint8_t ambebuffer_encode[CODEC_ENCODE_CONFIG_DATA_LENGTH];
-extern uint8_t ambebuffer_encode_ecc[CODEC_ECC_CONFIG_DATA_LENGTH];
+/* Working state of the AMBE codec blob. The TX side (encoder + its FEC encoder) and the
+ * RX side (decoder, also used for voice prompts) are never live at the same time: the radio
+ * is half duplex, voice prompts are terminated before any TX starts, and codecInit() rebuilds
+ * the state from the flash init images at the start of every stream. So the decoder state
+ * overlays the encoder state and only the larger (TX) side costs SRAM: 8448 bytes instead
+ * of 10476. The blob addresses this state only through the pointers passed in r1
+ * (codec_interface.c); it does not depend on fixed RAM addresses (dmr_data.c, proven on-air). */
+typedef union
+{
+	struct
+	{
+		uint8_t encode[CODEC_ENCODE_CONFIG_DATA_LENGTH];
+		uint8_t ecc[CODEC_ECC_CONFIG_DATA_LENGTH];
+	} tx;
+	uint8_t decode[CODEC_DECODE_CONFIG_DATA_LENGTH];
+} codecState_t;
+
+extern codecState_t codecState;
+
+#define ambebuffer_encode      (codecState.tx.encode)
+#define ambebuffer_encode_ecc  (codecState.tx.ecc)
+#define ambebuffer_decode      (codecState.decode)
 
 void initFrame(uint8_t *indata, uint16_t bitbufferDecode[49]);
 void codecInit(bool fromVoicePrompts);

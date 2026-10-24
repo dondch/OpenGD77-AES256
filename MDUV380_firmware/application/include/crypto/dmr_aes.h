@@ -24,9 +24,10 @@ extern "C" {
 #define DMR_AES_IV_BYTES    16
 #define DMR_AES_MAX_KEYS    16      /* key slots, indexed by PI KEY ID */
 
-/* Place AES state in CCM RAM, not main RAM. The AMBE codec blob hardcodes the
- * addresses of its main-RAM buffers (ambebuffer_*), so any .bss we add to main RAM
- * shifts them and crashes DMR voice. CCM keeps the main-RAM layout identical to stock. */
+/* Place AES state in CCM RAM, not main RAM: main SRAM is the tighter budget.
+ * (Originally done because the AMBE codec blob was thought to hardcode its ambebuffer_*
+ * addresses. It does not: it addresses its state through the pointers passed in r1,
+ * see dmr_data.c and codec.h, so main-RAM .bss may move freely.) */
 #define DMR_AES_CCM __attribute__((section(".aes_ccmram")))
 
 /* DMRA PI-header algorithm IDs (confirm TYT's exact value via OTA, spec §6). */
