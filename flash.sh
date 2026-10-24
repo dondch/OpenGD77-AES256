@@ -10,20 +10,22 @@
 # Requires: official ARM GNU toolchain on PATH; python3 with pyusb
 #   (pip install -r MDUV380_firmware/tools/requirements.txt).
 #
-# Usage:  ./flash.sh /path/to/MD9600-CSV2571V5-V26.45.bin
-#         The firmware always includes DMRA AES-256 encrypted voice (TX and RX).
+# Usage:  ./flash.sh /path/to/MD9600-CSV2571V5-V26.45.bin [PROFILE]
+#         PROFILE is a build profile from `make profiles` (default: release). The firmware
+#         always includes DMRA AES-256 encrypted voice (TX and RX); see BUILD.md, "Build flags".
 set -euo pipefail
 DONOR="${1:-}"
+PROFILE="${2:-release}"
 if [ -z "$DONOR" ] || [ ! -f "$DONOR" ]; then
   echo "ERROR: supply the MD-9600 V5 donor firmware (codec source)."
-  echo "usage: $0 /path/to/MD9600-CSV2571V5-V26.45.bin"
+  echo "usage: $0 /path/to/MD9600-CSV2571V5-V26.45.bin [PROFILE]"
   exit 1
 fi
 cd "$(dirname "$0")/MDUV380_firmware"
 echo ">> Validating donor ..."
 python3 tools/verify_codec_donor.py "$DONOR" || { echo "Refusing to flash with an invalid donor."; exit 1; }
-echo ">> Building firmware ..."
-make -j"$(nproc)"
+echo ">> Building firmware (PROFILE=$PROFILE) ..."
+make -j"$(nproc)" PROFILE="$PROFILE"
 echo ">> Flashing (radio must be in DFU/bootloader mode) ..."
 python3 tools/opengd77_stm32_firmware_loader.py -s "$DONOR" -f build/openuv380-10w.bin -m MD-UV380
 

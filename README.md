@@ -57,11 +57,12 @@ DMR needs the proprietary AMBE+2 vocoder, which is **not** present in this (or a
 source/binary; the loader merges it from an **MD-9600 V5** donor at flash time (see BUILD.md).
 **Do not flash a 5W build to a 10W radio.**
 
-### Optional diagnostics
+### Optional features and diagnostics
 
-AES decrypt/keystream diagnostics are compiled in behind off-by-default flags (`DMR_AES_DIAG_RX` /
-`DMR_AES_DIAG_PATTERN` / `DMR_AES_DIAG_ENCPAT`) — they add nothing to the default build. Build e.g.
-`make DMR_AES_DIAG_RX=1` and read over USB with `tools/rxdiag.py` / `tools/fragcap.py`.
+Everything beyond AES voice is behind an off-by-default build flag: encrypted SMS, fast analog scan, the dual
+screen and the TA2TWC screens as features, plus the bench and AES diagnostics. The flags, their measured RAM
+cost and the named build profiles (`make PROFILE=full`, `make PROFILE=dev-aes`, ...) are documented in
+[BUILD.md, "Build flags"](BUILD.md#build-flags).
 
 ## License
 
