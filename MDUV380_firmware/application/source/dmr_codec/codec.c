@@ -1223,14 +1223,37 @@ static void codecRLE32_Decode(uint8_t *dest, const uint8_t *src, int len)
 	}
 }
 
+// Which side of the shared codecState currently holds a valid init image.
+// The decoder and the encoder overlay each other (codec.h), so they cannot both be
+// initialised up front: codecInit() only invalidates, and the first decode or encode
+// call of a stream loads the image it needs (codecPrepareDecode / codecPrepareEncode).
+static codecStateMode_t codecStateMode = CODEC_STATE_NONE;
+
 void codecInitInternalBuffers(void)
 {
-	memcpy(ambebuffer_decode, ambebuffer_decode_init, 0x07ec);
-	// 8 bits:  ~44 PITCounters, 1388 bytes, 694 pairs
-	// 16 bits: ~21 PITCounters, 501 bytes,  167 pairs
-	// 32 bits: ~11 PITCounters, 650 bytes,  130 pairs
-	codecRLE32_Decode(ambebuffer_encode, ambebuffer_encode_init_RLE32, 0x2000); // memcpy(ambebuffer_encode, ambebuffer_encode_init, 0x2000);
-	memcpy(ambebuffer_encode_ecc, ambebuffer_encode_ecc_init, 0x0100);
+	codecStateMode = CODEC_STATE_NONE;
+}
+
+void codecPrepareDecode(void)
+{
+	if (codecStateMode != CODEC_STATE_DECODE)
+	{
+		memcpy(ambebuffer_decode, ambebuffer_decode_init, 0x07ec);
+		codecStateMode = CODEC_STATE_DECODE;
+	}
+}
+
+void codecPrepareEncode(void)
+{
+	if (codecStateMode != CODEC_STATE_ENCODE)
+	{
+		// 8 bits:  ~44 PITCounters, 1388 bytes, 694 pairs
+		// 16 bits: ~21 PITCounters, 501 bytes,  167 pairs
+		// 32 bits: ~11 PITCounters, 650 bytes,  130 pairs
+		codecRLE32_Decode(ambebuffer_encode, ambebuffer_encode_init_RLE32, 0x2000); // memcpy(ambebuffer_encode, ambebuffer_encode_init, 0x2000);
+		memcpy(ambebuffer_encode_ecc, ambebuffer_encode_ecc_init, 0x0100);
+		codecStateMode = CODEC_STATE_ENCODE;
+	}
 }
 
 void codecInit(bool fromVoicePrompts)

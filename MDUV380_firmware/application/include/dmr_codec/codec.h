@@ -61,7 +61,9 @@
  * is half duplex, voice prompts are terminated before any TX starts, and codecInit() rebuilds
  * the state from the flash init images at the start of every stream. So the decoder state
  * overlays the encoder state and only the larger (TX) side costs SRAM: 8448 bytes instead
- * of 10476. The blob addresses this state only through the pointers passed in r1
+ * of 10476. Because of the overlay the two init images cannot both be loaded at once:
+ * codecInit() only marks the state invalid and the first decode or encode call of a
+ * stream loads the image it needs (codecStateMode in codec.c). The blob addresses this state only through the pointers passed in r1
  * (codec_interface.c); it does not depend on fixed RAM addresses (dmr_data.c, proven on-air). */
 typedef union
 {
@@ -74,6 +76,18 @@ typedef union
 } codecState_t;
 
 extern codecState_t codecState;
+
+typedef enum
+{
+	CODEC_STATE_NONE = 0,   // neither image loaded (after codecInit)
+	CODEC_STATE_DECODE,     // codecState.decode holds the decoder image
+	CODEC_STATE_ENCODE      // codecState.tx holds the encoder + FEC images
+} codecStateMode_t;
+
+// Load the decoder (resp. encoder) init image unless it is already the live one.
+// codecDecode() / codecEncodeBlock() call these on every entry; cheap when already loaded.
+void codecPrepareDecode(void);
+void codecPrepareEncode(void);
 
 #define ambebuffer_encode      (codecState.tx.encode)
 #define ambebuffer_encode_ecc  (codecState.tx.ecc)
