@@ -96,7 +96,7 @@ menuDataGlobal_t menuDataGlobal =
 #if defined(ENABLE_AES) && defined(ENABLE_DMR_DATA)
 				NULL,// Messages
 #endif
-#if defined(HAS_DUAL_WATCH_OPTIONS)
+#if defined(ENABLE_DUAL_SCREEN)
 				NULL,// Dual Watch options
 #endif
 				// *** Add new menus to be accessed using quickkey (ID: 0..31) above this line ***
@@ -163,7 +163,7 @@ static menuFunctionData_t menuFunctions[] =
 #if defined(ENABLE_AES) && defined(ENABLE_DMR_DATA)
 		{ menuMessages,             NULL, NULL, 0 },
 #endif
-#if defined(HAS_DUAL_WATCH_OPTIONS)
+#if defined(ENABLE_DUAL_SCREEN)
 		{ menuDualWatchOptions,     NULL, NULL, 0 },
 #endif
 		// *** Add new menus to be accessed using quickkey (ID: 0..31) above this line ***
@@ -712,7 +712,7 @@ static const menuItemNewData_t optionsMenuItems[] =
 #if !defined(PLATFORM_GD77S)
 	{ 257, MENU_APRS            },
 #endif
-#if defined(HAS_DUAL_WATCH_OPTIONS)
+#if defined(ENABLE_DUAL_SCREEN)
 	{ 143, MENU_DUAL_WATCH },// stringOffset 143 = .dual_watch field
 #endif
 #if defined(ENABLE_AES)

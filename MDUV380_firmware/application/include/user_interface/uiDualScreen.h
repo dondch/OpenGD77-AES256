@@ -32,7 +32,7 @@
 
 #include "user_interface/menuSystem.h"
 
-#if defined(HAS_DUAL_WATCH_OPTIONS)
+#if defined(ENABLE_DUAL_SCREEN)
 bool uiDualScreenIsEnabled(void);
 bool uiDualScreenCanDraw(void);                    // option on and a quiet screen state (no TX, no channel details...)
 void uiDualScreenDraw(void);                       // the two rows, A on top and B below

@@ -52,7 +52,7 @@ static const char *creditTexts[] =
 		"Dzmitry EW1ADG",
 #endif
 		"Jason VK7ZJA (SK)",
-#if defined(HAS_DUAL_WATCH_OPTIONS)
+#if defined(ENABLE_DUAL_SCREEN)
 		"Eren TA3BZC",   // dual screen / dual watch options
 #endif
 #if defined(HAS_TELEMETRY)

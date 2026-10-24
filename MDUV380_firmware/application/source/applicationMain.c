@@ -65,7 +65,7 @@
 
 // Couldn't declare into aprs.h, due to header cross-dependence.
 void aprsBeaconingTick(uiEvent_t *ev);
-#if defined(HAS_DUAL_WATCH_OPTIONS)
+#if defined(ENABLE_DUAL_SCREEN)
 #include "user_interface/uiDualScreen.h"
 #endif
 
@@ -991,7 +991,7 @@ void applicationMainTask(void)
 
 		if(trxGetMode() == RADIO_MODE_ANALOG)
 		{
-#if defined(HAS_DUAL_WATCH_OPTIONS)
+#if defined(ENABLE_DUAL_SCREEN)
 			// Not while the row watch looks at the other row for 80 ms: no LED, beeps or audio for what it sees
 			if (uiDualScreenWatchIsPeeking() == false)
 #endif
@@ -1131,7 +1131,7 @@ void applicationMainTask(void)
 							if (currentChannelData->txFreq != 0)
 							{
 								rxPowerSavingSetState(ECOPHASE_POWERSAVE_INACTIVE);
-#if defined(HAS_DUAL_WATCH_OPTIONS)
+#if defined(ENABLE_DUAL_SCREEN)
 								uiDualScreenWatchAbort(); // PTT transmits on the active row: tune back to it first
 #endif
 
@@ -1447,7 +1447,7 @@ void applicationMainTask(void)
 		voxTick();
 		gpsTick();
 		aprsBeaconingTick(&ev);
-#if defined(HAS_DUAL_WATCH_OPTIONS)
+#if defined(ENABLE_DUAL_SCREEN)
 		uiDualScreenWatchTick();
 #endif
 		settingsSaveIfNeeded(false);

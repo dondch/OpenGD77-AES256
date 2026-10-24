@@ -231,7 +231,7 @@ static menuStatus_t uiChannelModeFirstRun(void)
 			GD77SParameters.dtmfListCount = codeplugDTMFContactsGetCount();
 		}
 #endif
-#if defined(HAS_DUAL_WATCH_OPTIONS)
+#if defined(ENABLE_DUAL_SCREEN)
 		uiDualScreenScreenEntered(true);
 #endif
 		uiChannelModeUpdateScreen(0);
@@ -282,7 +282,7 @@ menuStatus_t uiChannelMode(uiEvent_t *ev, bool isFirstRun)
 		}
 #endif
 
-#if defined(HAS_DUAL_WATCH_OPTIONS)
+#if defined(ENABLE_DUAL_SCREEN)
 		// Redraw the two rows when a signal starts / stops (frame around the active row)
 		if (uiDualScreenRxStateChanged() && (uiDataGlobal.displayQSOState == QSO_DISPLAY_IDLE) && (uiDataGlobal.Scan.active == false))
 		{
@@ -941,7 +941,7 @@ void uiChannelModeUpdateScreen(int txTimeSecs)
 			uiDataGlobal.isDisplayingQSOData = false;
 			uiDataGlobal.receivedPcId = 0x00;
 
-#if defined(HAS_DUAL_WATCH_OPTIONS)
+#if defined(ENABLE_DUAL_SCREEN)
 			if (uiDualScreenCanDraw() && (isTransmitting == false) && (directChannelNumber == 0) && (uiDataGlobal.Scan.active == false))
 			{
 				// Only the two rows: the stock channel / contact / zone drawing below would overlap them
@@ -1214,7 +1214,7 @@ static void handleEvent(uiEvent_t *ev)
 	return;
 #else
 
-#if defined(HAS_DUAL_WATCH_OPTIONS)
+#if defined(ENABLE_DUAL_SCREEN)
 	if (uiDualScreenHandleKey(ev, true, ((directChannelNumber > 0) || uiDataGlobal.displayChannelSettings)))
 	{
 		return;

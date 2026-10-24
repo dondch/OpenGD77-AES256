@@ -65,7 +65,7 @@ typedef enum
 // internal prototypes
 static void handleEvent(uiEvent_t *ev);
 static void dualWatchStart(void);
-#if defined(HAS_DUAL_WATCH_OPTIONS)
+#if defined(ENABLE_DUAL_SCREEN)
 static uint8_t dualWatchHomeVFO = 0;
 static bool dualWatchHomeIsChannel = false;
 static bool dualWatchChannelSide = false; // second side is the zone channel (dwChannelData) instead of the other VFO
@@ -589,6 +589,7 @@ static uint32_t vfoSweepSpan(void)
 #define VFO_SWEEP_BARS_HEIGHT        (VFO_SWEEP_TRACE_HEIGHT_Y / 3)
 #define VFO_SWEEP_WATERFALL_START_Y  (VFO_SWEEP_TRACE_START_Y + VFO_SWEEP_BARS_HEIGHT)
 #define VFO_SWEEP_WATERFALL_HEIGHT   (VFO_SWEEP_TRACE_HEIGHT_Y - VFO_SWEEP_BARS_HEIGHT)
+static void vfoSweepWaterfallClear(void);   // defined with the other waterfall functions below, used before them
 static uint16_t vfoSweepWaterfallPalette[32];   // level 0..31 -> native pixel, built at sweep entry (panel type is a runtime property)
 static uint16_t vfoSweepBarPalette[32];         // the same hue at 150% brightness for the bar tips
 static bool     vfoSweepWaterfallOn = true;
@@ -715,7 +716,7 @@ menuStatus_t uiVFOMode(uiEvent_t *ev, bool isFirstRun)
 		}
 
 		freqEnterReset();
-#if defined(HAS_DUAL_WATCH_OPTIONS)
+#if defined(ENABLE_DUAL_SCREEN)
 		uiDualScreenScreenEntered(false);
 #endif
 		uiVFOModeUpdateScreen(0);
@@ -755,7 +756,7 @@ menuStatus_t uiVFOMode(uiEvent_t *ev, bool isFirstRun)
 		}
 #endif
 
-#if defined(HAS_DUAL_WATCH_OPTIONS)
+#if defined(ENABLE_DUAL_SCREEN)
 		// Redraw the two rows when a signal starts / stops (frame around the active row)
 		if (uiDualScreenRxStateChanged() && (uiDataGlobal.displayQSOState == QSO_DISPLAY_IDLE) && (uiDataGlobal.Scan.active == false))
 		{
@@ -1023,7 +1024,7 @@ void uiVFOModeUpdateScreen(int txTimeSecs)
 	{
 		case QSO_DISPLAY_DEFAULT_SCREEN:
 			lastHeardClearLastID();
-#if defined(HAS_DUAL_WATCH_OPTIONS)
+#if defined(ENABLE_DUAL_SCREEN)
 			if (uiDualScreenCanDraw() && (uiDataGlobal.Scan.active == false) && (uiDataGlobal.FreqEnter.index == 0) &&
 					(screenOperationMode[nonVolatileSettings.currentVFONumber] == VFO_SCREEN_OPERATION_NORMAL))
 			{
@@ -1034,7 +1035,7 @@ void uiVFOModeUpdateScreen(int txTimeSecs)
 			if ((uiDataGlobal.Scan.active &&
 					(screenOperationMode[nonVolatileSettings.currentVFONumber] == VFO_SCREEN_OPERATION_DUAL_SCAN) && (uiDataGlobal.Scan.state == SCAN_STATE_SCANNING)))
 			{
-#if defined(HAS_DUAL_WATCH_OPTIONS)
+#if defined(ENABLE_DUAL_SCREEN)
 				if (dualWatchChannelSide)
 				{
 					// Top: the VFO, bottom: the zone channel
@@ -1381,7 +1382,7 @@ bool uiVFOModeIsTXFocused(void)
 	return (selectedFreq == VFO_SELECTED_FREQUENCY_INPUT_TX);
 }
 
-#if defined(HAS_DUAL_WATCH_OPTIONS)
+#if defined(ENABLE_DUAL_SCREEN)
 
 static uint16_t dualWatchStepMs(void)
 {
@@ -1395,7 +1396,7 @@ static uint16_t dualWatchStepMs(void)
 static void dualWatchStart(void)
 {
 	uiDataGlobal.Scan.active = true;
-#if defined(HAS_DUAL_WATCH_OPTIONS)
+#if defined(ENABLE_DUAL_SCREEN)
 	uiDataGlobal.Scan.stepTimeMilliseconds = dualWatchStepMs();
 	dualWatchOnChannel = false;
 	dualWatchChannelSide = false;
@@ -1433,7 +1434,7 @@ static void dualWatchStart(void)
 	}
 }
 
-#if defined(HAS_DUAL_WATCH_OPTIONS)
+#if defined(ENABLE_DUAL_SCREEN)
 // "On RX: Stay" option. While Dual Watch is visiting the VFO which isn't the home one, a carrier only
 // gives a (rate limited) beep and the scan carries on; returns true when it has handled the VFO this way.
 static bool dualWatchStayCheck(void)
@@ -1510,7 +1511,7 @@ void uiVFOModeStopScanning(void)
 
 	if (screenOperationMode[nonVolatileSettings.currentVFONumber] == VFO_SCREEN_OPERATION_DUAL_SCAN)
 	{
-#if defined(HAS_DUAL_WATCH_OPTIONS)
+#if defined(ENABLE_DUAL_SCREEN)
 		if (dualWatchOnChannel)
 		{
 			// Stopped while tuned to the zone channel: go back to the VFO
@@ -1728,7 +1729,7 @@ static void toggleAnalogBandwidth(void)
 
 static void handleEvent(uiEvent_t *ev)
 {
-#if defined(HAS_DUAL_WATCH_OPTIONS)
+#if defined(ENABLE_DUAL_SCREEN)
 	if (uiDualScreenHandleKey(ev, false, ((uiDataGlobal.FreqEnter.index > 0) || (screenOperationMode[nonVolatileSettings.currentVFONumber] != VFO_SCREEN_OPERATION_NORMAL))))
 	{
 		return;
@@ -4689,7 +4690,7 @@ bool uiVFOModeIsScanning(void)
 	return (uiDataGlobal.Scan.toneActive || uiDataGlobal.Scan.active);
 }
 
-#if defined(HAS_DUAL_WATCH_OPTIONS)
+#if defined(ENABLE_DUAL_SCREEN)
 bool uiVFOModeDualWatchOnChannel(void)
 {
 	return (dualWatchChannelSide && dualWatchOnChannel && uiDataGlobal.Scan.active &&
@@ -5470,7 +5471,7 @@ static void scanning(void)
 	{
 		// Test for presence of RF Carrier.
 
-#if defined(HAS_DUAL_WATCH_OPTIONS)
+#if defined(ENABLE_DUAL_SCREEN)
 		if (dualWatchStayCheck())
 		{
 			// Dual Watch "Stay": never pause on the non-home VFO
@@ -5644,7 +5645,7 @@ static void scanning(void)
 			//
 			// Note: nonVolatileSettings.currentVFONumber is not changed using settingsSet(), to prevent crazy EEPROM
 			//       writes. uiVFOModeStopScanning() is doing this, when the scanning process ends (for any reason).
-#if defined(HAS_DUAL_WATCH_OPTIONS)
+#if defined(ENABLE_DUAL_SCREEN)
 			if (dualWatchChannelSide)
 			{
 				// Alternate between the VFO (currentVFONumber isn't changed) and the zone channel

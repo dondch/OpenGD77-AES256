@@ -36,7 +36,7 @@
 #include "user_interface/uiLocalisation.h"
 #include "user_interface/uiTelemetry.h"
 #include "user_interface/uiHomeScreen.h"
-#if defined(HAS_DUAL_WATCH_OPTIONS)
+#if defined(ENABLE_DUAL_SCREEN)
 #include "user_interface/uiDualScreen.h"
 #endif
 #include "hardware/SPI_Flash.h"
@@ -2546,7 +2546,7 @@ bool uiUtilityDrawTelemetryRx(int16_t y, int16_t historyY, int16_t historyHeight
 bool uiUtilityHomeScreenIsActive(void)
 {
 #if defined(HAS_TELEMETRY)
-#if defined(HAS_DUAL_WATCH_OPTIONS)
+#if defined(ENABLE_DUAL_SCREEN)
 	// The dual screen takes over the home screen while its option is on
 	if (uiDualScreenIsEnabled())
 	{
@@ -2912,7 +2912,7 @@ void uiUtilityDisplayFrequency(uint8_t y, bool isTX, bool hasFocus, uint32_t fre
 #endif
 			yFont1 = yFont3 + FONT_SIZE_1_HEIGHT;
 		}
-#if defined(HAS_DUAL_WATCH_OPTIONS)
+#if defined(ENABLE_DUAL_SCREEN)
 		else if (isScanMode && displayVFOChannel && ((dualWatchVFO == 2U) || (dualWatchVFO == 3U))) /* DualWatch's second row: VFO B (2) or channel (3) */
 #else
 		else if (isScanMode && displayVFOChannel && (dualWatchVFO == 2U)) /* DualWatch's VFO B */
@@ -2949,7 +2949,7 @@ void uiUtilityDisplayFrequency(uint8_t y, bool isTX, bool hasFocus, uint32_t fre
 	// VFO
 	if (displayVFOChannel)
 	{
-#if defined(HAS_DUAL_WATCH_OPTIONS)
+#if defined(ENABLE_DUAL_SCREEN)
 		// dualWatchVFO: 0 normal screen, 1 row for VFO A, 2 row for VFO B, 3 row for the channel, 4 row for VFO B on top (with a channel below)
 		const char *letter = "B";
 

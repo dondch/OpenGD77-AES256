@@ -208,7 +208,7 @@ bool uiVFOModeIsTXFocused(void);
 void uiVFOModeStopScanning(void);
 bool uiVFOModeIsScanning(void);
 bool uiVFOModeDualWatchIsScanning(void);
-#if defined(HAS_DUAL_WATCH_OPTIONS)
+#if defined(ENABLE_DUAL_SCREEN)
 bool uiVFOModeDualWatchOnChannel(void);   // Dual Watch is currently tuned to its zone-channel side
 #endif
 bool uiVFOModeDualWatchOnChannel(void);
@@ -364,7 +364,7 @@ enum MENU_SCREENS
 #if defined(ENABLE_AES) && defined(ENABLE_DMR_DATA)
 	MENU_MESSAGES,// encrypted-SMS messaging (index-matched to menuFunctions[])
 #endif
-#if defined(HAS_DUAL_WATCH_OPTIONS)
+#if defined(ENABLE_DUAL_SCREEN)
 	MENU_DUAL_WATCH,// dual screen / Dual Watch options (index-matched to menuFunctions[])
 #endif
 	// *** Add new menus to be accessed using quickkey (ID: 0..31) above this line ***
@@ -527,7 +527,7 @@ menuStatus_t menuAESKeys(uiEvent_t *ev, bool isFirstRun);
 #endif
 #if defined(ENABLE_AES) && defined(ENABLE_DMR_DATA)
 menuStatus_t menuMessages(uiEvent_t *ev, bool isFirstRun);
-#if defined(HAS_DUAL_WATCH_OPTIONS)
+#if defined(ENABLE_DUAL_SCREEN)
 menuStatus_t menuDualWatchOptions(uiEvent_t *ev, bool isFirstRun);
 #endif
 #endif

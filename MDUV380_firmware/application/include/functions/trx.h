@@ -147,7 +147,7 @@ int trxGetDMRTimeSlot(void);
 void trxSetDMRTimeSlot(int timeslot, bool resync);
 void trxSetTxCSS(uint16_t tone);
 void trxSetRxCSS(RadioDevice_t deviceId, uint16_t tone);
-#if defined(HAS_DUAL_WATCH_OPTIONS)
+#if defined(ENABLE_DUAL_SCREEN)
 void trxSetSquelchOverride(bool enabled, uint8_t sql, uint16_t rxTone); // squelch level and tone to use instead of currentChannelData's (row watch)
 #endif
 bool trxCheckCSSFlag(uint16_t tone);

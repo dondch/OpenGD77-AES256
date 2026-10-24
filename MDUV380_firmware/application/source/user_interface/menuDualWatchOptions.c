@@ -32,7 +32,7 @@
 #include "user_interface/uiUtilities.h"
 #include "user_interface/uiLocalisation.h"
 
-#if defined(HAS_DUAL_WATCH_OPTIONS)
+#if defined(ENABLE_DUAL_SCREEN)
 
 enum
 {
@@ -258,4 +258,4 @@ static void handleEvent(uiEvent_t *ev)
 	}
 }
 
-#endif // HAS_DUAL_WATCH_OPTIONS
+#endif // ENABLE_DUAL_SCREEN

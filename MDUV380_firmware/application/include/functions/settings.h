@@ -267,7 +267,6 @@ typedef struct
 } settingsStruct_t;
 
 #if defined(ENABLE_DUAL_SCREEN) && !(defined(PLATFORM_RD5R) || defined(PLATFORM_MD9600))
-#define HAS_DUAL_WATCH_OPTIONS 1
 // nonVolatileSettings.dualWatchOptions bits. 0 (the value stored by older firmware) is the stock behaviour.
 #define DUALWATCH_AUTOSTART     0x0001U // unused now (was: start Dual Watch whenever the VFO screen is entered), bit kept reserved
 #define DUALWATCH_HOME_MASK     0x0006U // 0: VFO active when Dual Watch started, 1: VFO A, 2: VFO B, 3: the channel (needs DUALWATCH_CHANNEL_B)

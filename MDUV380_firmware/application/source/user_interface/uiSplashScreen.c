@@ -172,7 +172,7 @@ static void updateScreen(bool isFirstRun)
 
 		if (dmrId != 0U)
 		{
-			snprintf(bootAnimationSubtitle, sizeof(bootAnimationSubtitle), "DMR ID %u", dmrId);
+			snprintf(bootAnimationSubtitle, sizeof(bootAnimationSubtitle), "DMR ID %lu", (unsigned long)dmrId);
 		}
 		else
 		{
