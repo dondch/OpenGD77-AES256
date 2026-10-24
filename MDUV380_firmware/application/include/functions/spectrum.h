@@ -13,7 +13,7 @@
  * All frequencies are in OpenGD77's usual units of 10 Hz (446.00625 MHz = 44600625).
  *
  * Everything here is behind ENABLE_SPECTRUM, a DEV-ONLY build flag that must never be
- * set for a release build. It is deliberately independent of ENABLE_AES, ENABLE_DMR_DATA
+ * set for a release build. It is deliberately independent of ENABLE_DMR_DATA
  * and ENABLE_KEY_INJECTION; stock builds stay byte-identical.
  *
  * Driven from the host over USB CPS 'C' subcommands 0xA0 (sweep) and 0xA1 (settle

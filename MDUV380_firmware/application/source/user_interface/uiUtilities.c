@@ -2314,7 +2314,7 @@ void uiUtilityRenderHeader(bool isVFODualWatchScanning, bool isVFOSweepScanning,
 		}
 	}
 
-#if defined(ENABLE_AES) && defined(ENABLE_DMR_DATA)
+#if defined(ENABLE_DMR_DATA)
 	// Unread encrypted-SMS indicator: a small envelope + count at the top-right of the
 	// main area. The receive pop-up (uiNotificationShow) is the alert; this is the
 	// persistent reminder. Drawn only when there are unread Inbox messages.

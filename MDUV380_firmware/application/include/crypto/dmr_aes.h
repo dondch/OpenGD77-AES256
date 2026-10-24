@@ -6,7 +6,7 @@
  * XORed onto the AMBE voice octets, MI advanced every superframe.
  *
  * This module is self-contained (no libc beyond memcpy/memset) and AES-256 only.
- * Build behind ENABLE_AES. See ../DMRA_AES256_SPEC.md.
+ * Always compiled in. See ../DMRA_AES256_SPEC.md.
  *
  * LEGAL: encrypted voice is illegal on amateur bands in most jurisdictions. Commercial/PMR only.
  */

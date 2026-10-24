@@ -327,12 +327,10 @@ const stringsTable_t englishLanguage =
 .text_size				= "Text size",//MaxLen: 16 (with ':' + 1 digit)
 .last_talker				= "Last talker", // MaxLen: 16 (with ':' + .off or 2 digits value + 's')
 .mute					= "Mute", // MaxLen: 16 (with ':' + .on or .off)
-#if defined(ENABLE_AES)
 .aes_keys				= "AES Keys", // MaxLen: 16
 .encrypt_tx				= "Encrypt TX", // MaxLen: 16
 #if defined(ENABLE_DMR_DATA)
 .messages				= "Messages", // MaxLen: 16
-#endif
 #endif
 };
 /********************************************************************
