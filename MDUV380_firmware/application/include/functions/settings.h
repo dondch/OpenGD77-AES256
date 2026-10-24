@@ -201,7 +201,12 @@ typedef struct
 	uint32_t			vfoScanHigh[2]; // High frequency for VFO Scanning
 	uint32_t			bitfieldOptions[SETTINGS_BITS_NUMBER_OF_BANKS]; // see bitfieldOptions_t
 	uint32_t			aprsBeaconingSettingsPart1[2];
-#if defined(LOG_GPS_DATA)
+#if defined(HAS_GPS)
+	// Present on every GPS-capable platform whether or not the NMEA log is compiled in
+	// (ENABLE_GPS_NMEA_LOG): this struct is the saved-settings layout, and dropping the field
+	// would shift every later member by 4 bytes without changing STORAGE_MAGIC_NUMBER, so a
+	// radio upgrading from a build with the log would misread (and on power-off scramble) its
+	// saved settings. It is only read and written under LOG_GPS_DATA.
 	uint32_t			gpsLogMemOffset; // Current offset from the NMEA logging flash memory address start.
 #endif
 	int16_t				currentIndexInTRxGroupList[3]; // Current Channel, VFO A and VFO B
