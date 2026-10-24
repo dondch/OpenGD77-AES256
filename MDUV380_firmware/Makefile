@@ -8,9 +8,11 @@ OBJCOPY  = $(CROSS)objcopy
 SIZE     = $(CROSS)size
 
 CPU   = -mcpu=cortex-m4 -mthumb -mfpu=fpv4-sp-d16 -mfloat-abi=hard
-ENABLE_AES ?= 0
 GITVERSION := $(shell git rev-parse --short HEAD 2>/dev/null || echo UNKNOWN)
 DEFS  = -DGITVERSION=$(GITVERSION) -DUSE_HAL_DRIVER -DSTM32F405xx -DPLATFORM_MDUV380 -DPLATFORM_VARIANT_UV380_PLUS_10W -DNDEBUG
+# DMRA AES-256 encrypted voice is always compiled in: it is the point of this fork.
+# (ENABLE_AES used to be an opt-in flag; the source guards remain until they are stripped.)
+DEFS += -DENABLE_AES
 INCS  = -I. -ICore/Inc \
         -IDrivers/CMSIS/Device/ST/STM32F4xx/Include -IDrivers/CMSIS/Include \
         -IDrivers/STM32F4xx_HAL_Driver/Inc -IDrivers/STM32F4xx_HAL_Driver/Inc/Legacy \
@@ -20,10 +22,6 @@ INCS  = -I. -ICore/Inc \
         -IMiddlewares/Third_Party/FreeRTOS/Source/include \
         -IMiddlewares/Third_Party/FreeRTOS/Source/portable/GCC/ARM_CM4F \
         -IUSB_DEVICE/App -IUSB_DEVICE/Target -Iapplication/include
-
-ifeq ($(ENABLE_AES),1)
-DEFS += -DENABLE_AES
-endif
 
 ifeq ($(ENABLE_DMR_DATA),1)
 DEFS += -DENABLE_DMR_DATA
@@ -43,14 +41,14 @@ endif
 
 # Dev-only: USB display mirror + remote key injection (fbmirror.py / rkey.py).
 # Lets a PC drive the UI and read the framebuffer over USB. Never enable in a
-# release build. Independent of ENABLE_AES.
+# release build.
 ifeq ($(ENABLE_KEY_INJECTION),1)
 DEFS += -DENABLE_KEY_INJECTION
 endif
 
 # Dev-only: swept-RSSI receiver driven over USB (tools/sweep.py). NOT an SDR --
 # the AT1846S has no IQ output, only an RSSI register. Never enable in a release
-# build. Independent of ENABLE_AES / ENABLE_DMR_DATA / ENABLE_KEY_INJECTION.
+# build. Independent of ENABLE_DMR_DATA / ENABLE_KEY_INJECTION.
 ifeq ($(ENABLE_SPECTRUM),1)
 DEFS += -DENABLE_SPECTRUM
 endif
@@ -67,7 +65,7 @@ endif
 # "Scan dwell time" setting, selectable on the radio and via CHIRP. Digital scanning is
 # unchanged (it takes the larger of this and its own DMR timeslot minimum). Unlike
 # ENABLE_SPECTRUM this is a user-facing feature flag, not a dev one -- but it is still a
-# flag so that a build without it stays byte-identical to stock.
+# flag so that a build without it stays identical to the plain AES build.
 ifeq ($(ENABLE_FAST_SCAN),1)
 DEFS += -DENABLE_FAST_SCAN
 endif

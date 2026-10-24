@@ -10,21 +10,20 @@
 # Requires: official ARM GNU toolchain on PATH; python3 with pyusb
 #   (pip install -r MDUV380_firmware/tools/requirements.txt).
 #
-# Usage:  ./flash.sh /path/to/MD9600-CSV2571V5-V26.45.bin [aes]
-#         second arg "aes" builds with ENABLE_AES=1 (experimental DMRA AES-256 RX decrypt).
+# Usage:  ./flash.sh /path/to/MD9600-CSV2571V5-V26.45.bin
+#         The firmware always includes DMRA AES-256 encrypted voice (TX and RX).
 set -euo pipefail
 DONOR="${1:-}"
-AES=0; [ "${2:-}" = "aes" ] && AES=1
 if [ -z "$DONOR" ] || [ ! -f "$DONOR" ]; then
   echo "ERROR: supply the MD-9600 V5 donor firmware (codec source)."
-  echo "usage: $0 /path/to/MD9600-CSV2571V5-V26.45.bin [aes]"
+  echo "usage: $0 /path/to/MD9600-CSV2571V5-V26.45.bin"
   exit 1
 fi
 cd "$(dirname "$0")/MDUV380_firmware"
 echo ">> Validating donor ..."
 python3 tools/verify_codec_donor.py "$DONOR" || { echo "Refusing to flash with an invalid donor."; exit 1; }
-echo ">> Building firmware (ENABLE_AES=$AES) ..."
-make -j"$(nproc)" ENABLE_AES="$AES"
+echo ">> Building firmware ..."
+make -j"$(nproc)"
 echo ">> Flashing (radio must be in DFU/bootloader mode) ..."
 python3 tools/opengd77_stm32_firmware_loader.py -s "$DONOR" -f build/openuv380-10w.bin -m MD-UV380
 
