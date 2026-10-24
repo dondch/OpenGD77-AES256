@@ -54,10 +54,54 @@ It prints **"Patching for DMR"** on success (vs **"Flashing FM Only firmware"** 
 ```
 CI (`.github/workflows/build.yml`) runs the same for `ENABLE_AES` 0 and 1 and asserts the merge-capable size.
 
+## Host tests (no radio, plain gcc)
+```sh
+cd MDUV380_firmware && sh tests/run_all.sh
+```
+Builds and runs every `tests/test_*.c` against the real `crypto/` and `functions/dmr_sms.c` sources with the
+small firmware stand-ins in `tests/stubs/` (each test's header carries its own gcc line). Covers the AES
+primitives, the late-entry MI and EMB codings, the RX bootstrap / PI seeding across call boundaries, the TX
+state at key-up, and the SMS receive path (unconfirmed and confirmed delivery, addressing, retransmissions, the
+acknowledgement, the network's short data, and the stock radio's "DMR format" text, from captured PDUs).
+
+## Dual screen build
+`ENABLE_DUAL_SCREEN=1` adds the Anytone-style dual screen (two rows, A and B, each a VFO or a zone channel;
+Up/Down selects the other row, RED switches the active row between VFO and channel), a row watch that peeks at
+the other row every 1.5 s when the active one is quiet, and a "DW Options" menu under Options (dual screen
+on/off, row watch, side B = VFO B or the zone channel, home side, speed, stay/switch on a signal). The row
+watch looks at an analog other row (a DMR row cannot be judged in a short look); the active row may be analog or
+DMR. It tunes to the other row for 80 ms every 1.5 s while the active row is quiet (no audio, and on a DMR row no
+call up), shows an "RX" badge on it while a signal lasts, and returns to the active row after the scan hang time,
+re-initialising the DMR receiver so a call that started meanwhile is joined by late entry; the active row does
+not change. "Home",
+"Speed" and "On signal" (stay or switch) belong to the VFO dual-watch scan (the A/B alternating scan),
+not to the row watch. Ported from erenbozaci/md-uv390-firmware (Eren TA3BZC), same R20260131 base. State
+lives in the two previously unused settings fields, so older settings read as "all off". Verified on the
+bench 2026-10-24: menu, rows, row select, VFO/channel switch, persistence across a reflash, row watch with
+a carrier on the other row (badge within 2 s, gone 7 s after the carrier).
+
+## TA2TWC screens build
+`ENABLE_TA2TWC_SCREENS=1` adds the redesigned screens of josephddt/OpenGD77-TA2TWC (same R20260131 base): a
+Channel home screen with large frequency, channel, zone and TX frequency, the S-meter with dBm, signal quality,
+noise, battery voltage, temperature and a scrolling signal history; a caller screen with the callsign large;
+a TX screen with the time-out bar; telemetry lines on the VFO screen; an analog needle S-meter on the RSSI
+screen; boot and shutdown animations with the radio's callsign and DMR ID; a dark default theme and compact
+9-line menus. "Main screen: Classic" in the Display options brings the stock Channel screen back. With
+`ENABLE_DUAL_SCREEN=1` as well, the dual screen takes the home screen over while its option is on. The fork's
+own spectrum module is not taken (this tree's sweep has its waterfall), nor its settings defaults.
+
 ## AES build
 `ENABLE_AES=1` compiles in DMRA (Motorola/Hytera-compatible) AES-256 encrypted voice — both **transmit and
-receive**, interoperable with a stock TYT MD-UV390 ("Universal" AES256). The default build is byte-for-byte
-stock OpenGD77 (no AES symbols). Crypto lives in `application/source/crypto/` (host-unit-tested: FIPS-197 AES,
+receive**, interoperable with a stock TYT MD-UV390 ("Universal" AES256). The default build is stock OpenGD77
+(no AES symbols) plus the upstream bound-checks in `usb_com.c`, `hotspot.c`, `uiUtilities.c` and
+`menuRadioInfos.c`.
+
+**Checking the stock build.** `arm-none-eabi-size` cannot see code changes in this firmware: `.text` growth is
+absorbed byte for byte by the fixed-address AMBE placeholder section (`.codec_bin_section_1`), so its text
+total stays 728864 whatever changes. Compare section sizes instead, `arm-none-eabi-objdump -h build/openuv380-10w.elf`:
+`.text 0x3F184 .rodata 0xC8A0 .data 0x4238 .bss 0x1AB64` is the plain `make` reference (the pure R20260131
+sources gave `.text 0x3F0C4`). The build is not bit-reproducible either: the build time is compiled in as
+immediates, so two builds of one commit differ in a few hundred `.text` bytes. Crypto lives in `application/source/crypto/` (host-unit-tested: FIPS-197 AES,
 LFSR128d, OFB keystream, Golay(24,12) late-entry MI, EMB BPTC single block); the HR-C6000 and codec hooks are
 in `HR-C6000.c` and `dmr_codec/codec_interface.c`. Optional, off-by-default diagnostics are gated behind
 `DMR_AES_DIAG_RX` / `DMR_AES_DIAG_PATTERN` / `DMR_AES_DIAG_ENCPAT` (e.g. `make ENABLE_AES=1 DMR_AES_DIAG_RX=1`,

@@ -35,7 +35,18 @@
 #include "functions/voicePrompts.h"
 
 
-#if defined(PLATFORM_MD380) || defined(PLATFORM_MDUV380) || defined(PLATFORM_RT84_DM1701) || defined(PLATFORM_MD2017)
+#if defined(ENABLE_TA2TWC_SCREENS) && (defined(PLATFORM_MDUV380) || defined(PLATFORM_RT84_DM1701))
+// Compact menu lists: single height font, more entries on the screen
+#if defined(PLATFORM_VARIANT_DM1701)
+#define MENU_MAX_DISPLAYED_ENTRIES 8 // 120 rows
+#else
+#define MENU_MAX_DISPLAYED_ENTRIES 9
+#endif
+#define MENU_LIST_ENTRY_HEIGHT     12
+#define MENU_LIST_Y_POS_HIGHLIGHT  (MENU_HEADER_HEIGHT + 4 + ((-MENU_START_ITERATION_VALUE) * MENU_LIST_ENTRY_HEIGHT))
+#define MENU_LIST_FONT             FONT_SIZE_2
+#define MENU_LIST_TEXT_Y_OFFSET    2
+#elif defined(PLATFORM_MD380) || defined(PLATFORM_RT84_DM1701) || defined(PLATFORM_MD2017)
 #if defined(PLATFORM_VARIANT_DM1701)
 #define MENU_MAX_DISPLAYED_ENTRIES 6
 #else
@@ -44,6 +55,13 @@
 #else
 // Black and white smaller height screeens (MD9600 and GD77 etc)
 #define MENU_MAX_DISPLAYED_ENTRIES 3
+#endif
+
+#if !defined(MENU_LIST_ENTRY_HEIGHT)
+#define MENU_LIST_ENTRY_HEIGHT     MENU_ENTRY_HEIGHT
+#define MENU_LIST_Y_POS_HIGHLIGHT  DISPLAY_Y_POS_MENU_ENTRY_HIGHLIGHT
+#define MENU_LIST_FONT             FONT_SIZE_3
+#define MENU_LIST_TEXT_Y_OFFSET    0
 #endif
 
 // These macros are taking care of the odd/even value of MENU_MAX_DISPLAYED_ENTRIES (-x..0..+x)
@@ -190,6 +208,10 @@ bool uiVFOModeIsTXFocused(void);
 void uiVFOModeStopScanning(void);
 bool uiVFOModeIsScanning(void);
 bool uiVFOModeDualWatchIsScanning(void);
+#if defined(ENABLE_DUAL_SCREEN)
+bool uiVFOModeDualWatchOnChannel(void);   // Dual Watch is currently tuned to its zone-channel side
+#endif
+bool uiVFOModeDualWatchOnChannel(void);
 bool uiVFOModeSweepScanning(bool includePaused);
 #if defined(ENABLE_FAST_SCAN)
 /* Total width of the sweep display in OpenGD77 10 Hz units, and whether it is marching
@@ -341,6 +363,9 @@ enum MENU_SCREENS
 #endif
 #if defined(ENABLE_AES) && defined(ENABLE_DMR_DATA)
 	MENU_MESSAGES,// encrypted-SMS messaging (index-matched to menuFunctions[])
+#endif
+#if defined(ENABLE_DUAL_SCREEN)
+	MENU_DUAL_WATCH,// dual screen / Dual Watch options (index-matched to menuFunctions[])
 #endif
 	// *** Add new menus to be accessed using quickkey (ID: 0..31) above this line ***
 	UI_MESSAGE_BOX,
@@ -502,6 +527,9 @@ menuStatus_t menuAESKeys(uiEvent_t *ev, bool isFirstRun);
 #endif
 #if defined(ENABLE_AES) && defined(ENABLE_DMR_DATA)
 menuStatus_t menuMessages(uiEvent_t *ev, bool isFirstRun);
+#if defined(ENABLE_DUAL_SCREEN)
+menuStatus_t menuDualWatchOptions(uiEvent_t *ev, bool isFirstRun);
+#endif
 #endif
 #if defined(HAS_COLOURS)
 menuStatus_t menuThemeOptions(uiEvent_t *ev, bool isFirstRun);

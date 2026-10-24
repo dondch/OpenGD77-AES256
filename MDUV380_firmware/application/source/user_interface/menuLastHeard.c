@@ -29,6 +29,7 @@
 #include "user_interface/menuSystem.h"
 #include "user_interface/uiUtilities.h"
 #include "user_interface/uiLocalisation.h"
+#include "user_interface/uiTelemetry.h"
 
 
 #if defined(PLATFORM_RT84_DM1701) || defined(PLATFORM_MDUV380) || defined(PLATFORM_MD2017)
@@ -49,6 +50,14 @@ static int firstDisplayed;
 
 static void displayTalkerAlias(uint8_t y, char *text, uint32_t time, uint32_t now, uint32_t TGorPC, size_t maxLen, bool displayDetails, bool itemIsSelected, bool isFirstRun, LinkItem_t * item);
 static void promptsInit(bool isFirstRun);
+static void displayName(uint8_t y, const char *text, bool itemIsSelected);
+#if defined(HAS_TELEMETRY)
+static void displayNameInfos(uint8_t y, const char *timeBuffer, bool inHours, const LinkItem_t *item, bool itemIsSelected);
+
+#define LH_NAME_X_POS            2
+#define LH_NAME_MAX_LEN          14 // The right side of the line is used by the elapsed time and the signal strength
+#define LH_INFOS_RIGHT_X_POS     (DISPLAY_SIZE_X - 2)
+#endif
 
 menuStatus_t menuLastHeard(uiEvent_t *ev, bool isFirstRun)
 {
@@ -453,7 +462,7 @@ static void displayTalkerAlias(uint8_t y, char *text, uint32_t time, uint32_t no
 					memcpy(buffer, text, cpos);
 					buffer[cpos] = 0;
 
-					displayPrintCore(0, y, chomp(buffer), FONT_SIZE_3, TEXT_ALIGN_CENTER, itemIsSelected);
+					displayName(y, chomp(buffer), itemIsSelected);
 				}
 				else // Nope, look for first name
 				{
@@ -476,7 +485,7 @@ static void displayTalkerAlias(uint8_t y, char *text, uint32_t time, uint32_t no
 
 						snprintf(outputBuf, SCREEN_LINE_BUFFER_SIZE, "%s %s", chomp(buffer), chomp(nameBuf));
 
-						displayPrintCore(0, y, chomp(outputBuf), FONT_SIZE_3, TEXT_ALIGN_CENTER, itemIsSelected);
+						displayName(y, chomp(outputBuf), itemIsSelected);
 					}
 					else
 					{
@@ -489,7 +498,7 @@ static void displayTalkerAlias(uint8_t y, char *text, uint32_t time, uint32_t no
 
 						snprintf(outputBuf, SCREEN_LINE_BUFFER_SIZE, "%s %s", chomp(buffer), chomp(nameBuf));
 
-						displayPrintCore(0, y, chomp(outputBuf), FONT_SIZE_3, TEXT_ALIGN_CENTER, itemIsSelected);
+						displayName(y, chomp(outputBuf), itemIsSelected);
 					}
 				}
 			}
@@ -499,7 +508,7 @@ static void displayTalkerAlias(uint8_t y, char *text, uint32_t time, uint32_t no
 				memcpy(buffer, text, (SCREEN_LINE_BUFFER_SIZE - 1));
 				buffer[(SCREEN_LINE_BUFFER_SIZE - 1)] = 0;
 
-				displayPrintCore(0, y, chomp(buffer), FONT_SIZE_3, TEXT_ALIGN_CENTER, itemIsSelected);
+				displayName(y, chomp(buffer), itemIsSelected);
 			}
 		}
 		else // short callsign
@@ -507,8 +516,12 @@ static void displayTalkerAlias(uint8_t y, char *text, uint32_t time, uint32_t no
 			memcpy(buffer, text, strlen(text));
 			buffer[strlen(text)] = 0;
 
-			displayPrintCore(0, y, chomp(buffer), FONT_SIZE_3, TEXT_ALIGN_CENTER, itemIsSelected);
+			displayName(y, chomp(buffer), itemIsSelected);
 		}
+
+#if defined(HAS_TELEMETRY)
+		displayNameInfos(y, timeBuffer, inHours, item, itemIsSelected);
+#endif
 
 		if (itemIsSelected && (nonVolatileSettings.audioPromptMode >= AUDIO_PROMPT_MODE_VOICE_THRESHOLD))
 		{
@@ -587,3 +600,39 @@ static void displayTalkerAlias(uint8_t y, char *text, uint32_t time, uint32_t no
 		promptsPlayNotAfterTx();
 	}
 }
+
+// Callsign and name of an entry
+static void displayName(uint8_t y, const char *text, bool itemIsSelected)
+{
+#if defined(HAS_TELEMETRY)
+	char buffer[LH_NAME_MAX_LEN + 1];
+
+	snprintf(buffer, sizeof(buffer), "%s", text);
+	displayPrintCore(LH_NAME_X_POS, y, buffer, FONT_SIZE_3, TEXT_ALIGN_LEFT, itemIsSelected);
+#else
+	displayPrintCore(0, y, text, FONT_SIZE_3, TEXT_ALIGN_CENTER, itemIsSelected);
+#endif
+}
+
+#if defined(HAS_TELEMETRY)
+// Elapsed time and signal strength of an entry, on the right of its name
+static void displayNameInfos(uint8_t y, const char *timeBuffer, bool inHours, const LinkItem_t *item, bool itemIsSelected)
+{
+	char buffer[SCREEN_LINE_BUFFER_SIZE];
+	int rssi = lastHeardGetRssi(item);
+
+	snprintf(buffer, sizeof(buffer), "%s%c", timeBuffer, (inHours ? 'h' : 'm'));
+	displayThemeApply(THEME_ITEM_FG_ZONE_NAME, THEME_ITEM_BG);
+	displayPrintCore((LH_INFOS_RIGHT_X_POS - (strlen(buffer) * 6)), y, buffer, FONT_SIZE_1, TEXT_ALIGN_LEFT, itemIsSelected);
+
+	if (rssi != 0)
+	{
+		uiTelemetryBuildSMeterText(buffer, sizeof(buffer), rssi);
+		displayThemeApply(((rssi >= SMETER_S9_10) ? THEME_ITEM_FG_RSSI_BAR_S9P : THEME_ITEM_FG_RSSI_BAR), THEME_ITEM_BG);
+		displayPrintCore((LH_INFOS_RIGHT_X_POS - (strlen(buffer) * 6)), (y + 8), buffer, FONT_SIZE_1, TEXT_ALIGN_LEFT, itemIsSelected);
+	}
+
+	// Colours of the list
+	displayThemeApply(THEME_ITEM_FG_CHANNEL_CONTACT_INFO, THEME_ITEM_BG);
+}
+#endif

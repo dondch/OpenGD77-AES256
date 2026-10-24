@@ -153,7 +153,7 @@ typedef enum
 	BIT_VISUAL_VOLUME               = (SETTINGS_BITS_BANK_0 | (1 << 18)),
 #endif
 	BIT_SECONDARY_LANGUAGE          = (SETTINGS_BITS_BANK_0 | (1 << 19)),
-	BIT_UNUSED_3                    = (SETTINGS_BITS_BANK_0 | (1 << 20)),
+	BIT_CLASSIC_MAIN_SCREEN         = (SETTINGS_BITS_BANK_0 | (1 << 20)), // was BIT_UNUSED_3. The redesigned main screen is used when it is NOT set
 	BIT_DISPLAY_CHANNEL_DISTANCE    = (SETTINGS_BITS_BANK_0 | (1 << 21)),
 #if defined(PLATFORM_MD2017)
 	BIT_TRACKBALL_ENABLED           = (SETTINGS_BITS_BANK_0 | (1 << 22)),
@@ -212,8 +212,8 @@ typedef struct
 	int16_t				currentChannelIndexInZone;
 	int16_t				currentChannelIndexInAllZone;
 #else // These two has to be used on any platform but RD5R and MD-9600
-	int16_t				UNUSED_1;
-	int16_t				UNUSED_2;
+	int16_t				dualWatchOptions; // see DUALWATCH_* below (was UNUSED_1, always 0 in older settings = defaults)
+	int16_t				dualScreenSlot; // dual screen: zone (7 bits) and index (10 bits) of the non active channel row, low 16 bits (bit 16 is in dualWatchOptions)
 #endif
 	uint16_t			aprsBeaconingSettingsPart2;
 	uint8_t				txPowerLevel;
@@ -265,6 +265,26 @@ typedef struct
 #endif
 	uint8_t				lastTalkerOnScreenTimer; // in seconds, 0..30
 } settingsStruct_t;
+
+#if defined(ENABLE_DUAL_SCREEN) && !(defined(PLATFORM_RD5R) || defined(PLATFORM_MD9600))
+// nonVolatileSettings.dualWatchOptions bits. 0 (the value stored by older firmware) is the stock behaviour.
+#define DUALWATCH_AUTOSTART     0x0001U // unused now (was: start Dual Watch whenever the VFO screen is entered), bit kept reserved
+#define DUALWATCH_HOME_MASK     0x0006U // 0: VFO active when Dual Watch started, 1: VFO A, 2: VFO B, 3: the channel (needs DUALWATCH_CHANNEL_B)
+#define DUALWATCH_HOME_SHIFT    1U
+#define DUALWATCH_SPEED_MASK    0x0018U // index in DUALWATCH_SPEED_TABLE
+#define DUALWATCH_SPEED_SHIFT   3U
+#define DUALWATCH_STAY          0x0020U // on RX on the other VFO: beep only, don't switch to it
+#define DUALWATCH_CHANNEL_B     0x0040U // the second side is the current zone channel instead of the other VFO
+#define DUALWATCH_DUAL_SCREEN   0x0080U // VFO and channel screens show two rows (A / B), see uiDualScreen.c
+#define DUALWATCH_LINE_A_CHANNEL 0x0100U // dual screen: row A is a channel (else VFO A)
+#define DUALWATCH_LINE_B_CHANNEL 0x0200U // dual screen: row B is a channel (else VFO B)
+#define DUALWATCH_ACTIVE_B      0x0400U // dual screen: row B is the active one
+#define DUALWATCH_SLOT_BIT16    0x0800U // dual screen: bit 16 of the saved slot (nonVolatileSettings.dualScreenSlot holds the low 16 bits)
+#define DUALWATCH_SLOT_VALID    0x1000U // dual screen: the saved slot of the non active channel row is valid
+#define DUALWATCH_WATCH         0x2000U // dual screen: now and then listen to the other row (row watch)
+#define DUALWATCH_SPEED_TABLE   { 0U, 90U, 200U, 400U } // ms per step, 0 = use the scan step time setting
+#define DUALWATCH_NUM_SPEEDS    4U
+#endif
 
 typedef enum DMR_DESTINATION_FILTER_TYPE
 {

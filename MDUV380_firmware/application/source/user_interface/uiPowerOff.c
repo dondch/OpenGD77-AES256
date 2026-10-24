@@ -28,6 +28,10 @@
 #include "user_interface/uiGlobals.h"
 #include "user_interface/menuSystem.h"
 #include "user_interface/uiLocalisation.h"
+#include "user_interface/uiTelemetry.h"
+#if defined(HAS_TELEMETRY)
+#include "user_interface/uiBootAnimation.h"
+#endif
 #if defined(PLATFORM_MD9600) || defined(PLATFORM_MD380) || defined(PLATFORM_MDUV380) || defined(PLATFORM_RT84_DM1701) || defined(PLATFORM_MD2017)
 #include "interfaces/batteryAndPowerManagement.h"
 #include "hardware/radioHardwareInterface.h"
@@ -36,7 +40,13 @@
 static void updateScreen(void);
 static void handleEvent(uiEvent_t *ev);
 static uint32_t initialEventTime;
+#if defined(HAS_TELEMETRY)
+#define POWEROFF_ANIMATION_FRAME_MILLISECONDS 50U
+const uint32_t POWEROFF_DURATION_MILLISECONDS = SHUTDOWN_ANIMATION_DURATION;
+static uint32_t lastFrameTime;
+#else
 const uint32_t POWEROFF_DURATION_MILLISECONDS = 500;
+#endif
 
 menuStatus_t uiPowerOff(uiEvent_t *ev, bool isFirstRun)
 {
@@ -49,8 +59,11 @@ menuStatus_t uiPowerOff(uiEvent_t *ev, bool isFirstRun)
 		}
 #endif
 
-		updateScreen();
 		initialEventTime = ev->time;
+#if defined(HAS_TELEMETRY)
+		lastFrameTime = ev->time;
+#endif
+		updateScreen();
 	}
 	else
 	{
@@ -67,6 +80,14 @@ static void updateScreen(void)
 	const bool dblHeight = false;
 #endif
 	uint16_t fontHeight = (FONT_SIZE_3_HEIGHT * (dblHeight ? 2 : 1));
+
+#if defined(HAS_TELEMETRY)
+	// Animated shutdown screen, redrawn by handleEvent()
+	uiBootAnimationDrawShutdown((lastFrameTime - initialEventTime), POWEROFF_DURATION_MILLISECONDS);
+	displayRender();
+	UNUSED_PARAMETER(fontHeight);
+	return;
+#endif
 
 	displayClearBuf();
 	displayThemeApply(THEME_ITEM_FG_DECORATION, THEME_ITEM_BG_NOTIFICATION);
@@ -102,5 +123,12 @@ static void handleEvent(uiEvent_t *ev)
 	{
 		powerOffFinalStage(false, false);
 	}
+#if defined(HAS_TELEMETRY)
+	else if ((ev->time - lastFrameTime) >= POWEROFF_ANIMATION_FRAME_MILLISECONDS)
+	{
+		lastFrameTime = ev->time;
+		updateScreen();
+	}
+#endif
 
 }

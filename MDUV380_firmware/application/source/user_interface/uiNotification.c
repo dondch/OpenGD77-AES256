@@ -30,6 +30,7 @@
 #include "user_interface/uiLocalisation.h"
 #include "user_interface/uiUtilities.h"
 #include "utils.h"
+#include "user_interface/uiTelemetry.h"
 
 
 #if defined(PLATFORM_RD5R)
@@ -211,7 +212,13 @@ void uiNotificationRefresh(void)
 				displayThemeApply(THEME_ITEM_FG_NOTIFICATION, THEME_ITEM_BG_NOTIFICATION);
 				displayPrintAt(2 + ((sLen < (XBAR - 2)) ? (((XBAR - 2) - sLen) >> 1) : 0), YTEXT, buffer, FONT_SIZE_3);
 
+#if defined(HAS_TELEMETRY)
+				displayThemeApply(THEME_ITEM_FG_DECORATION, THEME_ITEM_BG_NOTIFICATION);
+#endif
 				displayDrawRect((XBAR - 2), YBAR, (totalBarLength + 4), (SQUELCH_BAR_H + 4), true);
+#if defined(HAS_TELEMETRY)
+				displayThemeApply(THEME_ITEM_FG_RSSI_BAR, THEME_ITEM_BG_NOTIFICATION); // same colour as the other level bars
+#endif
 				displayFillRect(XBAR, (YBAR + 2), bargraph, SQUELCH_BAR_H, false);
 			}
 			break;

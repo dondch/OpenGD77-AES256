@@ -36,7 +36,9 @@
 #include "functions/scanreject.h" /* the fast reject; compiles to nothing in a stock build */
 #include "user_interface/menuSystem.h"
 #include "user_interface/uiUtilities.h"
+#include "user_interface/uiDualScreen.h"
 #include "user_interface/uiLocalisation.h"
+#include "user_interface/uiTelemetry.h"
 #include "utils.h"
 
 typedef enum
@@ -62,6 +64,18 @@ typedef enum
 
 // internal prototypes
 static void handleEvent(uiEvent_t *ev);
+static void dualWatchStart(void);
+#if defined(ENABLE_DUAL_SCREEN)
+static uint8_t dualWatchHomeVFO = 0;
+static bool dualWatchHomeIsChannel = false;
+static bool dualWatchChannelSide = false; // second side is the zone channel (dwChannelData) instead of the other VFO
+static bool dualWatchOnChannel = false;   // currently tuned to the channel side (currentChannelData == &dwChannelData)
+static CodeplugChannel_t dwChannelData;
+#endif
+#if defined(HAS_TELEMETRY)
+static bool telemetryRxIsDisplayable(void);
+static bool telemetryRxDraw(void);
+#endif
 static void handleQuickMenuEvent(uiEvent_t *ev);
 static void updateQuickMenuScreen(bool isFirstRun);
 static void updateFrequency(int frequency, bool announceImmediately);
@@ -102,16 +116,21 @@ static bool quickmenuNewChannelHandled = false; // Quickmenu new channel confirm
 static const int VFO_SWEEP_STEP_TIME  = 25;// 25ms
 
 #if defined(ENABLE_FAST_SCAN)
-// Per-measurement time when the wide span is selected. The stock 25 ms is chosen for a
-// 160-measurement pass; the wide span takes 1600, and 25 ms would make that a 40 second
-// pass, which is not a display any more.
+// Per-measurement time, both spans. The stock 25 ms was chosen when a sample cost a
+// full-screen blit; the sweep now spends most of a 25 ms step waiting.
 //
-// 6 ms is the measured floor that still works: the column-strip blit took the DISPLAY cost
-// to ~2.9 ms/sample (6 ms renders correctly, where it used to break up), and the sweep now
-// holds rssi_ct_u at 1, which is what stops a short dwell reading a half-settled level --
-// MEASURED, carrier height 22.2 counts at stock vs 34.9 at ct=1 for a 2.9 ms sample.
-// 1600 x 6 ms = ~9.6 s per 20 MHz pass.
-#define VFO_SWEEP_WIDE_STEP_TIME  6
+// What a measurement actually needs: ~0.6 ms for the bare retune (radioSweepRetune), then
+// the receiver-restart settle. MEASURED with rssi_ct_u held at 1 (VFO_SWEEP_RSSI_COUNT):
+// a sample read 2.9 ms after the retune reaches 34.9 counts of carrier height against
+// 37.6 at 6 ms, i.e. 93%. 4 ms leaves ~3.4 ms of settle after the retune and keeps the
+// display blit (~2.9 ms per strip, now one strip per two columns) inside the step rather
+// than on top of it. The step timer is started before the retune and expires at the
+// next 1 ms main-loop tick, so the real period is 4-5 ms.
+//   narrow:  160 x ~4.5 ms = ~0.7 s per 2 MHz pass (was 4.0 s)
+//   wide:   1600 x ~4.5 ms = ~7 s per 20 MHz pass (was 9.6 s)
+// The remaining cost is the restart settle itself; only a retune that does not restart
+// the receiver (see the candidates in spectrum.h) can take this below ~3 ms.
+#define VFO_SWEEP_FAST_STEP_TIME  4
 static int vfoSweepStepTime(void);
 #define VFO_SWEEP_STEP_TIME_BASE  vfoSweepStepTime()
 #else
@@ -274,6 +293,28 @@ static bool    vfoSweepAutoPrimed = false;
 static uint8_t vfoSweepAutoFloor = VFO_SWEEP_RSSI_NOISE_FLOOR_DEFAULT;
 static uint8_t vfoSweepAutoGain = VFO_SWEEP_GAIN_DEFAULT;
 
+// Where the noise stops, in counts, from the pass just measured: the level the loudest
+// column of an EMPTY band is not expected to reach. The peak marker and the listen park
+// test the pass peak against this plus their margins. They used to test against the
+// drawing floor, which auto-scale puts 4 counts UNDER the quiet-half noise mean so that
+// the noise keeps some texture; the loudest of 160 noise samples cleared floor + 6 (the
+// marker) and floor + 10 (the listen) on nearly every pass. MEASURED on the bench with no
+// carrier: the sweep parked 1.2 s on "433.1975" at the end of every narrow pass and on
+// "432.0475" in wide, inflating a 0.66 s pass to 1.86 s, and the marker always had a
+// frequency to name. The ceiling is the trace mean plus four times the mean's distance
+// above the quiet-half mean (a cheap stand-in for the noise spread, ~2 counts here) plus
+// 4: about mean + 12 on this radio, against a measured noise maximum of mean + 6 or 7 and
+// a carrier at +35. The auto floor and gain are unchanged by this.
+//
+// The ceiling is a statistic of the pass, not a drawing setting, so it is computed every pass
+// and used whether or not the operator has taken the scaling over. It used to fall back to the
+// manual noise floor once a floor or gain key had been touched -- FRONT_UP/DOWN in the sweep --
+// and that floor (14 here) plus the listen margin is a level ordinary noise (57) clears on
+// every pass: measured on the bench, one FRONT_UP + FRONT_DOWN turned a 0.66 s pass into a
+// 1.88 s one, parked 1.2 s on a noise column at every pass end until the sweep was re-entered.
+static uint8_t vfoSweepNoiseCeil = VFO_SWEEP_RSSI_NOISE_FLOOR_DEFAULT;
+#define VFO_SWEEP_PEAK_BASE  vfoSweepNoiseCeil
+
 // AT1846S rssi_ct_u (0x5A[11:9]) to hold while the sweep is running. The tracking
 // bandwidth is 1145 / 2^ct Hz, so the stock 3 is 144 Hz and this is 572 Hz.
 //
@@ -411,7 +452,97 @@ static ticksTimer_t vfoSweepParkLimitTimer = { 0, 0 };
 
 static int vfoSweepStepTime(void)
 {
-	return (vfoSweepWide ? VFO_SWEEP_WIDE_STEP_TIME : VFO_SWEEP_STEP_TIME);
+	return VFO_SWEEP_FAST_STEP_TIME;
+}
+
+// ---- retuning inside the sweep ----
+// A sweep sample only needs the PLL moved inside the band the sweep is already set up
+// for, so it uses radioSweepRetune() (4 I2C writes, one receiver restart) instead of
+// trxSetFrequency() (~2.2 ms, two restarts, calibration and HR-C6000 writes). That moves
+// the chip behind trx.c's back: trx.c compares the requested frequency with the one it
+// last set and skips the retune when they match, so after a bare retune the next FULL
+// retune must be forced. vfoSweepPllMoved remembers that a force is owed; every path
+// that needs the full receiver set-up (first sample of a pass after a scroll or rescale,
+// parking on a peak, leaving the sweep) goes through vfoSweepRetuneFull().
+static bool vfoSweepPllMoved = false;
+// The first measurement after the receiver was set up in full (a scroll, a rescale, the sweep's
+// start, the end of a park) waits the stock RSSI settle, not the 4 ms a bare retune needs. Bench
+// (fw_prof 47bbb86): after a retune at the wide span the sweep parked on column 0 on every pass,
+// 1.2 s each, because the column measured right after the park's full retune read high, became
+// the pass's peak, and was parked on again -- a loop only leaving the sweep broke.
+static bool vfoSweepSettleOwed = false;
+
+static void vfoSweepRetuneFull(uint32_t rxFreq)
+{
+	if (vfoSweepPllMoved)
+	{
+		currentRadioDevice->currentRxFrequency = FREQUENCY_UNSET;
+		currentRadioDevice->currentTxFrequency = FREQUENCY_UNSET;
+		vfoSweepPllMoved = false;
+	}
+
+	trxSetFrequency(rxFreq, currentChannelData->txFreq,
+			(((currentChannelData->chMode == RADIO_MODE_DIGITAL) &&
+					codeplugChannelGetFlag(currentChannelData, CHANNEL_FLAG_FORCE_DMO))
+							? DMR_MODE_DMO : DMR_MODE_AUTO));
+	vfoSweepSettleOwed = true;
+}
+
+static void vfoSweepRetuneFast(uint32_t rxFreq)
+{
+	int band = trxGetBandFromFrequency(rxFreq);
+
+	// The bare retune leaves the LNA, the IF and the calibration where the last full retune
+	// put them, which is only right inside that band. A sample outside it (a span that runs
+	// past the band edge) takes the full path, exactly as every sample used to.
+	if ((band == FREQUENCY_OUT_OF_BAND) || (band != currentRadioDevice->trxCurrentBand[TRX_RX_FREQ_BAND]))
+	{
+		vfoSweepRetuneFull(rxFreq);
+		return;
+	}
+
+	radioSweepRetune(rxFreq);
+	currentRadioDevice->currentRxFrequency = rxFreq;   // keep trx.c's idea of the RX frequency truthful
+	vfoSweepPllMoved = true;
+}
+
+// ---- display: blit a strip every few columns, not every sample ----
+// displayRenderColumns() can move up to 4 columns in one transfer at the same fixed cost
+// (~2.9 ms, mostly the window set-up). Each sample dirties its own column plus the
+// two-column cursor ahead of it, so two consecutive samples fit one strip: the blit now
+// lands once per two samples instead of once per sample, inside the 4 ms step rather than
+// on top of it. A range that wraps round the right edge is flushed at once (the fallback
+// inside displayRenderColumns() paints it as full rows).
+#define VFO_SWEEP_STRIP_COLS  4
+static int16_t vfoSweepDirtyLo = -1;
+static int16_t vfoSweepDirtyHi = -1;
+
+static void vfoSweepDirtyFlush(void)
+{
+	if (vfoSweepDirtyLo >= 0)
+	{
+		displayRenderColumns(vfoSweepDirtyLo, (vfoSweepDirtyHi + 1), 1, ((8 + VFO_SWEEP_GRAPH_HEIGHT_Y) / 8) + 1);
+		vfoSweepDirtyLo = vfoSweepDirtyHi = -1;
+	}
+}
+
+static void vfoSweepDirtyAdd(int16_t lo, int16_t hi)
+{
+	if (vfoSweepDirtyLo < 0)
+	{
+		vfoSweepDirtyLo = lo;
+		vfoSweepDirtyHi = hi;
+	}
+	else
+	{
+		vfoSweepDirtyLo = SAFE_MIN(vfoSweepDirtyLo, lo);
+		vfoSweepDirtyHi = SAFE_MAX(vfoSweepDirtyHi, hi);
+	}
+
+	if ((vfoSweepDirtyHi - vfoSweepDirtyLo + 1) >= VFO_SWEEP_STRIP_COLS)
+	{
+		vfoSweepDirtyFlush();
+	}
 }
 
 // Rebuild the stored word without ever losing bit 15. Two places rebuild it from the three
@@ -458,6 +589,34 @@ static uint32_t vfoSweepSpan(void)
 #define VFO_SWEEP_TRACE_START_Y   VFO_SWEEP_GRAPH_START_Y
 #define VFO_SWEEP_TRACE_HEIGHT_Y  VFO_SWEEP_GRAPH_HEIGHT_Y
 #endif
+#if defined(ENABLE_FAST_SCAN) && (defined(PLATFORM_MD380) || defined(PLATFORM_MDUV380) || defined(PLATFORM_RT84_DM1701) || defined(PLATFORM_MD2017))
+// Band scope + scrolling waterfall on the colour displays (after mangelajo's
+// opengd77-rt3s-experiments b7a0d36, reworked for this sweep): the top third of the trace
+// area keeps a bar per column, tinted blue-cyan-yellow-red by level, and the lower two
+// thirds hold one row per completed pass, scrolled down a pixel at every pass end. The
+// history lives in the framebuffer only, so uiVFOModeUpdateScreen() leaves those rows alone
+// while sweeping and the column-strip blit carries the newest row's pixels with the bars.
+// SK2 + STAR while sweeping switches between the waterfall and the full-height bars; bit
+// 15 of vfoSweepSettings is taken by the wide span, so the choice is not persisted and the
+// waterfall is on by default.
+#define VFO_SWEEP_WATERFALL
+#define VFO_SWEEP_BARS_HEIGHT        (VFO_SWEEP_TRACE_HEIGHT_Y / 3)
+#define VFO_SWEEP_WATERFALL_START_Y  (VFO_SWEEP_TRACE_START_Y + VFO_SWEEP_BARS_HEIGHT)
+#define VFO_SWEEP_WATERFALL_HEIGHT   (VFO_SWEEP_TRACE_HEIGHT_Y - VFO_SWEEP_BARS_HEIGHT)
+static void vfoSweepWaterfallClear(void);   // defined with the other waterfall functions below, used before them
+static uint16_t vfoSweepWaterfallPalette[32];   // level 0..31 -> native pixel, built at sweep entry (panel type is a runtime property)
+static uint16_t vfoSweepBarPalette[32];         // the same hue at 150% brightness for the bar tips
+static bool     vfoSweepWaterfallOn = true;
+static uint32_t vfoSweepFreqForSample(int16_t index);
+static void vfoSweepDrawEdgeLabels(void);
+// The sweep cursor (two solid columns ahead of the sample) must not run through the history:
+// it is drawn in the frequency colour, black in the stock day theme, and nothing repaints
+// those rows afterwards -- so on the bench every pass painted the whole history black and only
+// the newest row came back. Over the bars only while the waterfall is on.
+#define VFO_SWEEP_CURSOR_HEIGHT  (vfoSweepWaterfallOn ? VFO_SWEEP_BARS_HEIGHT : VFO_SWEEP_TRACE_HEIGHT_Y)
+#else
+#define VFO_SWEEP_CURSOR_HEIGHT  VFO_SWEEP_TRACE_HEIGHT_Y
+#endif
 static uint8_t vfoSweepRssiNoiseFloor = VFO_SWEEP_RSSI_NOISE_FLOOR_DEFAULT;
 static uint8_t vfoSweepGain = VFO_SWEEP_GAIN_DEFAULT;
 static bool vfoSweepSavedBandwidth;
@@ -487,13 +646,19 @@ menuStatus_t uiVFOMode(uiEvent_t *ev, bool isFirstRun)
 
 			if (screenOperationMode[nonVolatileSettings.currentVFONumber] == VFO_SCREEN_OPERATION_SWEEP)
 			{
+#if defined(VFO_SWEEP_WATERFALL)
+				if (vfoSweepWaterfallOn)
+				{
+					vfoSweepWaterfallClear();   // the lock screen drew over the history
+				}
+#endif
 				for(int i = 0; i < VFO_SWEEP_NUM_SAMPLES; i++)
 				{
 					vfoSweepDrawSample(i);
 				}
 
-				displayDrawFastVLine((uiDataGlobal.Scan.sweepSampleIndex) % VFO_SWEEP_NUM_SAMPLES, VFO_SWEEP_TRACE_START_Y, VFO_SWEEP_TRACE_HEIGHT_Y, true);// draw solid line in the next location
-				displayDrawFastVLine((uiDataGlobal.Scan.sweepSampleIndex + uiDataGlobal.Scan.sweepSampleIndexIncrement) % VFO_SWEEP_NUM_SAMPLES, VFO_SWEEP_TRACE_START_Y, VFO_SWEEP_TRACE_HEIGHT_Y, true);// draw solid line in the next location
+				displayDrawFastVLine((uiDataGlobal.Scan.sweepSampleIndex) % VFO_SWEEP_NUM_SAMPLES, VFO_SWEEP_TRACE_START_Y, VFO_SWEEP_CURSOR_HEIGHT, true);// draw solid line in the next location
+				displayDrawFastVLine((uiDataGlobal.Scan.sweepSampleIndex + uiDataGlobal.Scan.sweepSampleIndexIncrement) % VFO_SWEEP_NUM_SAMPLES, VFO_SWEEP_TRACE_START_Y, VFO_SWEEP_CURSOR_HEIGHT, true);// draw solid line in the next location
 
 				displayRenderRows(1, ((8 + VFO_SWEEP_GRAPH_HEIGHT_Y) / 8) + 1);
 			}
@@ -573,6 +738,9 @@ menuStatus_t uiVFOMode(uiEvent_t *ev, bool isFirstRun)
 		}
 
 		freqEnterReset();
+#if defined(ENABLE_DUAL_SCREEN)
+		uiDualScreenScreenEntered(false);
+#endif
 		uiVFOModeUpdateScreen(0);
 		settingsSetVFODirty();
 
@@ -607,6 +775,15 @@ menuStatus_t uiVFOMode(uiEvent_t *ev, bool isFirstRun)
 		if (aprsBeaconingForcedManualBeaconingTriggered() && aprsBeaconingIsTransmitting())
 		{
 			return menuVFOExitStatus;
+		}
+#endif
+
+#if defined(ENABLE_DUAL_SCREEN)
+		// Redraw the two rows when a signal starts / stops (frame around the active row)
+		if (uiDualScreenRxStateChanged() && (uiDataGlobal.displayQSOState == QSO_DISPLAY_IDLE) && (uiDataGlobal.Scan.active == false))
+		{
+			uiDataGlobal.displayQSOState = QSO_DISPLAY_DEFAULT_SCREEN;
+			uiVFOModeUpdateScreen(0);
 		}
 #endif
 
@@ -651,6 +828,9 @@ menuStatus_t uiVFOMode(uiEvent_t *ev, bool isFirstRun)
 					if (rxPowerSavingIsRxOn())
 					{
 						bool doRendering = true;
+#if defined(HAS_TELEMETRY)
+						bool telemetryUpdated = false;
+#endif
 
 						if (uiDataGlobal.Scan.active && (screenOperationMode[nonVolatileSettings.currentVFONumber] != VFO_SCREEN_OPERATION_SWEEP) && (uiDataGlobal.Scan.state == SCAN_STATE_PAUSED))
 						{
@@ -675,6 +855,13 @@ menuStatus_t uiVFOMode(uiEvent_t *ev, bool isFirstRun)
 							}
 						}
 
+#if defined(HAS_TELEMETRY)
+						if (telemetryRxIsDisplayable())
+						{
+							telemetryUpdated = telemetryRxDraw();
+						}
+#endif
+
 						// Only render the second row which contains the bar graph, if we're not scanning,
 						// as there is no need to redraw the rest of the screen
 						if (doRendering)
@@ -686,6 +873,16 @@ menuStatus_t uiVFOMode(uiEvent_t *ev, bool isFirstRun)
 							else
 							{
 								displayRenderRows(((uiDataGlobal.Scan.active && (uiDataGlobal.Scan.state == SCAN_STATE_PAUSED)) ? 0 : 1), 2);
+#if defined(HAS_TELEMETRY)
+								if (telemetryUpdated)
+								{
+									displayRenderRows(TELEMETRY_RX_FIRST_ROW(TELEMETRY_Y_POS_RX_VFO), TELEMETRY_RX_LAST_ROW(TELEMETRY_Y_POS_RX_VFO));
+									if (uiDataGlobal.isDisplayingQSOData == false)
+									{
+										displayRenderRows(TELEMETRY_HISTORY_FIRST_ROW(TELEMETRY_HISTORY_Y_POS_VFO), TELEMETRY_HISTORY_LAST_ROW(TELEMETRY_HISTORY_Y_POS_VFO, TELEMETRY_HISTORY_HEIGHT_VFO));
+									}
+								}
+#endif
 							}
 						}
 					}
@@ -775,6 +972,21 @@ menuStatus_t uiVFOMode(uiEvent_t *ev, bool isFirstRun)
 	return menuVFOExitStatus;
 }
 
+#if defined(HAS_TELEMETRY)
+// The sweep graph, the two frequencies of the Dual Watch and the frequencies input are using the areas of the Rx technical data
+static bool telemetryRxIsDisplayable(void)
+{
+	return ((screenOperationMode[nonVolatileSettings.currentVFONumber] != VFO_SCREEN_OPERATION_SWEEP) && (uiVFOModeDualWatchIsScanning() == false) &&
+			(uiDataGlobal.FreqEnter.index == 0));
+}
+
+// The caller's data could use the line of the signal strength history graph
+static bool telemetryRxDraw(void)
+{
+	return uiUtilityDrawTelemetryRx(TELEMETRY_Y_POS_RX_VFO, (uiDataGlobal.isDisplayingQSOData ? -1 : TELEMETRY_HISTORY_Y_POS_VFO), TELEMETRY_HISTORY_HEIGHT_VFO);
+}
+#endif
+
 void uiVFOModeUpdateScreen(int txTimeSecs)
 {
 	static bool blink = false;
@@ -809,7 +1021,19 @@ void uiVFOModeUpdateScreen(int txTimeSecs)
 		uiDataGlobal.displayQSOState = QSO_DISPLAY_DEFAULT_SCREEN;
 	}
 
-	displayClearBuf();
+#if defined(VFO_SWEEP_WATERFALL)
+	if (vfoSweepWaterfallOn && (screenOperationMode[nonVolatileSettings.currentVFONumber] == VFO_SCREEN_OPERATION_SWEEP))
+	{
+		// Keep the waterfall history across the redraw; clear only above and below it.
+		displayFillRect(0, 0, DISPLAY_SIZE_X, VFO_SWEEP_WATERFALL_START_Y, true);
+		displayFillRect(0, (VFO_SWEEP_WATERFALL_START_Y + VFO_SWEEP_WATERFALL_HEIGHT), DISPLAY_SIZE_X,
+				(DISPLAY_SIZE_Y - (VFO_SWEEP_WATERFALL_START_Y + VFO_SWEEP_WATERFALL_HEIGHT)), true);
+	}
+	else
+#endif
+	{
+		displayClearBuf();
+	}
 	uiUtilityRenderHeader(uiVFOModeDualWatchIsScanning(), uiVFOModeSweepScanning(true),
 #if defined(PLATFORM_MD9600) || defined(CPU_MK22FN512VLL12)
 			false
@@ -822,11 +1046,30 @@ void uiVFOModeUpdateScreen(int txTimeSecs)
 	{
 		case QSO_DISPLAY_DEFAULT_SCREEN:
 			lastHeardClearLastID();
+#if defined(ENABLE_DUAL_SCREEN)
+			if (uiDualScreenCanDraw() && (uiDataGlobal.Scan.active == false) && (uiDataGlobal.FreqEnter.index == 0) &&
+					(screenOperationMode[nonVolatileSettings.currentVFONumber] == VFO_SCREEN_OPERATION_NORMAL))
+			{
+				uiDualScreenDraw();
+			}
+			else
+#endif
 			if ((uiDataGlobal.Scan.active &&
 					(screenOperationMode[nonVolatileSettings.currentVFONumber] == VFO_SCREEN_OPERATION_DUAL_SCAN) && (uiDataGlobal.Scan.state == SCAN_STATE_SCANNING)))
 			{
-				uiUtilityDisplayFrequency(DISPLAY_Y_POS_RX_FREQ, false, false, settingsVFOChannel[CHANNEL_VFO_A].rxFreq, true, true, 1);
-				uiUtilityDisplayFrequency(DISPLAY_Y_POS_TX_FREQ, false, false, settingsVFOChannel[CHANNEL_VFO_B].rxFreq, true, true, 2);
+#if defined(ENABLE_DUAL_SCREEN)
+				if (dualWatchChannelSide)
+				{
+					// Top: the VFO, bottom: the zone channel
+					uiUtilityDisplayFrequency(DISPLAY_Y_POS_RX_FREQ, false, false, settingsVFOChannel[nonVolatileSettings.currentVFONumber].rxFreq, true, true, ((nonVolatileSettings.currentVFONumber == 0) ? 1 : 4));
+					uiUtilityDisplayFrequency(DISPLAY_Y_POS_TX_FREQ, false, false, dwChannelData.rxFreq, true, true, 3);
+				}
+				else
+#endif
+				{
+					uiUtilityDisplayFrequency(DISPLAY_Y_POS_RX_FREQ, false, false, settingsVFOChannel[CHANNEL_VFO_A].rxFreq, true, true, 1);
+					uiUtilityDisplayFrequency(DISPLAY_Y_POS_TX_FREQ, false, false, settingsVFOChannel[CHANNEL_VFO_B].rxFreq, true, true, 2);
+				}
 			}
 			else
 			{
@@ -964,6 +1207,12 @@ void uiVFOModeUpdateScreen(int txTimeSecs)
 								false, (selectedFreq == VFO_SELECTED_FREQUENCY_INPUT_RX),
 								(uiDataGlobal.reverseRepeaterVFO ? currentChannelData->txFreq : currentChannelData->rxFreq), true,
 								(screenOperationMode[nonVolatileSettings.currentVFONumber] == VFO_SCREEN_OPERATION_SCAN), 0);
+#if defined(VFO_SWEEP_WATERFALL)
+						if (screenOperationMode[nonVolatileSettings.currentVFONumber] == VFO_SCREEN_OPERATION_SWEEP)
+						{
+							vfoSweepDrawEdgeLabels();
+						}
+#endif
 					}
 					else
 					{
@@ -1108,6 +1357,16 @@ void uiVFOModeUpdateScreen(int txTimeSecs)
 
 				}
 			}
+#if defined(HAS_TELEMETRY)
+			if (isTransmitting)
+			{
+				uiUtilityDrawTelemetryTx(txTimeSecs, false);
+			}
+			else if (telemetryRxIsDisplayable())
+			{
+				telemetryRxDraw();
+			}
+#endif
 			displayRender();
 			break;
 
@@ -1117,6 +1376,13 @@ void uiVFOModeUpdateScreen(int txTimeSecs)
 			uiDataGlobal.isDisplayingQSOData = true;
 			uiDataGlobal.displayChannelSettings = false;
 			uiUtilityRenderQSOData();
+#if defined(HAS_TELEMETRY)
+			if (telemetryRxIsDisplayable())
+			{
+				telemetryRxDraw();
+				uiUtilityDrawTelemetryDmr();
+			}
+#endif
 			displayRender();
 			break;
 
@@ -1131,6 +1397,91 @@ bool uiVFOModeIsTXFocused(void)
 {
 	return (selectedFreq == VFO_SELECTED_FREQUENCY_INPUT_TX);
 }
+
+#if defined(ENABLE_DUAL_SCREEN)
+
+static uint16_t dualWatchStepMs(void)
+{
+	static const uint16_t speeds[DUALWATCH_NUM_SPEEDS] = DUALWATCH_SPEED_TABLE;
+	uint16_t idx = ((((uint16_t)nonVolatileSettings.dualWatchOptions) & DUALWATCH_SPEED_MASK) >> DUALWATCH_SPEED_SHIFT);
+
+	return ((speeds[idx] != 0U) ? speeds[idx] : (uint16_t)settingsGetScanStepTimeMilliseconds());
+}
+#endif
+
+static void dualWatchStart(void)
+{
+	uiDataGlobal.Scan.active = true;
+#if defined(ENABLE_DUAL_SCREEN)
+	uiDataGlobal.Scan.stepTimeMilliseconds = dualWatchStepMs();
+	dualWatchOnChannel = false;
+	dualWatchChannelSide = false;
+	if (((uint16_t)nonVolatileSettings.dualWatchOptions) & DUALWATCH_CHANNEL_B)
+	{
+		// Use the current zone channel, load the zone first if the channel screen has never been shown
+		if (channelScreenChannelData.rxFreq == 0U)
+		{
+			uiChannelInitializeCurrentZone();
+		}
+
+		codeplugChannelGetDataForIndex(codeplugGetLastUsedChannelNumberInCurrentZone(), &dwChannelData);
+		dualWatchChannelSide = (dwChannelData.rxFreq != 0U);
+	}
+
+	{
+		uint16_t home = ((((uint16_t)nonVolatileSettings.dualWatchOptions) & DUALWATCH_HOME_MASK) >> DUALWATCH_HOME_SHIFT);
+
+		dualWatchHomeIsChannel = ((home == 3U) && dualWatchChannelSide);
+		dualWatchHomeVFO = (((home == 0U) || (home == 3U)) ? nonVolatileSettings.currentVFONumber : (home - 1U));
+	}
+#else
+	uiDataGlobal.Scan.stepTimeMilliseconds = settingsGetScanStepTimeMilliseconds();
+#endif
+	uiDataGlobal.Scan.dwellTime = 135;// for Dual Watch, use a larger step time than normally scanning, and which does not synchronise with the DMR 30ms timeslots
+	uiDataGlobal.Scan.timer.timeout = uiDataGlobal.Scan.dwellTime;
+	uiDataGlobal.Scan.refreshOnEveryStep = false;
+	screenOperationMode[CHANNEL_VFO_A] = screenOperationMode[CHANNEL_VFO_B] = VFO_SCREEN_OPERATION_DUAL_SCAN;
+	uiDataGlobal.VoicePrompts.inhibitInitial = true;
+	uiDataGlobal.Scan.scanType = SCAN_TYPE_DUAL_WATCH;
+	int currentPowerSavingLevel = rxPowerSavingGetLevel();
+	if (currentPowerSavingLevel > 1)
+	{
+		rxPowerSavingSetLevel(currentPowerSavingLevel - 1);
+	}
+}
+
+#if defined(ENABLE_DUAL_SCREEN)
+// "On RX: Stay" option. While Dual Watch is visiting the VFO which isn't the home one, a carrier only
+// gives a (rate limited) beep and the scan carries on; returns true when it has handled the VFO this way.
+static bool dualWatchStayCheck(void)
+{
+	static uint32_t lastAlertTime = 0;
+
+	bool onHome = (dualWatchChannelSide ? (dualWatchOnChannel == dualWatchHomeIsChannel) : (nonVolatileSettings.currentVFONumber == dualWatchHomeVFO));
+
+	if ((screenOperationMode[nonVolatileSettings.currentVFONumber] != VFO_SCREEN_OPERATION_DUAL_SCAN) ||
+			((((uint16_t)nonVolatileSettings.dualWatchOptions) & DUALWATCH_STAY) == 0U) ||
+			onHome)
+	{
+		return false;
+	}
+
+	if (trxCarrierDetected(RADIO_DEVICE_PRIMARY))
+	{
+		uint32_t now = ticksGetMillis();
+
+		if ((now - lastAlertTime) > 3000U)
+		{
+			lastAlertTime = now;
+			soundSetMelody(MELODY_ACK_BEEP);
+		}
+
+		uiDataGlobal.Scan.timer.timeout = 0; // go straight back to the other VFO
+	}
+
+	return true;
+}
+#endif
 
 void uiVFOModeStopScanning(void)
 {
@@ -1176,6 +1527,17 @@ void uiVFOModeStopScanning(void)
 
 	if (screenOperationMode[nonVolatileSettings.currentVFONumber] == VFO_SCREEN_OPERATION_DUAL_SCAN)
 	{
+#if defined(ENABLE_DUAL_SCREEN)
+		if (dualWatchOnChannel)
+		{
+			// Stopped while tuned to the zone channel: go back to the VFO
+			dualWatchOnChannel = false;
+			currentChannelData = &settingsVFOChannel[nonVolatileSettings.currentVFONumber];
+			trxSetFrequency(currentChannelData->rxFreq, currentChannelData->txFreq, (((currentChannelData->chMode == RADIO_MODE_DIGITAL) && codeplugChannelGetFlag(currentChannelData, CHANNEL_FLAG_FORCE_DMO)) ? DMR_MODE_DMO : DMR_MODE_AUTO));
+			uiVFOModeLoadChannelData(false);
+		}
+		dualWatchChannelSide = false;
+#endif
 		screenOperationMode[CHANNEL_VFO_A] = screenOperationMode[CHANNEL_VFO_B] = VFO_SCREEN_OPERATION_NORMAL;
 		settingsSet(nonVolatileSettings.currentVFONumber, nonVolatileSettings.currentVFONumber);
 
@@ -1184,7 +1546,11 @@ void uiVFOModeStopScanning(void)
 	else if (screenOperationMode[nonVolatileSettings.currentVFONumber] == VFO_SCREEN_OPERATION_SWEEP)
 	{
 		screenOperationMode[nonVolatileSettings.currentVFONumber] = VFO_SCREEN_OPERATION_NORMAL;
+#if defined(ENABLE_FAST_SCAN)
+		vfoSweepRetuneFull(currentChannelData->rxFreq);   // forces the full retune the bare sweep retunes owe
+#else
 		trxSetFrequency(currentChannelData->rxFreq, currentChannelData->txFreq, (((currentChannelData->chMode == RADIO_MODE_DIGITAL) && codeplugChannelGetFlag(currentChannelData, CHANNEL_FLAG_FORCE_DMO)) ? DMR_MODE_DMO : DMR_MODE_AUTO));
+#endif
 		HRC6000ClearColorCodeSynchronisation();
 	}
 
@@ -1379,8 +1745,38 @@ static void toggleAnalogBandwidth(void)
 
 static void handleEvent(uiEvent_t *ev)
 {
+#if defined(ENABLE_DUAL_SCREEN)
+	if (uiDualScreenHandleKey(ev, false, ((uiDataGlobal.FreqEnter.index > 0) || (screenOperationMode[nonVolatileSettings.currentVFONumber] != VFO_SCREEN_OPERATION_NORMAL))))
+	{
+		return;
+	}
+#endif
+
 	if (uiDataGlobal.Scan.active && (ev->events & KEY_EVENT))
 	{
+#if defined(VFO_SWEEP_WATERFALL)
+		// SK2 + STAR while sweeping: waterfall or full-height bars. Here, before the SK2-up
+		// branch below (where it first sat, unreachable: a check for SK2 held inside a branch
+		// that runs only with SK2 up; the compiler folded the flag to a constant). STAR passes
+		// the "any key stops the scan" barrier with or without SK2.
+		if ((ev->keys.key == KEY_STAR) && BUTTONCHECK_DOWN(ev, BUTTON_SK2) &&
+				(screenOperationMode[nonVolatileSettings.currentVFONumber] == VFO_SCREEN_OPERATION_SWEEP))
+		{
+			if (KEYCHECK_SHORTUP(ev->keys, KEY_STAR))
+			{
+				vfoSweepWaterfallOn = !vfoSweepWaterfallOn;
+				if (vfoSweepWaterfallOn)
+				{
+					vfoSweepWaterfallClear();   // stale full-height bar pixels sit where the history goes
+				}
+				uiDataGlobal.displayQSOState = QSO_DISPLAY_DEFAULT_SCREEN;
+				uiVFOModeUpdateScreen(0);
+				vfoSweepUpdateSamples(0, true, 0);   // every column repainted in the new layout
+				keyboardReset();
+			}
+			return;   // the DOWN half of SK2 + STAR: neither the scroll toggle nor the resume
+		}
+#endif
 		if (BUTTONCHECK_DOWN(ev, BUTTON_SK2) == 0)
 		{
 #if defined(ENABLE_FAST_SCAN)
@@ -2829,18 +3225,38 @@ static void vfoSweepUpdateAutoScale(void)
 	// instead of being clipped flat against the baseline.
 	floorTarget = ((noise > VFO_SWEEP_AUTO_FLOOR_MARGIN) ? (noise - VFO_SWEEP_AUTO_FLOOR_MARGIN) : 0);
 
+	// The noise ceiling (see vfoSweepNoiseCeil): mean + 4 x (mean - quiet-half mean) + 4,
+	// from this pass, unslewed -- it judges this pass's own peak.
+	{
+		int32_t ceil = (int32_t)mean + (4 * ((int32_t)mean - (int32_t)noise)) + 4;
+		vfoSweepNoiseCeil = (uint8_t)((ceil > 255) ? 255 : ceil);
+	}
+
 	// Span that puts the strongest sample at VFO_SWEEP_AUTO_HEADROOM_PCT of full height.
 	span = ((int32_t)highest - (int32_t)floorTarget);
-	if (span < VFO_SWEEP_AUTO_MIN_SPAN)
 	{
 		// An empty band is all noise, and stretching it to full height turns a quiet
-		// display into a wall of grass that looks like signal everywhere.
-		span = VFO_SWEEP_AUTO_MIN_SPAN;
+		// display into a wall of grass that looks like signal everywhere. The fixed
+		// minimum was not enough on this radio: at the 4 ms step the noise spreads
+		// wider than 20 counts, and the bench framebuffer showed noise drawn at half to
+		// full height with columns clipping. Never span less than twice the distance
+		// from the floor to the noise ceiling, so the loudest noise sits below half height.
+		int32_t minSpan = 2 * ((int32_t)vfoSweepNoiseCeil - (int32_t)floorTarget);
+		if (minSpan < VFO_SWEEP_AUTO_MIN_SPAN) { minSpan = VFO_SWEEP_AUTO_MIN_SPAN; }
+		if (span < minSpan) { span = minSpan; }
 	}
 	span = ((span * 100) / VFO_SWEEP_AUTO_HEADROOM_PCT);
 	if (span > 255)
 	{
 		span = 255;
+	}
+
+	// Up to here this pass's statistics, kept whoever owns the scaling (the noise ceiling above
+	// is what the peak marker and the listen park test against). From here the drawing scale,
+	// which is the operator's once a floor or gain key has been touched.
+	if (vfoSweepAutoScale == false)
+	{
+		return;
 	}
 
 	if (vfoSweepAutoPrimed)
@@ -2877,7 +3293,10 @@ static void vfoSweepStopListening(void)
 		trxTerminateCheckAnalogSquelch(RADIO_DEVICE_PRIMARY);
 		uiDataGlobal.Scan.state = SCAN_STATE_SCANNING;
 		// No retune needed here: the next sweepScanStep() recomputes scanSweepCurrentFreq
-		// from sweepSampleIndex and tunes there itself.
+		// from sweepSampleIndex and tunes there itself. It does owe the receiver a settle
+		// first: the squelch and audio path were just shut, and the one measurement taken
+		// straight after that was what re-parked the sweep on the bench.
+		vfoSweepSettleOwed = true;
 	}
 }
 
@@ -2912,7 +3331,7 @@ static void vfoSweepDrawPeakMarker(void)
 	// Nothing above the noise floor is not a peak, it is just the loudest noise. Saying
 	// so would be worse than saying nothing: it invites chasing a frequency that has
 	// nothing on it.
-	if (vfoSweepShownPeakLevel <= (VFO_SWEEP_FLOOR_ACTIVE + VFO_SWEEP_PEAK_MARGIN))
+	if (vfoSweepShownPeakLevel <= (VFO_SWEEP_PEAK_BASE + VFO_SWEEP_PEAK_MARGIN))
 	{
 		return;
 	}
@@ -2955,7 +3374,143 @@ static void vfoSweepDrawPeakMarker(void)
 }
 #endif
 
-static void vfoSweepDrawSample(int offset)
+#if defined(VFO_SWEEP_WATERFALL)
+static void vfoSweepBuildWaterfallPalette(void)
+{
+	static const uint32_t stops[5] = { 0x000040, 0x0000FF, 0x00FFFF, 0xFFFF00, 0xFF0000 };
+
+	for (int i = 0; i < 32; i++)
+	{
+		uint32_t a = stops[i >> 3];
+		uint32_t b = stops[(i >> 3) + 1];
+		int t = (i & 0x7);
+		uint32_t r  = ((((a >> 16) & 0xFF) * (8 - t)) + (((b >> 16) & 0xFF) * t)) / 8;
+		uint32_t g  = ((((a >> 8)  & 0xFF) * (8 - t)) + (((b >> 8)  & 0xFF) * t)) / 8;
+		uint32_t bl = (((a & 0xFF) * (8 - t)) + ((b & 0xFF) * t)) / 8;
+
+		vfoSweepWaterfallPalette[i] = displayConvertRGB888ToNative((r << 16) | (g << 8) | bl);
+
+		uint32_t rb = MIN(255U, (r  * 3) / 2);
+		uint32_t gb = MIN(255U, (g  * 3) / 2);
+		uint32_t bb = MIN(255U, (bl * 3) / 2);
+		vfoSweepBarPalette[i] = displayConvertRGB888ToNative((rb << 16) | (gb << 8) | bb);
+	}
+}
+
+// Scroll the history down one row so the freshest pass stays on top.
+static void vfoSweepWaterfallScroll(void)
+{
+	uint16_t *fb = displayGetScreenBuffer();
+
+	for (int y = (VFO_SWEEP_WATERFALL_START_Y + VFO_SWEEP_WATERFALL_HEIGHT - 1); y > VFO_SWEEP_WATERFALL_START_Y; y--)
+	{
+		memmove(&fb[y * DISPLAY_SIZE_X], &fb[(y - 1) * DISPLAY_SIZE_X], DISPLAY_SIZE_X * sizeof(uint16_t));
+	}
+}
+
+// Slide the history sideways with a retune, blanking the columns not swept yet (the sample
+// buffer is shifted the same way).
+static void vfoSweepWaterfallShift(int pixels)
+{
+	uint16_t *fb = displayGetScreenBuffer();
+	int n = ((pixels < 0) ? -pixels : pixels);
+
+	if (n > DISPLAY_SIZE_X)
+	{
+		n = DISPLAY_SIZE_X;
+	}
+
+	for (int y = VFO_SWEEP_WATERFALL_START_Y; y < (VFO_SWEEP_WATERFALL_START_Y + VFO_SWEEP_WATERFALL_HEIGHT); y++)
+	{
+		uint16_t *row = &fb[y * DISPLAY_SIZE_X];
+
+		if (pixels > 0)
+		{
+			memmove(&row[0], &row[n], (DISPLAY_SIZE_X - n) * sizeof(uint16_t));
+			memset(&row[DISPLAY_SIZE_X - n], 0x00, n * sizeof(uint16_t));
+		}
+		else
+		{
+			memmove(&row[n], &row[0], (DISPLAY_SIZE_X - n) * sizeof(uint16_t));
+			memset(&row[0], 0x00, n * sizeof(uint16_t));
+		}
+	}
+}
+
+// Blank the history: on entry, on a zoom (the Hz per column changed) and when the wide
+// span restarts the trace.
+static void vfoSweepWaterfallClear(void)
+{
+	memset(&displayGetScreenBuffer()[VFO_SWEEP_WATERFALL_START_Y * DISPLAY_SIZE_X], 0x00,
+			VFO_SWEEP_WATERFALL_HEIGHT * DISPLAY_SIZE_X * sizeof(uint16_t));
+}
+
+// The span's edge frequencies, small, in the free 8-pixel band between the graph and the
+// frequency line. Drawn by uiVFOModeUpdateScreen() and again at every pass end with the peak
+// marker, so a span change or a retune never leaves them stale for longer than one pass (on
+// the bench they were drawn at sweep entry only and read the old span after SK2 + rotary).
+static void vfoSweepDrawEdgeLabels(void)
+{
+	char buffer[SCREEN_LINE_BUFFER_SIZE];
+	uint32_t fLo = vfoSweepFreqForSample(0);
+	uint32_t fHi = vfoSweepFreqForSample(VFO_SWEEP_NUM_SAMPLES - 1);
+	const int16_t y = (VFO_SWEEP_GRAPH_START_Y + VFO_SWEEP_GRAPH_HEIGHT_Y);
+
+	displayThemeResetToDefault();
+	displayFillRect(0, y, DISPLAY_SIZE_X, 8, true);   // `true` clears, see vfoSweepDrawPeakMarker()
+	snprintf(buffer, SCREEN_LINE_BUFFER_SIZE, "%u.%03u", (unsigned)(fLo / 100000), (unsigned)((fLo % 100000) / 100));
+	displayPrintCore(2, y, buffer, FONT_SIZE_1, TEXT_ALIGN_LEFT, false);
+	snprintf(buffer, SCREEN_LINE_BUFFER_SIZE, "%u.%03u", (unsigned)(fHi / 100000), (unsigned)((fHi % 100000) / 100));
+	displayPrintCore(2, y, buffer, FONT_SIZE_1, TEXT_ALIGN_RIGHT, false);
+}
+
+static void vfoSweepDrawWaterfallSample(int offset)
+{
+	int rssi = MAX(vfoSweepSamples[offset] - VFO_SWEEP_FLOOR_ACTIVE, 0);
+	int level = MIN(31, (rssi * 31) / VFO_SWEEP_GAIN_ACTIVE);
+	int16_t barHeight = MIN(VFO_SWEEP_BARS_HEIGHT, (rssi * VFO_SWEEP_BARS_HEIGHT) / VFO_SWEEP_GAIN_ACTIVE);
+	int16_t barsBottom = (VFO_SWEEP_TRACE_START_Y + VFO_SWEEP_BARS_HEIGHT);
+	uint16_t *fb = displayGetScreenBuffer();
+
+	// The bar, in the top third: cleared above, tinted below.
+	displayThemeApply(THEME_ITEM_FG_RSSI_BAR, THEME_ITEM_BG);
+	displayDrawFastVLine(offset, VFO_SWEEP_TRACE_START_Y, (VFO_SWEEP_BARS_HEIGHT - barHeight), false);
+	displayThemeResetToDefault();
+	for (int16_t y = (barsBottom - barHeight); y < barsBottom; y++)
+	{
+		fb[(y * DISPLAY_SIZE_X) + offset] = vfoSweepBarPalette[level];
+	}
+
+	// Max hold, one pixel above the bar, on the same terms as the full-height view.
+	{
+		int16_t holdHeight = MAX(vfoSweepHold[offset] - VFO_SWEEP_FLOOR_ACTIVE, 0);
+		int16_t liftPx = (VFO_SWEEP_HOLD_MIN_LIFT * VFO_SWEEP_BARS_HEIGHT) / VFO_SWEEP_TRACE_HEIGHT_Y;
+		holdHeight = MIN(VFO_SWEEP_BARS_HEIGHT, ((holdHeight * VFO_SWEEP_BARS_HEIGHT) / VFO_SWEEP_GAIN_ACTIVE));
+		if (holdHeight > (barHeight + MAX(1, liftPx)))
+		{
+			displayThemeApply(THEME_ITEM_FG_DECORATION, THEME_ITEM_BG);
+			displaySetPixel(offset, (barsBottom - holdHeight), true);
+			displayThemeResetToDefault();
+		}
+	}
+
+	// Centre-frequency marker: dotted down the bar area.
+	if (offset == (DISPLAY_SIZE_X >> 1))
+	{
+		displayThemeApply(THEME_ITEM_FG_DECORATION, THEME_ITEM_BG);
+		for (int16_t y = VFO_SWEEP_TRACE_START_Y; y < barsBottom; y += 2)
+		{
+			displaySetPixel(offset, y, true);
+		}
+		displayThemeResetToDefault();
+	}
+
+	// Waterfall: this column's level on the top history row.
+	fb[(VFO_SWEEP_WATERFALL_START_Y * DISPLAY_SIZE_X) + offset] = vfoSweepWaterfallPalette[level];
+}
+#endif
+
+static void vfoSweepDrawBarSample(int offset)
 {
 	int16_t graphHeight = MAX(vfoSweepSamples[offset] - VFO_SWEEP_FLOOR_ACTIVE, 0);
 	graphHeight = (graphHeight * VFO_SWEEP_TRACE_HEIGHT_Y) / VFO_SWEEP_GAIN_ACTIVE;
@@ -3008,6 +3563,18 @@ static void vfoSweepDrawSample(int offset)
 	displayThemeResetToDefault();
 }
 
+static void vfoSweepDrawSample(int offset)
+{
+#if defined(VFO_SWEEP_WATERFALL)
+	if (vfoSweepWaterfallOn)
+	{
+		vfoSweepDrawWaterfallSample(offset);
+		return;
+	}
+#endif
+	vfoSweepDrawBarSample(offset);
+}
+
 static void vfoSweepUpdateSamples(int offset, bool forceRedraw, int bandwidthRescale)
 {
 	const int SHIFT_DISTANCE[7] = {6,6,6,6,8,8,8};
@@ -3021,10 +3588,36 @@ static void vfoSweepUpdateSamples(int offset, bool forceRedraw, int bandwidthRes
 	{
 		memset(vfoSweepHold, 0x00, sizeof(vfoSweepHold));
 	}
+
+	// SHIFT_DISTANCE is the UP/DOWN frequency step expressed in NARROW columns. A wide
+	// column covers VFO_SWEEP_WIDE_SUBSAMPLES times more, so the same key step is a
+	// fraction of a column there: shifting the trace by the narrow distance would move it
+	// ten times too far and label every bin with a frequency it was not measured at.
+	// Start the trace afresh instead, from the new centre.
+	if (vfoSweepWide && (offset != 0))
+	{
+		memset(vfoSweepSamples, 0x00, sizeof(vfoSweepSamples));
+		memset(vfoSweepAvg, 0x00, sizeof(vfoSweepAvg));
+#if defined(VFO_SWEEP_WATERFALL)
+		if (vfoSweepWaterfallOn)
+		{
+			vfoSweepWaterfallClear();   // the trace restarts from the new centre; so does the history
+		}
+#endif
+		uiDataGlobal.Scan.sweepSampleIndex = 0;
+		offset = 0;
+		forceRedraw = true;
+	}
 #endif
 
 	if (offset != 0)
 	{
+#if defined(VFO_SWEEP_WATERFALL)
+		if (vfoSweepWaterfallOn)
+		{
+			vfoSweepWaterfallShift(offset);   // the history follows the retune like the bars do
+		}
+#endif
 		if (offset > 0)
 		{
 			uiDataGlobal.Scan.sweepSampleIndex = VFO_SWEEP_NUM_SAMPLES - 1 - offset;
@@ -3042,6 +3635,12 @@ static void vfoSweepUpdateSamples(int offset, bool forceRedraw, int bandwidthRes
 
 	if (bandwidthRescale != 0)
 	{
+#if defined(VFO_SWEEP_WATERFALL)
+		if (vfoSweepWaterfallOn)
+		{
+			vfoSweepWaterfallClear();   // a zoom changes the Hz per column; the old rows no longer line up
+		}
+#endif
 		uint8_t tmp[VFO_SWEEP_NUM_SAMPLES];
 		memset(tmp, 0x00, VFO_SWEEP_NUM_SAMPLES);
 		int newStartSample = (VFO_SWEEP_NUM_SAMPLES / 2) - (VFO_SWEEP_NUM_SAMPLES / 4);
@@ -3088,8 +3687,24 @@ static void vfoSweepUpdateSamples(int offset, bool forceRedraw, int bandwidthRes
 
 	if (uiDataGlobal.Scan.state == SCAN_STATE_SCANNING)
 	{
+#if defined(ENABLE_FAST_SCAN)
+		// The column's measurements start over: the sub-sample position and the running
+		// peak/sum belong to the column the sweep was in before the shift or rescale.
+		vfoSweepSubIndex = 0;
+		vfoSweepColumnPeak = 0;
+		vfoSweepColumnSum = 0;
+		// Same arithmetic as sweepScanStep(), through the one helper, so the wide span
+		// tunes its first measurement where the next column really starts rather than at
+		// the narrow-span frequency this line used to compute.
+		uiDataGlobal.Scan.scanSweepCurrentFreq = vfoSweepFreqForOrdinal(
+				(int32_t)uiDataGlobal.Scan.sweepSampleIndex * vfoSweepSubSamples());
+		// Full retune: a scroll, a rescale or the sweep's start may have changed the band,
+		// and this is the one retune per pass the bare sample retunes build on.
+		vfoSweepRetuneFull(uiDataGlobal.Scan.scanSweepCurrentFreq);
+#else
 		uiDataGlobal.Scan.scanSweepCurrentFreq = currentChannelData->rxFreq + (VFO_SWEEP_SCAN_RANGE_SAMPLE_STEP_TABLE[uiDataGlobal.Scan.sweepStepSizeIndex] * (uiDataGlobal.Scan.sweepSampleIndex - (VFO_SWEEP_NUM_SAMPLES / 2))) / VFO_SWEEP_PIXELS_PER_STEP;
 		trxSetFrequency(uiDataGlobal.Scan.scanSweepCurrentFreq, currentChannelData->txFreq, (((currentChannelData->chMode == RADIO_MODE_DIGITAL) && codeplugChannelGetFlag(currentChannelData, CHANNEL_FLAG_FORCE_DMO)) ? DMR_MODE_DMO : DMR_MODE_AUTO));
+#endif
 		ticksTimerStart(&uiDataGlobal.Scan.timer, VFO_SWEEP_STEP_TIME_ACTIVE);
 	}
 }
@@ -3162,6 +3777,12 @@ static void setSweepIncDecSetting(sweepSetting_t type, bool increment)
 						vfoSweepColumnPeak = 0;
 						vfoSweepAutoPrimed = false;
 						uiDataGlobal.Scan.sweepSampleIndex = 0;
+#if defined(VFO_SWEEP_WATERFALL)
+						if (vfoSweepWaterfallOn)
+						{
+							vfoSweepWaterfallClear();   // the Hz per column changed tenfold: the old rows mean nothing here
+						}
+#endif
 					}
 #endif
 				}
@@ -3239,6 +3860,17 @@ static void setSweepIncDecSetting(sweepSetting_t type, bool increment)
 
 	if (apply)
 	{
+#if defined(VFO_SWEEP_WATERFALL)
+		if (type == SWEEP_SETTING_STEP)
+		{
+			// The span changed (a zoom, or the wide span entered or left -- which is not a
+			// rescale, so it is not told by bandwidthRescaleDirection): the edge labels under
+			// the graph say the old span until the screen is redrawn. The update below
+			// repaints the bars; the history was cleared above or is cleared by the rescale.
+			uiDataGlobal.displayQSOState = QSO_DISPLAY_DEFAULT_SCREEN;
+			uiVFOModeUpdateScreen(0);
+		}
+#endif
 		vfoSweepUpdateSamples(0, true, bandwidthRescaleDirection);
 	}
 }
@@ -3843,19 +4475,7 @@ static void handleQuickMenuEvent(uiEvent_t *ev)
 					break;
 
 				case VFO_SCREEN_QUICK_MENU_DUAL_SCAN:
-					uiDataGlobal.Scan.active = true;
-					uiDataGlobal.Scan.stepTimeMilliseconds = settingsGetScanStepTimeMilliseconds();
-					uiDataGlobal.Scan.dwellTime = 135;// for Dual Watch, use a larger step time than normally scanning, and which does not synchronise with the DMR 30ms timeslots
-					uiDataGlobal.Scan.timer.timeout = uiDataGlobal.Scan.dwellTime;
-					uiDataGlobal.Scan.refreshOnEveryStep = false;
-					screenOperationMode[CHANNEL_VFO_A] = screenOperationMode[CHANNEL_VFO_B] = VFO_SCREEN_OPERATION_DUAL_SCAN;
-					uiDataGlobal.VoicePrompts.inhibitInitial = true;
-					uiDataGlobal.Scan.scanType = SCAN_TYPE_DUAL_WATCH;
-					int currentPowerSavingLevel = rxPowerSavingGetLevel();
-					if (currentPowerSavingLevel > 1)
-					{
-						rxPowerSavingSetLevel(currentPowerSavingLevel - 1);
-					}
+					dualWatchStart();
 					break;
 
 				default:
@@ -4133,6 +4753,14 @@ bool uiVFOModeIsScanning(void)
 	return (uiDataGlobal.Scan.toneActive || uiDataGlobal.Scan.active);
 }
 
+#if defined(ENABLE_DUAL_SCREEN)
+bool uiVFOModeDualWatchOnChannel(void)
+{
+	return (dualWatchChannelSide && dualWatchOnChannel && uiDataGlobal.Scan.active &&
+			(screenOperationMode[nonVolatileSettings.currentVFONumber] == VFO_SCREEN_OPERATION_DUAL_SCAN));
+}
+#endif
+
 bool uiVFOModeDualWatchIsScanning(void)
 {
 	return ((menuSystemGetCurrentMenuNumber() == UI_VFO_MODE) && uiDataGlobal.Scan.active &&
@@ -4215,6 +4843,12 @@ void uiVFOModeSweepSetModes(bool wide, bool autoScroll, uint8_t stepIndex, bool 
 		vfoSweepColumnPeak = 0;
 		vfoSweepAutoPrimed = false;
 		uiDataGlobal.Scan.sweepSampleIndex = 0;
+#if defined(VFO_SWEEP_WATERFALL)
+		if (vfoSweepWaterfallOn)
+		{
+			vfoSweepWaterfallClear();   // as on the key path: the old rows belong to another span
+		}
+#endif
 	}
 
 	vfoSweepAutoScroll = autoScroll;
@@ -4379,6 +5013,8 @@ static void sweepScanInit(void)
 	vfoSweepWide = ((nonVolatileSettings.vfoSweepSettings & VFO_SWEEP_WIDE_FLAG) != 0);
 	vfoSweepSubIndex = 0;
 	vfoSweepColumnPeak = 0;
+	vfoSweepColumnSum = 0;
+	vfoSweepDirtyLo = vfoSweepDirtyHi = -1;   // no strip is owed from a previous visit
 	// Auto scroll always starts off -- see the note at its declaration.
 	vfoSweepAutoScroll = false;
 	vfoSweepScrollPending = false;   // a scroll owed by a previous visit is not owed now
@@ -4415,6 +5051,10 @@ static void sweepScanInit(void)
 	// spectrum screen into a mode you cannot see and did not ask for this time.
 	vfoSweepAutoScale = true;
 	vfoSweepAutoPrimed = false;
+#if defined(VFO_SWEEP_WATERFALL)
+	vfoSweepBuildWaterfallPalette();
+	vfoSweepWaterfallClear();
+#endif
 #endif
 
 	menuSystemPopAllAndDisplaySpecificRootMenu(UI_VFO_MODE, true);
@@ -4492,6 +5132,16 @@ static void sweepScanStep(void)
 
 	if (ticksTimerHasExpired(&uiDataGlobal.Scan.timer))
 	{
+#if defined(ENABLE_FAST_SCAN)
+		if (vfoSweepSettleOwed)
+		{
+			// One step of the stock RSSI settle before the first measurement after a full
+			// receiver set-up -- see vfoSweepSettleOwed. Once per scroll, rescale or park.
+			vfoSweepSettleOwed = false;
+			ticksTimerStart(&uiDataGlobal.Scan.timer, RSSI_NOISE_SAMPLE_PERIOD_PIT);
+			return;
+		}
+#endif
 		ticksTimerStart(&uiDataGlobal.Scan.timer, VFO_SWEEP_STEP_TIME_ACTIVE);
 
 		if (uiDataGlobal.Scan.sweepSampleIndex < VFO_SWEEP_NUM_SAMPLES)
@@ -4527,10 +5177,7 @@ static void sweepScanStep(void)
 						((int32_t)uiDataGlobal.Scan.sweepSampleIndex * vfoSweepSubSamples())
 								+ vfoSweepSubIndex);
 
-				trxSetFrequency(uiDataGlobal.Scan.scanSweepCurrentFreq, currentChannelData->txFreq,
-						(((currentChannelData->chMode == RADIO_MODE_DIGITAL) &&
-								codeplugChannelGetFlag(currentChannelData, CHANNEL_FLAG_FORCE_DMO))
-										? DMR_MODE_DMO : DMR_MODE_AUTO));
+				vfoSweepRetuneFast(uiDataGlobal.Scan.scanSweepCurrentFreq);
 				return;
 			}
 
@@ -4575,8 +5222,8 @@ static void sweepScanStep(void)
 			uiDataGlobal.Scan.sweepSampleIndex += uiDataGlobal.Scan.sweepSampleIndexIncrement;
 
 			displayThemeApply(THEME_ITEM_FG_RX_FREQ, THEME_ITEM_BG);
-			displayDrawFastVLine((uiDataGlobal.Scan.sweepSampleIndex) % VFO_SWEEP_NUM_SAMPLES, VFO_SWEEP_TRACE_START_Y, VFO_SWEEP_TRACE_HEIGHT_Y, true);// draw solid line in the next location
-			displayDrawFastVLine((uiDataGlobal.Scan.sweepSampleIndex + uiDataGlobal.Scan.sweepSampleIndexIncrement) % VFO_SWEEP_NUM_SAMPLES, VFO_SWEEP_TRACE_START_Y, VFO_SWEEP_TRACE_HEIGHT_Y, true);// draw solid line in the next location
+			displayDrawFastVLine((uiDataGlobal.Scan.sweepSampleIndex) % VFO_SWEEP_NUM_SAMPLES, VFO_SWEEP_TRACE_START_Y, VFO_SWEEP_CURSOR_HEIGHT, true);// draw solid line in the next location
+			displayDrawFastVLine((uiDataGlobal.Scan.sweepSampleIndex + uiDataGlobal.Scan.sweepSampleIndexIncrement) % VFO_SWEEP_NUM_SAMPLES, VFO_SWEEP_TRACE_START_Y, VFO_SWEEP_CURSOR_HEIGHT, true);// draw solid line in the next location
 			displayThemeResetToDefault();
 
 			if (uiNotificationIsVisible())
@@ -4598,7 +5245,13 @@ static void sweepScanStep(void)
 					// in the strip. Repaint them and blit the lot -- once per pass.
 					vfoSweepPassComplete = false;
 					vfoSweepDrawPeakMarker();
+#if defined(VFO_SWEEP_WATERFALL)
+					vfoSweepDrawEdgeLabels();   // a span change or retune since the last pass is caught here
+					displayRenderRows(1, ((8 + VFO_SWEEP_GRAPH_HEIGHT_Y) / 8) + 2);   // one more 8-px row: the label band
+#else
 					displayRenderRows(1, ((8 + VFO_SWEEP_GRAPH_HEIGHT_Y) / 8) + 1);
+#endif
+					vfoSweepDirtyLo = vfoSweepDirtyHi = -1;   // the full blit covered everything
 				}
 				else
 				{
@@ -4608,7 +5261,9 @@ static void sweepScanStep(void)
 					colLo = SAFE_MIN(colLo, SAFE_MIN(c1, c2));
 					colHi = SAFE_MAX(colHi, SAFE_MAX(c1, c2));
 
-					displayRenderColumns(colLo, (colHi + 1), 1, ((8 + VFO_SWEEP_GRAPH_HEIGHT_Y) / 8) + 1);
+					// Blitted once the strip is full (every second sample), or at once when
+					// the cursor wrapped round the right edge and the range is not a strip.
+					vfoSweepDirtyAdd(colLo, colHi);
 				}
 #else
 				displayRenderRows(1, ((8 + VFO_SWEEP_GRAPH_HEIGHT_Y) / 8) + 1);
@@ -4622,16 +5277,24 @@ static void sweepScanStep(void)
 			// it here rather than per sample means the marker holds still while the trace
 			// redraws under it, and the one full-width blit it costs lands once per pass
 			// (12.5 ms against a 1-4 s sweep) instead of once per sample.
+#if defined(VFO_SWEEP_WATERFALL)
+			if (vfoSweepWaterfallOn)
+			{
+				// The pass just drawn becomes history: push the rows down before the next
+				// pass starts writing the top one. The full-width blit that the marker repaint
+				// causes on the next sample carries the scrolled rows to the panel.
+				vfoSweepWaterfallScroll();
+			}
+#endif
 			vfoSweepShownPeakLevel = vfoSweepPeakLevel;
 			vfoSweepShownPeakIndex = vfoSweepPeakIndex;
 			vfoSweepPeakLevel = 0;
 			vfoSweepPeakIndex = -1;
 			vfoSweepPassComplete = true;
 
-			if (vfoSweepAutoScale)
-			{
-				vfoSweepUpdateAutoScale();
-			}
+			// Every pass: the noise ceiling the park and the marker depend on comes from here;
+			// the function leaves the drawing scale alone once the operator has taken it over.
+			vfoSweepUpdateAutoScale();
 
 #if (VFO_SWEEP_HOLD_DECAY > 0)
 			// Fade the hold one step per pass. Bins below their live level are raised
@@ -4655,17 +5318,16 @@ static void sweepScanStep(void)
 
 			// Strong enough to be worth interrupting the sweep for? Park on it.
 			if ((vfoSweepShownPeakIndex >= 0) &&
-					(vfoSweepShownPeakLevel > (VFO_SWEEP_FLOOR_ACTIVE + VFO_SWEEP_LISTEN_MARGIN)))
+					(vfoSweepShownPeakLevel > (VFO_SWEEP_PEAK_BASE + VFO_SWEEP_LISTEN_MARGIN)))
 			{
 				vfoSweepListenFreq = vfoSweepFreqForSample(vfoSweepShownPeakIndex);
 				vfoSweepListening = true;
 				ticksTimerStart(&vfoSweepListenTimer, VFO_SWEEP_LISTEN_MIN_MS);
 				ticksTimerStart(&vfoSweepParkLimitTimer, VFO_SWEEP_SCROLL_MAX_PARK_MS);
 
-				trxSetFrequency(vfoSweepListenFreq, currentChannelData->txFreq,
-						(((currentChannelData->chMode == RADIO_MODE_DIGITAL) &&
-								codeplugChannelGetFlag(currentChannelData, CHANNEL_FLAG_FORCE_DMO))
-										? DMR_MODE_DMO : DMR_MODE_AUTO));
+				// Full retune: listening needs the whole receiver set up for this frequency,
+				// not just the PLL.
+				vfoSweepRetuneFull(vfoSweepListenFreq);
 
 				// Last, and only after the retune: this is what re-enables the squelch and
 				// audio path, and it must not do so while still tuned to the old sample.
@@ -4738,7 +5400,17 @@ static void sweepScanStep(void)
 						)) / VFO_SWEEP_PIXELS_PER_STEP;
 #endif
 
+#if defined(ENABLE_FAST_SCAN)
+		// The pass wrapped: the frequency moved back by a whole span, so give the column
+		// strip a clean slate too (the full-row blit at the wrap painted everything).
+		if (uiDataGlobal.Scan.sweepSampleIndex == 0)
+		{
+			vfoSweepDirtyLo = vfoSweepDirtyHi = -1;
+		}
+		vfoSweepRetuneFast(uiDataGlobal.Scan.scanSweepCurrentFreq);
+#else
 		trxSetFrequency(uiDataGlobal.Scan.scanSweepCurrentFreq, currentChannelData->txFreq, (((currentChannelData->chMode == RADIO_MODE_DIGITAL) && codeplugChannelGetFlag(currentChannelData, CHANNEL_FLAG_FORCE_DMO)) ? DMR_MODE_DMO : DMR_MODE_AUTO));
+#endif
 	}
 }
 
@@ -4882,6 +5554,13 @@ static void scanning(void)
 	{
 		// Test for presence of RF Carrier.
 
+#if defined(ENABLE_DUAL_SCREEN)
+		if (dualWatchStayCheck())
+		{
+			// Dual Watch "Stay": never pause on the non-home VFO
+		}
+		else
+#endif
 		if (trxGetMode() == RADIO_MODE_DIGITAL)
 		{
 			if(uiDataGlobal.Scan.stepTimeMilliseconds > 150)				// if >150ms use DMR Slow mode
@@ -5049,8 +5728,19 @@ static void scanning(void)
 			//
 			// Note: nonVolatileSettings.currentVFONumber is not changed using settingsSet(), to prevent crazy EEPROM
 			//       writes. uiVFOModeStopScanning() is doing this, when the scanning process ends (for any reason).
-			nonVolatileSettings.currentVFONumber = (1 - nonVolatileSettings.currentVFONumber);
-			currentChannelData = &settingsVFOChannel[nonVolatileSettings.currentVFONumber];
+#if defined(ENABLE_DUAL_SCREEN)
+			if (dualWatchChannelSide)
+			{
+				// Alternate between the VFO (currentVFONumber isn't changed) and the zone channel
+				dualWatchOnChannel = !dualWatchOnChannel;
+				currentChannelData = (dualWatchOnChannel ? &dwChannelData : &settingsVFOChannel[nonVolatileSettings.currentVFONumber]);
+			}
+			else
+#endif
+			{
+				nonVolatileSettings.currentVFONumber = (1 - nonVolatileSettings.currentVFONumber);
+				currentChannelData = &settingsVFOChannel[nonVolatileSettings.currentVFONumber];
+			}
 
 			currentChannelData->libreDMR_Power = 0x00;// Force channel to the Master power
 

@@ -29,6 +29,8 @@
 #include "user_interface/menuSystem.h"
 #include "user_interface/uiUtilities.h"
 #include "user_interface/uiLocalisation.h"
+#include "user_interface/uiBootAnimation.h"
+#include "user_interface/uiTelemetry.h"
 
 static void updateScreen(bool isFirstRun);
 static void handleEvent(uiEvent_t *ev);
@@ -41,6 +43,12 @@ static void pincodeAudioAlert(void);
 
 const uint32_t SILENT_PROMPT_HOLD_DURATION_MILLISECONDS = 2000;
 static uint32_t initialEventTime;
+
+#if defined(HAS_TELEMETRY)
+static bool bootAnimationIsActive = false;
+static uint32_t bootAnimationLastFrameTime;
+static char bootAnimationSubtitle[SCREEN_LINE_BUFFER_SIZE];
+#endif
 
 #if ! defined(PLATFORM_GD77S)
 static bool pinHandled = false;
@@ -151,6 +159,30 @@ static void updateScreen(bool isFirstRun)
 #endif
 	}
 
+#if defined(HAS_TELEMETRY)
+	bootAnimationIsActive = !customDataHasImage;
+
+	if (bootAnimationIsActive)
+	{
+		uint32_t dmrId = codeplugGetUserDMRID();
+		char radioName[17]; // codeplugGetRadioName() needs 16 characters
+
+		codeplugGetRadioName(radioName);
+		uiBootAnimationSetCallsign(radioName);
+
+		if (dmrId != 0U)
+		{
+			snprintf(bootAnimationSubtitle, sizeof(bootAnimationSubtitle), "DMR ID %lu", (unsigned long)dmrId);
+		}
+		else
+		{
+			// The callsign is already displayed by the animation, don't repeat it if it's also the first line of the codeplug boot text
+			snprintf(bootAnimationSubtitle, sizeof(bootAnimationSubtitle), "%s", ((strcmp(line1, uiBootAnimationGetCallsign()) == 0) ? line2 : line1));
+		}
+		bootAnimationLastFrameTime = ticksGetMillis();
+		uiBootAnimationDraw(bootAnimationSubtitle, (bootAnimationLastFrameTime - initialEventTime));
+	}
+#else
 	if (!customDataHasImage)
 	{
 		displayClearBuf();
@@ -159,6 +191,7 @@ static void updateScreen(bool isFirstRun)
 		displayPrintCentered((DISPLAY_SIZE_Y / 4) * 2, line1, FONT_SIZE_3);
 		displayPrintCentered((DISPLAY_SIZE_Y / 4) * 3, line2, FONT_SIZE_3);
 	}
+#endif
 
 	displayThemeResetToDefault();
 
@@ -179,6 +212,24 @@ static void handleEvent(uiEvent_t *ev)
 		updateScreen(false);
 		return;
 	}
+
+#if defined(HAS_TELEMETRY)
+	if (bootAnimationIsActive)
+	{
+		if ((ev->time - bootAnimationLastFrameTime) >= BOOT_ANIMATION_FRAME_INTERVAL_MS)
+		{
+			bootAnimationLastFrameTime = ev->time;
+			uiBootAnimationDraw(bootAnimationSubtitle, (ev->time - initialEventTime));
+			displayRender();
+		}
+
+		// Without any key or button event, let the animation ends, even if the melody is shorter.
+		if ((ev->events == NO_EVENT) && ((ev->time - initialEventTime) < BOOT_ANIMATION_DURATION_MILLISECONDS))
+		{
+			return;
+		}
+	}
+#endif
 
 	if (nonVolatileSettings.audioPromptMode != AUDIO_PROMPT_MODE_SILENT)
 	{

@@ -29,7 +29,10 @@
 #include "functions/trx.h"
 #include "user_interface/menuSystem.h"
 #include "user_interface/uiUtilities.h"
+#include "user_interface/uiDualScreen.h"
 #include "user_interface/uiLocalisation.h"
+#include "user_interface/uiTelemetry.h"
+#include "user_interface/uiHomeScreen.h"
 #include "functions/voicePrompts.h"
 #include "functions/rxPowerSaving.h"
 #if defined(PLATFORM_MD9600) || defined(PLATFORM_MD380) || defined(PLATFORM_MDUV380) || defined(PLATFORM_RT84_DM1701) || defined(PLATFORM_MD2017)
@@ -228,6 +231,9 @@ static menuStatus_t uiChannelModeFirstRun(void)
 			GD77SParameters.dtmfListCount = codeplugDTMFContactsGetCount();
 		}
 #endif
+#if defined(ENABLE_DUAL_SCREEN)
+		uiDualScreenScreenEntered(true);
+#endif
 		uiChannelModeUpdateScreen(0);
 
 		if (uiDataGlobal.Scan.active == false)
@@ -276,6 +282,15 @@ menuStatus_t uiChannelMode(uiEvent_t *ev, bool isFirstRun)
 		}
 #endif
 
+#if defined(ENABLE_DUAL_SCREEN)
+		// Redraw the two rows when a signal starts / stops (frame around the active row)
+		if (uiDualScreenRxStateChanged() && (uiDataGlobal.displayQSOState == QSO_DISPLAY_IDLE) && (uiDataGlobal.Scan.active == false))
+		{
+			uiDataGlobal.displayQSOState = QSO_DISPLAY_DEFAULT_SCREEN;
+			uiChannelModeUpdateScreen(0);
+		}
+#endif
+
 		if (ev->events == NO_EVENT)
 		{
 			bool updateLHDisplay = ((nonVolatileSettings.lastTalkerOnScreenTimer > 0U) &&
@@ -320,6 +335,24 @@ menuStatus_t uiChannelMode(uiEvent_t *ev, bool isFirstRun)
 				{
 					if (rxPowerSavingIsRxOn())
 					{
+						bool telemetryUpdated = false;
+
+#if defined(HAS_TELEMETRY)
+						if (uiUtilityHomeScreenIsActive())
+						{
+							// Redesigned main screen: S-meter, values and signal strength history, there is no bar graph in its header
+							if (uiUtilityDrawTelemetryRx(HOME_Y_POS_TELEMETRY, HOME_Y_POS_HISTORY, HOME_HISTORY_HEIGHT))
+							{
+								displayRenderRows(TELEMETRY_RX_FIRST_ROW(HOME_Y_POS_TELEMETRY), DISPLAY_NUMBER_OF_ROWS);
+							}
+							else if (uiNotificationIsVisible())
+							{
+								displayRender();
+							}
+						}
+						else
+#endif
+						{
 						if (uiDataGlobal.Scan.active && (uiDataGlobal.Scan.state == SCAN_STATE_PAUSED))
 						{
 #if defined(PLATFORM_RD5R)
@@ -334,6 +367,10 @@ menuStatus_t uiChannelMode(uiEvent_t *ev, bool isFirstRun)
 							uiUtilityDrawRSSIBarGraph();
 						}
 
+#if defined(HAS_TELEMETRY)
+						telemetryUpdated = uiUtilityDrawTelemetryRx(TELEMETRY_Y_POS_RX_CHANNEL, TELEMETRY_HISTORY_Y_POS_CHANNEL, TELEMETRY_HISTORY_HEIGHT_CHANNEL);
+#endif
+
 						if (uiNotificationIsVisible())
 						{
 							displayRender();
@@ -343,6 +380,16 @@ menuStatus_t uiChannelMode(uiEvent_t *ev, bool isFirstRun)
 							// Only render the second row which contains the bar graph, if we're not scanning,
 							// as there is no need to redraw the rest of the screen
 							displayRenderRows(((uiDataGlobal.Scan.active && (uiDataGlobal.Scan.state == SCAN_STATE_PAUSED)) ? 0 : 1), 2);
+#if defined(HAS_TELEMETRY)
+							if (telemetryUpdated)
+							{
+								displayRenderRows(TELEMETRY_HISTORY_FIRST_ROW(TELEMETRY_HISTORY_Y_POS_CHANNEL), TELEMETRY_HISTORY_LAST_ROW(TELEMETRY_HISTORY_Y_POS_CHANNEL, TELEMETRY_HISTORY_HEIGHT_CHANNEL));
+								displayRenderRows(TELEMETRY_RX_FIRST_ROW(TELEMETRY_Y_POS_RX_CHANNEL), TELEMETRY_RX_LAST_ROW(TELEMETRY_Y_POS_RX_CHANNEL));
+							}
+#else
+							UNUSED_PARAMETER(telemetryUpdated);
+#endif
+						}
 						}
 					}
 					m = ev->time;
@@ -823,6 +870,60 @@ void uiChannelModeUpdateScreen(int txTimeSecs)
 		uiDataGlobal.displayQSOState = QSO_DISPLAY_DEFAULT_SCREEN;
 	}
 
+#if defined(HAS_TELEMETRY)
+	// Redesigned main screen: the same states as below, with another drawing
+	if (uiUtilityHomeScreenIsActive())
+	{
+		switch(uiDataGlobal.displayQSOState)
+		{
+			case QSO_DISPLAY_DEFAULT_SCREEN:
+				lastHeardClearLastID();
+				uiDataGlobal.displayQSOStatePrev = QSO_DISPLAY_DEFAULT_SCREEN;
+				uiDataGlobal.isDisplayingQSOData = false;
+				uiDataGlobal.receivedPcId = 0x00;
+
+				// The last talker is not alternatively displayed with the contact on this screen
+				if (ticksTimerIsEnabled(&uiDataGlobal.DMRLastTalkerOnScreen.timer))
+				{
+					ticksTimerReset(&uiDataGlobal.DMRLastTalkerOnScreen.timer);
+					uiDataGlobal.DMRLastTalkerOnScreen.visible = false;
+				}
+
+				if (directChannelNumber > 0)
+				{
+					snprintf(nameBuf, NAME_BUFFER_LEN, "%s %d", currentLanguage->gotoChannel, directChannelNumber);
+				}
+				else if (CODEPLUG_ZONE_IS_ALLCHANNELS(currentZone))
+				{
+					snprintf(nameBuf, NAME_BUFFER_LEN, "%.7s %d", currentLanguage->all_channels, codeplugGetLastUsedChannelInCurrentZone());
+				}
+				else
+				{
+					snprintf(nameBuf, NAME_BUFFER_LEN, "%.7s %d/%d", currentZoneName, (codeplugGetLastUsedChannelInCurrentZone() + 1), currentZone.NOT_IN_CODEPLUGDATA_numChannelsInZone);
+				}
+
+				uiUtilityHomeScreenDraw(txTimeSecs, false, nameBuf);
+				displayRender();
+				break;
+
+			case QSO_DISPLAY_CALLER_DATA:
+			case QSO_DISPLAY_CALLER_DATA_UPDATE:
+				uiDataGlobal.displayQSOStatePrev = QSO_DISPLAY_CALLER_DATA;
+				uiDataGlobal.isDisplayingQSOData = true;
+				uiDataGlobal.displayChannelSettings = false;
+				uiUtilityHomeScreenDraw(txTimeSecs, true, NULL);
+				displayRender();
+				break;
+
+			case QSO_DISPLAY_IDLE:
+				break;
+		}
+
+		uiDataGlobal.displayQSOState = QSO_DISPLAY_IDLE;
+		return;
+	}
+#endif
+
 	displayClearBuf();
 	uiUtilityRenderHeader(false, false,
 #if defined(PLATFORM_MD9600) || defined(CPU_MK22FN512VLL12)
@@ -839,6 +940,16 @@ void uiChannelModeUpdateScreen(int txTimeSecs)
 			uiDataGlobal.displayQSOStatePrev = QSO_DISPLAY_DEFAULT_SCREEN;
 			uiDataGlobal.isDisplayingQSOData = false;
 			uiDataGlobal.receivedPcId = 0x00;
+
+#if defined(ENABLE_DUAL_SCREEN)
+			if (uiDualScreenCanDraw() && (isTransmitting == false) && (directChannelNumber == 0) && (uiDataGlobal.Scan.active == false))
+			{
+				// Only the two rows: the stock channel / contact / zone drawing below would overlap them
+				uiDualScreenDraw();
+				displayRender();
+				break;
+			}
+#endif
 
 			if (isTransmitting)
 			{
@@ -1062,6 +1173,17 @@ void uiChannelModeUpdateScreen(int txTimeSecs)
 				}
 			}
 
+#if defined(HAS_TELEMETRY)
+			if (isTransmitting)
+			{
+				uiUtilityDrawTelemetryTx(txTimeSecs, true);
+			}
+			else
+			{
+				uiUtilityDrawTelemetryRx(TELEMETRY_Y_POS_RX_CHANNEL, TELEMETRY_HISTORY_Y_POS_CHANNEL, TELEMETRY_HISTORY_HEIGHT_CHANNEL);
+			}
+#endif
+
 			displayRender();
 			break;
 
@@ -1071,6 +1193,10 @@ void uiChannelModeUpdateScreen(int txTimeSecs)
 			uiDataGlobal.isDisplayingQSOData = true;
 			uiDataGlobal.displayChannelSettings = false;
 			uiUtilityRenderQSOData();
+#if defined(HAS_TELEMETRY)
+			uiUtilityDrawTelemetryRx(TELEMETRY_Y_POS_RX_CHANNEL, TELEMETRY_HISTORY_Y_POS_CHANNEL, TELEMETRY_HISTORY_HEIGHT_CHANNEL);
+			uiUtilityDrawTelemetryDmr();
+#endif
 			displayRender();
 			break;
 
@@ -1087,6 +1213,13 @@ static void handleEvent(uiEvent_t *ev)
 	handleEventForGD77S(ev);
 	return;
 #else
+
+#if defined(ENABLE_DUAL_SCREEN)
+	if (uiDualScreenHandleKey(ev, true, ((directChannelNumber > 0) || uiDataGlobal.displayChannelSettings)))
+	{
+		return;
+	}
+#endif
 
 	if (uiDataGlobal.Scan.active && (ev->events & KEY_EVENT))
 	{
