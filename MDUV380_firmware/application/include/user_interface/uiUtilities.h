@@ -215,6 +215,7 @@ void uiUtilityDrawDMRMicLevelBarGraph(void);
 void setOverrideTGorPC(uint32_t tgOrPc, bool privateCall);
 void uiUtilityDisplayFrequency(uint8_t y, bool isTX, bool hasFocus, uint32_t frequency, bool displayVFOChannel, bool isScanMode, uint8_t dualWatchVFO);
 
+
 uint16_t cssGetToneFromIndex(uint8_t index, CodeplugCSSTypes_t type);
 uint8_t cssGetToneIndex(uint16_t tone, CodeplugCSSTypes_t type);
 void cssIncrement(uint16_t *tone, uint8_t *index, uint8_t step, CodeplugCSSTypes_t *type, bool loop, bool stayInCSSType);

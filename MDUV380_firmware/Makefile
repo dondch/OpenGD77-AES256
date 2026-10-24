@@ -72,6 +72,14 @@ ifeq ($(ENABLE_FAST_SCAN),1)
 DEFS += -DENABLE_FAST_SCAN
 endif
 
+# Dual screen (two rows, A and B, each a VFO or a zone channel, like the Anytone radios), the
+# row watch, and the Dual Watch options menu (home side, speed, stay, channel as side B).
+# Ported from erenbozaci/md-uv390-firmware (Eren TA3BZC). A user-facing feature flag; a build
+# without it stays stock.
+ifeq ($(ENABLE_DUAL_SCREEN),1)
+DEFS += -DENABLE_DUAL_SCREEN
+endif
+
 CFLAGS  = $(CPU) $(DEFS) $(INCS) -Os -g3 -ffunction-sections -fdata-sections -Wall -MMD -MP
 LDSCRIPT = STM32F405VGTX_FLASH.ld
 LDFLAGS = $(CPU) -T$(LDSCRIPT) --specs=nano.specs -Wl,--gc-sections -Wl,-Map=$(BUILD)/$(TARGET).map -lc -lm -lnosys
