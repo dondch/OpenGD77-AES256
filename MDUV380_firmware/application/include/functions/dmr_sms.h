@@ -76,6 +76,8 @@ void dmrSmsRxReset(void);
  *   [4]=blk CRC-bad, [5]=PDUs reassembled, [6]=messages decoded. */
 void dmrSmsRxDiagBurst(int rxDataType, int crcOk);
 void dmrSmsRxDiag(uint32_t out[7]);
+/* Zero the counters and trace, and forget the last stored message (the retransmission filter)
+ * and any kept copy, so the same capture can be replayed without a reboot. */
 void dmrSmsRxDiagReset(void);
 /* Dump the last reassembled (still-encrypted) PDU + metadata for offline analysis:
  * out = [pduLen_hi, pduLen_lo, keyId, expBlocks, peer(4 LE), rawPdu...]. Returns length. */

@@ -819,6 +819,10 @@ void dmrSmsRxDiagReset(void)
 	s_diagLastPduLen = 0;
 	memset(s_trace, 0, sizeof s_trace);
 	s_traceW = 0;
+	/* Bench use (USB 0x94): also forget the last stored message and any kept copy, so a replay
+	 * of the same capture is received as if for the first time without a reboot. */
+	s_lastRxValid = 0;
+	s_altCount = 0;
 }
 
 void dmrSmsRxDiag(uint32_t out[7])
@@ -833,6 +837,7 @@ static void rxAccumReset(void)
 {
 	s_rxHaveHeader = 0; s_rxHaveEnc = 0; s_rxExpBlocks = 0; s_rxCount = 0;
 	s_rxConfirmed = 0; s_rxBlkLen = BLK_R12_LEN;
+	s_rxKeyId = 0;   /* CCM is not zeroed at boot: a cleartext PDU must not report a stale key id */
 }
 
 /* Terminator / call end: keep an incomplete copy's blocks for a merge with its retransmission
@@ -942,6 +947,7 @@ void dmrSmsRxBurst(int rxDataType, const uint8_t *p)
 			s_rxCount = 0;
 			s_rxHaveHeader = 1;
 			s_rxHaveEnc = 0;
+			s_rxKeyId = 0;              /* set by this packet's ENC header, if one follows */
 			/* a different packet: the kept copy cannot be a retransmission of this one */
 			if (s_altCount && ((s_rxSrc != s_altSrc) || (s_rxDst != s_altDst) ||
 					((uint8_t)((s_rxConfirmed ? DPF_CONFIRMED : DPF_UNCONFIRMED) | (s_rxGroup ? 0x80 : 0)) != s_altHdr)))
