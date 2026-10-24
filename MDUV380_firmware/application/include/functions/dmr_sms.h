@@ -69,6 +69,13 @@ void dmrSmsDeleteAll(int outgoing);     /* outgoing<0 -> both folders */
 void dmrSmsRxBurst(int rxDataType, const uint8_t *payload12);
 /* Drop any partial RX accumulation (call on Terminator / call end). */
 void dmrSmsRxReset(void);
+/* The acknowledgement a confirmed private SMS asks for: when such a PDU addressed to us has
+ * just completed, fills out[12] with the Response PDU data header (DPF 1, ACK, status = the
+ * acked N(S)) and returns 1, else 0. ISR context, called by the HR-C6000 right after the
+ * burst that completed the packet so the header goes out in the very next timeslot, which
+ * is when a stock radio sends it (bench: 0 to 1 ms after the sender's last burst, no CSBK
+ * preamble). Taken once. */
+int  dmrSmsAckTake(uint8_t out[12]);
 
 /* Diagnostic (bench bring-up). dmrSmsRxDiagBurst() is called for EVERY data-sync-class
  * burst the chip delivers (any type, any CRC). dmrSmsRxDiag() fills out[7]:
