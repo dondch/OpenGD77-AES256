@@ -63,6 +63,18 @@ void radioSetBandwidth(bool Is25K);
 void radioSetRssiCount(uint8_t count);
 void radioSetRssiCountDefault(void);
 #endif
+#if defined(ENABLE_FAST_SCAN)
+/* Bare retune for the VFO sweep: the two channel-word registers and the RX off/on bracket
+ * that latches them, 4 I2C writes (~0.6 ms). radioSetFrequency() also rewrites the
+ * frequency mode and squelch-threshold registers, re-selects the LNA and recomputes the
+ * calibration, and the trxSetFrequency() path around it reaches it TWICE (once directly,
+ * once via trxActivateRx()), so a sweep sample paid two receiver restarts and ~2.2 ms of
+ * bus traffic to move the PLL by 12.5 kHz. None of that changes between samples inside
+ * one band. The caller guarantees the band: it must have gone through trxSetFrequency()
+ * once for this band, and it must invalidate trx.c's cached frequency before the next
+ * trxSetFrequency(), since this moves the PLL behind its back. */
+void radioSweepRetune(uint32_t freq);
+#endif
 void radioSetCalibration(void);
 void radioSetIF(int band, bool wide);
 void radioSetMode(int mode);

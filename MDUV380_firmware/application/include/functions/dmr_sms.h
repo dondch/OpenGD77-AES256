@@ -61,12 +61,21 @@ void dmrSmsDeleteAll(int outgoing);     /* outgoing<0 -> both folders */
 
 /* ---- RX (HR-C6000 ISR context) ----------------------------------------- *
  * Called for each CRC-valid data-sync burst: rxDataType is the ETSI slot data type
- * (6 = Data Header, 7 = Rate-1/2 Data), payload12 = the 12 BPTC-decoded info bytes
- * read from HR-C6000 page 0x02. Accumulates a PDU; on completion raises a flag the
- * main loop drains in dmrSmsRxTick(). Cheap + ISR-safe (no flash, no AES here). */
+ * (6 = Data Header, 7 = Rate-1/2 Data, 8 = Rate-3/4 Data), payload = the decoded info
+ * bytes read from HR-C6000 page 0x02 (12 for types 6 and 7, 18 for type 8). Accumulates
+ * a PDU; on completion raises a flag the main loop drains in dmrSmsRxTick(). Cheap +
+ * ISR-safe (no flash, no AES here). A stock TYT sends a private SMS in rate-3/4
+ * confirmed blocks and a group SMS in rate-1/2 unconfirmed ones. */
 void dmrSmsRxBurst(int rxDataType, const uint8_t *payload12);
 /* Drop any partial RX accumulation (call on Terminator / call end). */
 void dmrSmsRxReset(void);
+/* The acknowledgement a confirmed private SMS asks for: when such a PDU addressed to us has
+ * just completed, fills out[12] with the Response PDU data header (DPF 1, ACK, status = the
+ * acked N(S)) and returns 1, else 0. ISR context, called by the HR-C6000 right after the
+ * burst that completed the packet so the header goes out in the very next timeslot, which
+ * is when a stock radio sends it (bench: 0 to 1 ms after the sender's last burst, no CSBK
+ * preamble). Taken once. */
+int  dmrSmsAckTake(uint8_t out[12]);
 
 /* Diagnostic (bench bring-up). dmrSmsRxDiagBurst() is called for EVERY data-sync-class
  * burst the chip delivers (any type, any CRC). dmrSmsRxDiag() fills out[7]:
@@ -74,10 +83,16 @@ void dmrSmsRxReset(void);
  *   [4]=blk CRC-bad, [5]=PDUs reassembled, [6]=messages decoded. */
 void dmrSmsRxDiagBurst(int rxDataType, int crcOk);
 void dmrSmsRxDiag(uint32_t out[7]);
+/* Zero the counters and trace, and forget the last stored message (the retransmission filter)
+ * and any kept copy, so the same capture can be replayed without a reboot. */
 void dmrSmsRxDiagReset(void);
 /* Dump the last reassembled (still-encrypted) PDU + metadata for offline analysis:
  * out = [pduLen_hi, pduLen_lo, keyId, expBlocks, peer(4 LE), rawPdu...]. Returns length. */
 int  dmrSmsRxLastPdu(uint8_t *out, int maxlen);
+/* Per-burst trace of the last 8 bursts handed to dmrSmsRxBurst(): out = [writeIndex, then
+ * 8 x (type, state, payload[0..3])], state = blocks held before the burst (bits 0..5) |
+ * haveHeader << 6 | pduReady << 7. Returns bytes written (49), 0 if maxlen is short. */
+int  dmrSmsRxTrace(uint8_t *out, int maxlen);
 
 /* ---- RX (main-loop context) -------------------------------------------- *
  * Decrypt a completed PDU, store it to the Inbox, and pop a notification. Safe to

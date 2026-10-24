@@ -7,6 +7,8 @@
  * our TX): AES-256-ECB over an IPv4/UDP/TMS plaintext (each 16-byte block independent, no IV),
  * carried in an Unconfirmed data PDU with a Motorola ENC extended header (ALG05 AES256). This
  * is the C port of tools/dmr_enc_sms.py (TX) and the inverse for RX, reusing crypto/dmr_aes.c.
+ * RX also reads the stock radio's other, "DMR format" text (no IP/UDP, see tytTextDecode) and
+ * the network's Defined / Raw Short Data; TX is the IP/UDP/TMS format only.
  */
 #include "functions/dmr_sms.h"
 
@@ -20,11 +22,33 @@
 #include "crypto/dmr_aes.h"
 #include "crypto/dmr_aes_hook.h"
 #include "user_interface/menuSystem.h"   /* uiNotificationShow + NOTIFICATION_* */
+#include <stdio.h>
 #include <string.h>
 
 /* ETSI slot data types as reported in HR-C6000 reg 0x51 [7:4]. */
 #define DT_DATA_HEADER   6
 #define DT_RATE12_DATA   7
+#define DT_RATE34_DATA   8
+/* Data header DPF (byte 0 low nibble, ETSI TS 102 361-1 9.2). */
+#define DPF_UNCONFIRMED  0x02
+#define DPF_CONFIRMED    0x03
+#define DPF_PROPRIETARY  0x0F
+#define DPF_DEFINED_SHORT 0x0D   /* Defined Short Data: the text itself in the blocks, DD format in the header */
+#define DPF_RAW_SHORT     0x0E   /* Raw Short Data: same block layout, no format given (8-bit assumed) */
+/* Block payloads (ETSI TS 102 361-1 9.2.7/9.2.8). Unconfirmed: the whole block is payload,
+ * 12 bytes at rate 1/2, 18 at rate 3/4. Confirmed: the block leads with a 2-byte
+ * DBSN(7)+CRC-9 field, leaving 10 / 16 payload bytes. The packet CRC32 (and the ECB
+ * ciphertext) runs over the concatenated payloads only.
+ *
+ * The July 2026 stock recon captures (RADIO2 <-> RADIO3, documented on the bench in
+ * NEXT_SESSION_MSG_FORMATS.md "CONFIRMED DATA DECODED") show a stock TYT PRIVATE SMS as
+ * "Indiv - Confirmed Delivery - Response Requested" in RATE-3/4 confirmed blocks, and the
+ * group SMS as rate-1/2 unconfirmed. So rate 3/4 is the one that matters for a private
+ * message from a stock radio; rate-1/2 confirmed is handled for completeness. */
+#define BLK_MAX_LEN          18
+#define BLK_R12_LEN          12
+#define BLK_R34_LEN          18
+#define BLK_CONFIRMED_OFF    2
 /* Burst slot-type bytes we write on TX (page 0x04 reg 0x50: type<<4). */
 #define DTB_CSBK         0x30
 #define DTB_DATA_HEADER  0x60
@@ -695,15 +719,133 @@ static volatile uint8_t  s_rxGroup DMR_AES_CCM;
 static volatile uint8_t  s_rxKeyId DMR_AES_CCM;
 static volatile uint32_t s_rxSrc DMR_AES_CCM;
 static volatile uint32_t s_rxDst DMR_AES_CCM;
-static uint8_t  s_rxBlocks[32][12] DMR_AES_CCM;
+static volatile uint8_t  s_rxConfirmed DMR_AES_CCM;   /* header DPF 3: blocks carry the DBSN/CRC-9 field */
+static volatile uint8_t  s_rxBlkLen DMR_AES_CCM;      /* payload bytes per block of this PDU (set by its blocks) */
+static uint8_t  s_rxBlocks[32][BLK_MAX_LEN] DMR_AES_CCM;
 /* hand-off to main loop */
 static volatile uint8_t  s_rxReady DMR_AES_CCM;       /* a complete PDU is waiting */
 static uint8_t  s_rxPdu[384] DMR_AES_CCM;
 static volatile uint16_t s_rxPduLen DMR_AES_CCM;
 static volatile uint32_t s_rxPeer DMR_AES_CCM;
+static volatile uint32_t s_rxPeerDst DMR_AES_CCM;     /* destination (our ID, or a talkgroup) */
 static volatile uint8_t  s_rxPeerGroup DMR_AES_CCM;
 static volatile uint8_t  s_rxPeerKeyId DMR_AES_CCM;
 static volatile uint8_t  s_rxPeerEnc DMR_AES_CCM;   /* 1 = PDU carried the ENC header (decrypt); 0 = cleartext */
+/* Retransmission filter: a stock radio sends a confirmed (private) SMS again when it gets no
+ * ACK (we don't send one), with the same IP id and TMS sequence. Remember the last stored
+ * message's identity so the repeats don't pile up in the Inbox. */
+static uint32_t s_lastRxPeer DMR_AES_CCM;
+static uint16_t s_lastRxIpId DMR_AES_CCM;
+static uint8_t  s_lastRxTmsSeq DMR_AES_CCM;
+static uint8_t  s_lastRxValid DMR_AES_CCM;
+/* A stock radio that still gets no ACK after its link-layer repeats sends the message once
+ * more from the TMS layer, with a new IP identification and TMS sequence (bench r3: N(S) 3,3,3
+ * with 000A/92, then N(S) 4,4 with 000B/93, one user send). Those repeats are caught by the
+ * newest Inbox message: same sender, same text, within DMR_SMS_DUP_WINDOW_MS of storing it.
+ * The cost is that the same text sent twice on purpose inside that window shows once. Main
+ * RAM (CCM is full in the DMR_DATA build). */
+#define DMR_SMS_DUP_WINDOW_MS  60000u
+static uint32_t s_lastRxMs;
+/* Retransmission repair. The HR-C6000's CRC flag on a rate-3/4 block does not cover the
+ * per-block CRC-9, so a block with bit errors reaches us as "valid" and poisons the packet
+ * CRC32; the bench r3 replay (five copies of one stock private SMS) completed nothing although
+ * two of the copies between them carried every block intact. When a copy ends (Terminator)
+ * without completing, its blocks are kept in s_rxPdu (free while no PDU waits for the main
+ * loop); when the next copy of the same packet (same source, destination, header type, block
+ * count and rate) fails too, the block-wise combinations of the two are tried and the CRC32
+ * decides. The CRC-9 itself could not be reproduced from the captures. Main RAM: zero at boot. */
+static uint8_t  s_altCount;        /* blocks kept from the last failed copy (0 = none) */
+static uint8_t  s_altBlkLen;
+static uint8_t  s_altHdr;          /* identity of the kept copy: DPF | group bit ...        */
+static uint8_t  s_altEnc;          /* ... ENC header seen ...                               */
+static uint32_t s_altSrc;          /* ... source ...                                        */
+static uint32_t s_altDst;          /* ... and destination of its data header               */
+#define ALT_MAX_DIFF_BLOCKS  4     /* at most 2^4 - 2 = 14 CRC32 passes in the ISR          */
+/* Acknowledgement of a confirmed private SMS (ETSI TS 102 361-1 Response packet). A stock
+ * radio that sends with "response requested" (header byte 0 bit 6, DPF 3) repeats the whole
+ * PDU up to three times and then once more from the TMS layer when no acknowledgement comes
+ * (bench r3: five copies of one "Hello"). The stock receiver answers in the timeslot right
+ * after the last block, one burst, no CSBK preamble:
+ *   01 40 dst(3) src(3) 00 (08 | N(S)) crc(2)
+ * DPF 1, SAP 4, no blocks to follow, class 0 / type 1 (ACK) / status = the N(S) of the packet
+ * being acknowledged, header CRC masked 0xCCCC like a data header. Built here the moment the
+ * packet completes (ISR) and handed to the HR-C6000 through dmrSmsAckTake(). Main RAM. */
+static volatile uint8_t s_rxHdrA;      /* header byte 0 bit 6: response requested */
+static volatile uint8_t s_rxHdrSeq;    /* header byte 9: S | N(S) | FSN */
+static uint8_t          s_ackHdr[12];
+static volatile uint8_t s_ackReady;
+/* Defined / Raw Short Data (ETSI TS 102 361-1 DD_HEAD, R_HEAD): how a network delivers an SMS
+ * through a repeater or hotspot (BrandMeister, MOTOTRBO gateways). The header carries the
+ * appended block count in byte 0 bits 4..5 + byte 1 bits 0..3, SAP 0xA, the DD format in byte
+ * 8 bits 2..7 and the bit padding in byte 9; the blocks carry the text itself, no IP/UDP, and
+ * end with the packet CRC32 like any data PDU, so the CRC-driven reassembly is unchanged.
+ * Text formats seen on air: UTF-16BE (0x14, also 0x13), UTF-16LE (0x15), 8-bit (0x03 8859-1,
+ * 0x12 UTF-8 taken as ASCII). Main RAM. */
+static volatile uint8_t s_rxDefined;       /* this PDU is short data */
+static volatile uint8_t s_rxDdFormat;      /* its DD format (0 for raw) */
+static volatile uint8_t s_rxBitPad;        /* bits of padding before the CRC */
+static volatile uint8_t s_rxPeerDefined;   /* hand-off copies for the main loop */
+static volatile uint8_t s_rxPeerDdFormat;
+static volatile uint8_t s_rxPeerBitPad;
+/* Padding octet count of an Unconfirmed / Confirmed data header (byte 0 bits 4..5, byte 1
+ * bits 0..3): the zero bytes between the payload and the CRC32. The IP format carries its own
+ * length and never needed it; the stock radio's DMR format (below) has none. Main RAM. */
+static volatile uint8_t s_rxPoc;
+static volatile uint8_t s_rxPeerPoc;
+/* The format of the last stored message, for the duplicate rule: its IP identification and
+ * TMS sequence mean nothing against a message in another format. */
+#define RX_FMT_IP     0
+#define RX_FMT_SHORT  1
+#define RX_FMT_TYT    2
+static uint8_t s_lastRxFmt;
+
+/* The stock TYT's "DMR format" text message (the CPS channel option next to the Motorola
+ * IP/UDP/TMS format; RADIO3's "PD-UE" channel on the bench, 2026-10-24). No IP/UDP: a
+ * 5-byte prefix
+ *   [message sequence, +1 per message]  00  [00 private | 02 group]  01  01
+ * then the text in UTF-16BE, the header's padding octets of zeros, the packet CRC32. A
+ * private message went as ONE Confirmed rate-3/4 block, 16 payload bytes ("gm" = 03 00 00
+ * 01 01 00 67 00 6D 00 00 00 + CRC 95 BF FE 7A, POC 3; "gt" = 04 ... BE 13 AC 8D), a group
+ * message as two Unconfirmed rate-1/2 blocks ("gtw", POC 9, CRC 94 BA C0 6D); the three
+ * CRC32s verify with crc32_dmr. With encryption the whole 16-byte blocks of [prefix + text]
+ * are AES-256-ECB like the IP format, the rest clear, so a message of five characters or
+ * fewer (15 bytes) is sent in the clear under its ENC header (the bench's "<= 5 characters"
+ * finding). p = the (decrypted) PDU, len = its bytes before the padding and the CRC. The
+ * three constant bytes gate a wrong-key decrypt (2^-24 against random). */
+#define TYT_FMT_PREFIX  5
+static int ddTextDecode(const uint8_t *p, int len, uint8_t fmt, char *out, int outMax);
+static int tytTextDecode(const uint8_t *p, int len, char *out, int outMax)
+{
+	if ((len < TYT_FMT_PREFIX + 2) || (p[1] != 0x00) || (p[3] != 0x01) || (p[4] != 0x01)) { return -1; }
+	return ddTextDecode(p + TYT_FMT_PREFIX, len - TYT_FMT_PREFIX, 0x14, out, outMax);   /* 0x14 = UTF-16BE */
+}
+
+/* Text from a short data payload in its DD format. Returns the characters written (ASCII,
+ * others become '?'), 0 or less when nothing readable is in it. */
+static int ddTextDecode(const uint8_t *p, int len, uint8_t fmt, char *out, int outMax)
+{
+	int n = 0, printable = 0;
+	int wide = ((fmt == 0x13) || (fmt == 0x14) || (fmt == 0x15) || (fmt == 0x16) || (fmt == 0x17) || (fmt == 0x18));
+	int le = (fmt == 0x15) || (fmt == 0x18);
+	int step = ((fmt >= 0x16) && (fmt <= 0x18)) ? 4 : (wide ? 2 : 1);
+
+	if ((len <= 0) || (outMax <= 1)) { return -1; }
+	if ((fmt == 0x00) || (fmt == 0x01) || ((fmt >= 0x08) && (fmt <= 0x09))) { return -1; }   /* binary, BCD, manufacturer specific */
+	for (int i = 0; (i + step - 1) < len && n < outMax - 1; i += step)
+	{
+		uint32_t cp;
+		if (step == 1)      { cp = p[i]; }
+		else if (step == 2) { cp = le ? (uint32_t)(p[i] | (p[i + 1] << 8)) : (uint32_t)((p[i] << 8) | p[i + 1]); }
+		else                { cp = le ? ((uint32_t)p[i] | ((uint32_t)p[i + 1] << 8) | ((uint32_t)p[i + 2] << 16) | ((uint32_t)p[i + 3] << 24))
+		                               : (((uint32_t)p[i] << 24) | ((uint32_t)p[i + 1] << 16) | ((uint32_t)p[i + 2] << 8) | (uint32_t)p[i + 3]); }
+		if (cp == 0) { break; }
+		if ((cp == 0x0A) || (cp == 0x0D) || (cp == 0x09)) { out[n++] = ' '; continue; }
+		if ((cp >= 0x20) && (cp < 0x7F)) { out[n++] = (char)cp; printable++; }
+		else { out[n++] = '?'; }
+	}
+	out[n] = 0;
+	return (printable > 0) ? n : -1;
+}
 /* diagnostic counters (visible on the Messages home screen) to localise RX failures */
 static volatile uint32_t s_diagData   DMR_AES_CCM; /* ALL data-sync-class bursts the chip delivered */
 static volatile uint32_t s_diagHdrOk  DMR_AES_CCM; /* type-6 data-header, CRC OK   */
@@ -712,8 +854,19 @@ static volatile uint32_t s_diagBlkOk  DMR_AES_CCM; /* type-7 rate-1/2,   CRC OK 
 static volatile uint32_t s_diagBlkBad DMR_AES_CCM; /* type-7 rate-1/2,   CRC bad   */
 static volatile uint32_t s_diagPdu    DMR_AES_CCM; /* completed PDUs handed to main loop */
 static volatile uint32_t s_diagMsg    DMR_AES_CCM; /* successfully decrypted + stored    */
-/* snapshot of the last reassembled (encrypted) PDU, for offline inspection over USB */
-static uint8_t  s_diagLastPdu[120] DMR_AES_CCM;
+/* snapshot of the last reassembled (encrypted) PDU, for offline inspection over USB. 72 bytes
+ * covers any 4-block rate-3/4 PDU (64) or 6-block rate-1/2 PDU (72); the 48 bytes it gave up
+ * went to the burst trace below, CCM being full to the last word in the DMR_DATA build. */
+static uint8_t  s_diagLastPdu[72] DMR_AES_CCM;
+/* Per-burst trace: the last SMS_TRACE_N bursts handed to dmrSmsRxBurst, newest last by write
+ * index. Per entry: [type, state, payload bytes 0..3], state = count of blocks held BEFORE
+ * this burst (bits 0..5) | haveHeader << 6 | pduReady << 7. Appended to the 0x93 reply.
+ * Built to see why a PDU that passes every chip CRC still fails to complete: whether every
+ * burst of a copy arrives, in order, with the bytes DSD-FME shows for it. */
+#define SMS_TRACE_N   8
+#define SMS_TRACE_LEN 6
+static uint8_t  s_trace[SMS_TRACE_N][SMS_TRACE_LEN] DMR_AES_CCM;
+static uint8_t  s_traceW DMR_AES_CCM;
 static volatile uint16_t s_diagLastPduLen DMR_AES_CCM;
 static volatile uint8_t  s_diagLastKeyId DMR_AES_CCM;
 static volatile uint8_t  s_diagLastExp DMR_AES_CCM;
@@ -745,7 +898,7 @@ void dmrSmsRxDiagBurst(int rxDataType, int crcOk)
 {
 	s_diagData++;
 	if (rxDataType == DT_DATA_HEADER) { if (crcOk) s_diagHdrOk++; else s_diagHdrBad++; }
-	else if (rxDataType == DT_RATE12_DATA) { if (crcOk) s_diagBlkOk++; else s_diagBlkBad++; }
+	else if ((rxDataType == DT_RATE12_DATA) || (rxDataType == DT_RATE34_DATA)) { if (crcOk) s_diagBlkOk++; else s_diagBlkBad++; }
 }
 
 void dmrSmsRxDiagReset(void)
@@ -753,6 +906,12 @@ void dmrSmsRxDiagReset(void)
 	s_diagData = s_diagHdrOk = s_diagHdrBad = s_diagBlkOk = s_diagBlkBad = 0;
 	s_diagPdu = s_diagMsg = 0;
 	s_diagLastPduLen = 0;
+	memset(s_trace, 0, sizeof s_trace);
+	s_traceW = 0;
+	/* Bench use (USB 0x94): also forget the last stored message and any kept copy, so a replay
+	 * of the same capture is received as if for the first time without a reboot. */
+	s_lastRxValid = 0;
+	s_altCount = 0;
 }
 
 void dmrSmsRxDiag(uint32_t out[7])
@@ -763,76 +922,239 @@ void dmrSmsRxDiag(uint32_t out[7])
 	out[5] = s_diagPdu;   out[6] = s_diagMsg;
 }
 
-void dmrSmsRxReset(void)
+static void rxAccumReset(void)
 {
 	s_rxHaveHeader = 0; s_rxHaveEnc = 0; s_rxExpBlocks = 0; s_rxCount = 0;
+	s_rxConfirmed = 0; s_rxBlkLen = BLK_R12_LEN;
+	s_rxKeyId = 0;   /* CCM is not zeroed at boot: a cleartext PDU must not report a stale key id */
+	s_rxDefined = 0;
+	s_rxPoc = 0;
+}
+
+/* Terminator / call end: keep an incomplete copy's blocks for a merge with its retransmission
+ * (see s_altCount), then drop the accumulator. */
+void dmrSmsRxReset(void)
+{
+	int total = s_rxCount * s_rxBlkLen;
+	if (s_rxHaveHeader && (s_rxCount >= 2) && !s_rxReady && (total <= (int)sizeof s_rxPdu))
+	{
+		for (int i = 0; i < s_rxCount; i++)
+		{
+			memcpy(s_rxPdu + i * s_rxBlkLen, s_rxBlocks[i], s_rxBlkLen);
+		}
+		s_altCount = s_rxCount;
+		s_altBlkLen = s_rxBlkLen;
+		s_altHdr = (uint8_t)((s_rxConfirmed ? DPF_CONFIRMED : DPF_UNCONFIRMED) | (s_rxGroup ? 0x80 : 0));
+		s_altEnc = s_rxHaveEnc;
+		s_altSrc = s_rxSrc;
+		s_altDst = s_rxDst;
+	}
+	rxAccumReset();
+}
+
+/* Byte i of a candidate PDU: from the block just received (s_rxBlocks) when bit i/blkLen of
+ * newMask is set, else from the kept copy in s_rxPdu. */
+static inline uint8_t candByte(int i, uint32_t newMask, int blkLen)
+{
+	int b = i / blkLen;
+	return ((newMask >> b) & 1) ? s_rxBlocks[b][i - b * blkLen] : s_rxPdu[i];
+}
+
+/* crc32_dmr() over a candidate PDU assembled by candByte(), without copying it: the kept copy
+ * stays in s_rxPdu until a combination verifies. Returns 1 when the packet CRC32 matches. */
+static int candCrcOk(int total, uint32_t newMask, int blkLen)
+{
+	uint32_t crc = 0;
+	int nbits = total * 8 - 32;
+	int bitno = 0;
+	for (int i = 0; i + 1 < total; i += 2)
+	{
+		for (int pass = 0; pass < 2; pass++)
+		{
+			uint8_t byte = candByte((pass == 0) ? (i + 1) : i, newMask, blkLen);
+			for (int k = 7; k >= 0; k--)
+			{
+				if (bitno >= nbits) { goto done; }
+				int bit = (byte >> k) & 1;
+				if (((crc >> 31) & 1) ^ bit) { crc = (crc << 1) ^ 0x04C11DB7; }
+				else                         { crc = (crc << 1); }
+				bitno++;
+			}
+		}
+	}
+done:
+	crc = ((crc & 0xFF) << 24) | ((crc & 0xFF00) << 8) | ((crc >> 8) & 0xFF00) | ((crc >> 24) & 0xFF);
+	uint32_t want = ((uint32_t)candByte(total - 4, newMask, blkLen) << 24) | ((uint32_t)candByte(total - 3, newMask, blkLen) << 16) |
+			((uint32_t)candByte(total - 2, newMask, blkLen) << 8) | (uint32_t)candByte(total - 1, newMask, blkLen);
+	return crc == want;
+}
+
+/* Copy the trace out: [writeIndex, SMS_TRACE_N x SMS_TRACE_LEN bytes]. Returns bytes written. */
+int dmrSmsRxTrace(uint8_t *out, int maxlen)
+{
+	int n = 1 + (SMS_TRACE_N * SMS_TRACE_LEN);
+	if (maxlen < n) { return 0; }
+	out[0] = s_traceW;
+	memcpy(out + 1, s_trace, (size_t)(SMS_TRACE_N * SMS_TRACE_LEN));
+	return n;
+}
+
+int dmrSmsAckTake(uint8_t out[12])
+{
+	if (!s_ackReady) { return 0; }
+	memcpy(out, s_ackHdr, 12);
+	s_ackReady = 0;
+	return 1;
 }
 
 void dmrSmsRxBurst(int rxDataType, const uint8_t *p)
 {
+	{
+		uint8_t *t = s_trace[s_traceW % SMS_TRACE_N];
+		t[0] = (uint8_t)rxDataType;
+		t[1] = (uint8_t)((s_rxCount & 0x3F) | (s_rxHaveHeader ? 0x40 : 0) | (s_rxReady ? 0x80 : 0));
+		t[2] = p[0]; t[3] = p[1]; t[4] = p[2]; t[5] = p[3];
+		s_traceW++;
+	}
+
 	if (rxDataType == DT_DATA_HEADER)
 	{
-		if (p[0] == 0x4F && p[1] == 0x10 && (p[2] & 0x3F) == (0x51 & 0x3F))
+		uint8_t dpf = (uint8_t)(p[0] & 0x0F);
+		if ((dpf == DPF_PROPRIETARY) && (p[1] == 0x10) && ((p[2] & 0x3F) == (0x51 & 0x3F)))
 		{
-			/* Motorola ENC extended header: ALG/key/MI. It immediately precedes this
-			 * message's data blocks, so restart block accumulation here — this prevents
-			 * mixing leftover blocks from a previous (missed-terminator) retransmit. */
+			/* Motorola ENC extended header (proprietary DPF, MFID 0x10, ALG05 AES256; byte 0 may
+			 * carry the group bit): ALG/key/MI. It immediately precedes this message's data
+			 * blocks, so restart block accumulation here — this prevents mixing leftover blocks
+			 * from a previous (missed-terminator) retransmit. */
 			s_rxKeyId = p[3];
 			s_rxHaveEnc = 1;
 			s_rxCount = 0;
 		}
 		else
 		{
-			/* Unconfirmed/UDT data header: start a fresh PDU */
+			/* Unconfirmed / Confirmed / UDT data header: start a fresh PDU. A stock TYT sends a
+			 * group SMS as Unconfirmed delivery (12-byte blocks) and a PRIVATE SMS as Confirmed
+			 * delivery, whose rate-1/2 blocks carry a 2-byte serial-number + CRC-9 field before
+			 * 10 bytes of payload. The packet CRC32 (and the ciphertext) is over the payloads. */
 			s_rxGroup = (p[0] & 0x80) ? 1 : 0;
 			s_rxDst = ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 8) | p[4];
 			s_rxSrc = ((uint32_t)p[5] << 16) | ((uint32_t)p[6] << 8) | p[7];
 			uint8_t nblocks = (uint8_t)(p[8] & 0x7F);
 			s_rxExpBlocks = (uint8_t)((nblocks > 0) ? (nblocks - 1) : 0);  /* minus ENC header */
+			s_rxConfirmed = (dpf == DPF_CONFIRMED) ? 1 : 0;
+			s_rxBlkLen = BLK_R12_LEN;   /* the blocks say which rate they are; see below */
 			s_rxCount = 0;
 			s_rxHaveHeader = 1;
 			s_rxHaveEnc = 0;
+			s_rxKeyId = 0;              /* set by this packet's ENC header, if one follows */
+			s_rxHdrA = (p[0] & 0x40) ? 1 : 0;
+			s_rxHdrSeq = p[9];
+			s_rxDefined = ((dpf == DPF_DEFINED_SHORT) || (dpf == DPF_RAW_SHORT)) ? 1 : 0;
+			s_rxDdFormat = (dpf == DPF_DEFINED_SHORT) ? (uint8_t)(p[8] >> 2) : 0x03;
+			s_rxBitPad = s_rxDefined ? p[9] : 0;
+			s_rxPoc = s_rxDefined ? 0 : (uint8_t)((((p[0] >> 4) & 0x03) << 4) | (p[1] & 0x0F));
+			/* a different packet: the kept copy cannot be a retransmission of this one */
+			if (s_altCount && ((s_rxSrc != s_altSrc) || (s_rxDst != s_altDst) ||
+					((uint8_t)((s_rxConfirmed ? DPF_CONFIRMED : DPF_UNCONFIRMED) | (s_rxGroup ? 0x80 : 0)) != s_altHdr)))
+			{
+				s_altCount = 0;
+			}
 		}
 		return;
 	}
 
-	if (rxDataType == DT_RATE12_DATA)
+	if ((rxDataType == DT_RATE12_DATA) || (rxDataType == DT_RATE34_DATA))
 	{
+		/* Payload geometry from the block's own rate and the header's DPF. A PDU is one
+		 * rate throughout, so the length taken at each block is the length used to
+		 * concatenate them all when the packet completes. p holds 12 (rate 1/2) or 18
+		 * (rate 3/4) info bytes. */
+		uint8_t raw = (rxDataType == DT_RATE34_DATA) ? BLK_R34_LEN : BLK_R12_LEN;
+		uint8_t off = s_rxConfirmed ? BLK_CONFIRMED_OFF : 0;
+
 		if (!s_rxHaveHeader || s_rxCount >= 32) { return; }
-		memcpy(s_rxBlocks[s_rxCount], p, 12);
+		s_rxBlkLen = (uint8_t)(raw - off);
+		memcpy(s_rxBlocks[s_rxCount], p + off, s_rxBlkLen);
 		s_rxCount++;
 
 		/* Complete when the accumulated blocks form a CRC32-valid data PDU. This is
 		 * self-terminating and does NOT trust the header's block count (which can be
 		 * stale when a header is missed) — block mixing or truncation simply won't
 		 * produce a valid CRC32, so only a correct, complete PDU is accepted.
-		 * Minimum is 2 blocks: a stock 1-char SMS is BLOCKS 05 = 4 rate-1/2 data blocks
-		 * (a hardcoded >=5 gate here silently dropped every short message — 5+ char msgs
-		 * have 5+ data blocks and worked, 1-char have 4 and never completed). CRC32 gates
-		 * correctness, so checking from 2 up is safe. Gate on s_rxHaveHeader (not s_rxHaveEnc)
-		 * so a CLEARTEXT SMS (no ENC header) also completes; the IPv4/UDP check in the tick
-		 * rejects non-SMS data PDUs, and s_rxHaveEnc is carried through to pick decrypt vs clear. */
-		if (s_rxHaveHeader && (s_rxCount >= 2) && !s_rxReady)
+		 * Checked from the FIRST block: a stock private SMS in the DMR format is one rate-3/4
+		 * block (16 bytes, CRC32 included; bench 2026-10-24), a stock 1-char IP-format SMS is
+		 * BLOCKS 05 = 4 rate-1/2 data blocks (a hardcoded >=5 gate here once dropped every
+		 * short message, then a >=2 gate every one-block message). CRC32 gates correctness,
+		 * so checking from 1 up is safe. Gate on s_rxHaveHeader (not s_rxHaveEnc)
+		 * so a CLEARTEXT SMS (no ENC header) also completes; the format checks in the tick
+		 * reject non-SMS data PDUs, and s_rxHaveEnc is carried through to pick decrypt vs clear. */
+		if (s_rxHaveHeader && (s_rxCount >= 1) && !s_rxReady)
 		{
-			int total = s_rxCount * 12;
+			int blkLen = s_rxBlkLen;
+			int total = s_rxCount * blkLen;
+			uint32_t mask = 0xFFFFFFFFu;   /* which blocks of the accepted PDU come from this copy */
 			if (total > (int)sizeof s_rxPdu) { return; }
-			for (int i = 0; i < s_rxCount; i++)
+			if (!candCrcOk(total, mask, blkLen))
 			{
-				memcpy(s_rxPdu + i * 12, s_rxBlocks[i], 12);
+				/* Not a complete/clean PDU yet. If a copy of this packet was kept (same
+				 * identity, now the same length) and this copy differs from it in a few
+				 * blocks, one of the other combinations of the two may be the packet;
+				 * the all-kept combination already failed when it was kept. */
+				uint32_t diff = 0;
+				int ndiff = 0;
+				if ((s_altCount != s_rxCount) || (s_altBlkLen != blkLen) || (s_altEnc != s_rxHaveEnc) ||
+						(s_altSrc != s_rxSrc) || (s_altDst != s_rxDst) ||
+						(s_altHdr != (uint8_t)((s_rxConfirmed ? DPF_CONFIRMED : DPF_UNCONFIRMED) | (s_rxGroup ? 0x80 : 0))))
+				{
+					return;   /* keep accumulating */
+				}
+				for (int b = 0; b < s_rxCount; b++)
+				{
+					if (memcmp(s_rxBlocks[b], s_rxPdu + b * blkLen, (size_t)blkLen) != 0) { diff |= 1u << b; ndiff++; }
+				}
+				if ((ndiff == 0) || (ndiff > ALT_MAX_DIFF_BLOCKS)) { return; }
+				mask = 0;
+				for (uint32_t sub = (diff - 1) & diff; sub != 0; sub = (sub - 1) & diff)
+				{
+					if (candCrcOk(total, sub, blkLen)) { mask = sub; break; }
+				}
+				if (mask == 0) { return; }
 			}
-			uint32_t want = ((uint32_t)s_rxPdu[total - 4] << 24) | ((uint32_t)s_rxPdu[total - 3] << 16) |
-					((uint32_t)s_rxPdu[total - 2] << 8) | (uint32_t)s_rxPdu[total - 1];
-			if (crc32_dmr(s_rxPdu, total) != want)
-			{
-				return;   /* not a complete/clean PDU yet — keep accumulating */
-			}
+			for (int i = 0; i < total; i++) { s_rxPdu[i] = candByte(i, mask, blkLen); }
+			s_altCount = 0;
 			s_rxPduLen = (uint16_t)total;
 			s_rxPeer = s_rxSrc;
+			s_rxPeerDst = s_rxDst;
 			s_rxPeerGroup = s_rxGroup;
 			s_rxPeerKeyId = s_rxKeyId;
 			s_rxPeerEnc = s_rxHaveEnc;   /* decrypt if the ENC header was seen, else read cleartext */
+			s_rxPeerDefined = s_rxDefined;
+			s_rxPeerDdFormat = s_rxDdFormat;
+			s_rxPeerBitPad = s_rxBitPad;
+			s_rxPeerPoc = s_rxPoc;
 			s_rxReady = 1;          /* main loop will decrypt (or read cleartext) + store */
 			s_diagPdu++;
+			/* Confirmed, individual, to us, response requested: acknowledge it, whatever the
+			 * main loop then makes of the text (a stock radio acknowledges at the link layer). */
+			if ((s_rxConfirmed || s_rxDefined) && !s_rxGroup && s_rxHdrA && (s_rxDst == trxDMRID))
+			{
+				/* status = N(S) of a confirmed packet; a short data header has no N(S) (byte 9 is padding) */
+				uint8_t ns = s_rxConfirmed ? (uint8_t)((s_rxHdrSeq >> 4) & 0x07) : 0;
+				s_ackHdr[0] = 0x01;                                   /* individual, no response wanted, DPF 1 */
+				s_ackHdr[1] = 0x40;                                   /* SAP 4 (IP based), no padding */
+				s_ackHdr[2] = (uint8_t)(s_rxSrc >> 16); s_ackHdr[3] = (uint8_t)(s_rxSrc >> 8); s_ackHdr[4] = (uint8_t)s_rxSrc;
+				s_ackHdr[5] = (uint8_t)(trxDMRID >> 16); s_ackHdr[6] = (uint8_t)(trxDMRID >> 8); s_ackHdr[7] = (uint8_t)trxDMRID;
+				s_ackHdr[8] = 0x00;                                   /* no blocks to follow */
+				s_ackHdr[9] = (uint8_t)(0x08 | ns);                   /* class 0, type ACK, status N(S) */
+				hdr_crc(s_ackHdr, 10, 0xCCCC, s_ackHdr + 10);
+				s_ackReady = 1;
+				{
+					uint8_t *t = s_trace[s_traceW % SMS_TRACE_N];   /* 0xA0 = ACK built, then N(S) and header bytes 8..11 */
+					t[0] = 0xA0; t[1] = ns;
+					t[2] = s_ackHdr[8]; t[3] = s_ackHdr[9]; t[4] = s_ackHdr[10]; t[5] = s_ackHdr[11];
+					s_traceW++;
+				}
+			}
 			/* snapshot raw (still-encrypted) PDU for USB inspection (clamped to the
 			 * snapshot buffer — the reported length must never exceed the bytes stored) */
 			s_diagLastPduLen = (uint16_t)((total > (int)sizeof s_diagLastPdu) ? (int)sizeof s_diagLastPdu : total);
@@ -840,7 +1162,7 @@ void dmrSmsRxBurst(int rxDataType, const uint8_t *p)
 			s_diagLastExp = s_rxExpBlocks;
 			s_diagLastPeer = s_rxSrc;
 			for (int i = 0; i < total && i < (int)sizeof s_diagLastPdu; i++) { s_diagLastPdu[i] = s_rxPdu[i]; }
-			dmrSmsRxReset();
+			rxAccumReset();
 		}
 	}
 }
@@ -855,14 +1177,27 @@ void dmrSmsRxTick(void)
 	uint8_t pdu[384];
 	int pduLen = s_rxPduLen;
 	uint32_t peer = s_rxPeer;
+	uint32_t dst = s_rxPeerDst;
 	uint8_t  group = s_rxPeerGroup;
 	uint8_t  keyId = s_rxPeerKeyId;
 	uint8_t  enc = s_rxPeerEnc;
+	uint8_t  defined = s_rxPeerDefined;
+	uint8_t  ddFormat = s_rxPeerDdFormat;
+	int      ddPad = (int)s_rxPeerBitPad / 8;
+	int      poc = s_rxPeerPoc;
+	uint8_t  fmt = RX_FMT_IP;
 	if (pduLen > (int)sizeof pdu) { pduLen = (int)sizeof pdu; }
 	memcpy(pdu, s_rxPdu, pduLen);
 	s_rxReady = 0;
 
-	if (pduLen < 32) { return; }            /* whole PDU is passed; decrypt derives the enc len */
+	/* An IP/UDP/TMS packet is at least 32 bytes (its decoders say so themselves); short data
+	 * and the stock DMR format can be a few bytes plus the CRC32. */
+	if (pduLen < 8) { return; }
+
+	/* Addressing: a private (individual) SMS is ours only when it is sent to our DMR ID (or
+	 * all-call). Everything else on the channel is somebody else's conversation. Group messages
+	 * are accepted for any talkgroup, like the voice path with the TG filter off. */
+	if (!group && (dst != trxDMRID) && (dst != 0xFFFFFFu)) { return; }
 
 	/* Validate the data-PDU CRC32 over [ct+pad] before trusting the bytes. This rejects
 	 * reassemblies that mixed blocks across retransmits (a missed burst/header) — without it
@@ -874,28 +1209,100 @@ void dmrSmsRxTick(void)
 	}
 
 	char text[DMR_SMS_TEXT_MAX + 1];
+	uint8_t tmp[384];
+	const uint8_t *pt = NULL;   /* the plaintext IPv4/UDP/TMS packet, once decoded */
 	int got = -1;
 
-	if (enc)
+	/* Short data: the blocks are the text, in the header's format, minus the padding and the CRC. */
+	if (defined)
 	{
-		/* Encrypted: try the signalled key id first, then every loaded key (decrypt is
-		 * destructive, so each attempt works on a fresh copy of the ciphertext). */
-		uint8_t tmp[384];
-		for (int attempt = 0; attempt <= DMR_AES_MAX_KEYS && got < 0; attempt++)
+		int len = pduLen - 4 - ddPad;
+		got = ddTextDecode(pdu, len, ddFormat, text, sizeof text);
+		if (got > 0) { pt = pdu; fmt = RX_FMT_SHORT; }
+	}
+
+	/* The ENC header decides the first attempt, but either way is tried: the ENC header burst
+	 * can fail its CRC and never reach us (the blocks still decrypt under our keys), and a
+	 * cleartext PDU never passes the IPv4/UDP check through a decrypt, nor ciphertext without one. */
+	for (int pass = 0; (pass < 2) && (got <= 0) && !defined; pass++)
+	{
+		int tryDecrypt = (pass == 0) ? (enc != 0) : (enc == 0);
+		if (tryDecrypt)
 		{
-			uint8_t k = (attempt == 0) ? keyId : (uint8_t)attempt;
-			if (k == 0 || k >= DMR_AES_MAX_KEYS) { continue; }
-			memcpy(tmp, pdu, pduLen);
-			int r = dmr_aes_sms_decrypt(k, tmp, pduLen, text, sizeof text);
-			if (r > 0) { got = r; }
+			/* Encrypted: try the signalled key id first, then every loaded key (decrypt is
+			 * destructive, so each attempt works on a fresh copy of the ciphertext). */
+			for (int attempt = 0; attempt <= DMR_AES_MAX_KEYS && got <= 0; attempt++)
+			{
+				uint8_t k = (attempt == 0) ? keyId : (uint8_t)attempt;
+				if (k == 0 || k >= DMR_AES_MAX_KEYS) { continue; }
+				memcpy(tmp, pdu, pduLen);
+				int r = dmr_aes_sms_decrypt(k, tmp, pduLen, text, sizeof text);
+				if (r > 0) { got = r; pt = tmp; }
+			}
+		}
+		else
+		{
+			/* Cleartext SMS: the reassembled PDU IS the plaintext IPv4/UDP/TMS packet. */
+			int r = dmr_sms_text_from_plaintext(pdu, pduLen, text, sizeof text);
+			if (r > 0) { got = r; pt = pdu; }
 		}
 	}
-	else
+
+	/* Not IP: the stock radio's DMR format (tytTextDecode), in the clear or under a key, the
+	 * ENC header deciding which is tried first as above. Only the whole 16-byte blocks of
+	 * [prefix + text] are ciphertext; a short message has none and reads the same either way. */
+	for (int pass = 0; (pass < 2) && (got <= 0) && !defined; pass++)
 	{
-		/* Cleartext SMS: the reassembled PDU IS the plaintext IPv4/UDP/TMS packet. */
-		got = dmr_sms_text_from_plaintext(pdu, pduLen, text, sizeof text);
+		int tryDecrypt = (pass == 0) ? (enc != 0) : (enc == 0);
+		int len = pduLen - 4 - poc;
+		if (len < TYT_FMT_PREFIX + 2) { break; }
+		if (tryDecrypt)
+		{
+			for (int attempt = 0; attempt <= DMR_AES_MAX_KEYS && got <= 0; attempt++)
+			{
+				uint8_t k = (attempt == 0) ? keyId : (uint8_t)attempt;
+				const uint8_t *key = ((k != 0) && (k < DMR_AES_MAX_KEYS)) ? dmr_aes_key_ptr(k) : NULL;
+				if (key == NULL) { continue; }
+				memcpy(tmp, pdu, pduLen);
+				dmr_sms_ecb_decrypt(tmp, (len / 16) * 16, key);
+				int r = tytTextDecode(tmp, len, text, sizeof text);
+				if (r > 0) { got = r; pt = tmp; fmt = RX_FMT_TYT; }
+			}
+		}
+		else
+		{
+			int r = tytTextDecode(pdu, len, text, sizeof text);
+			if (r > 0) { got = r; pt = pdu; fmt = RX_FMT_TYT; }
+		}
 	}
-	if (got <= 0) { return; }   /* wrong/no key, not IPv4/UDP, or not an SMS */
+	if (got <= 0 || pt == NULL) { return; }   /* wrong/no key, not IPv4/UDP, or not an SMS */
+
+	/* Duplicate of the message we just stored (an unacknowledged confirmed-delivery retry):
+	 * same sender, same format, same IPv4 identification and TMS sequence byte (the DMR format
+	 * has a message sequence byte instead, which its link-layer repeats carry unchanged). */
+	{
+		/* short data has no IP id / TMS sequence; its repeats are caught by the text window below */
+		uint16_t ipId = (fmt == RX_FMT_IP) ? (uint16_t)(((uint16_t)pt[4] << 8) | pt[5]) : 0;
+		uint8_t  tmsSeq = (fmt == RX_FMT_IP) ? pt[32] : ((fmt == RX_FMT_TYT) ? pt[0] : 0);
+		uint32_t now = ticksGetMillis();
+		if ((fmt != RX_FMT_SHORT) && s_lastRxValid && (peer == s_lastRxPeer) && (fmt == s_lastRxFmt) &&
+				(ipId == s_lastRxIpId) && (tmsSeq == s_lastRxTmsSeq))
+		{
+			return;
+		}
+		/* ... or the sender's TMS-layer repeat of the message we stored a moment ago */
+		if (s_lastRxValid && ((uint32_t)(now - s_lastRxMs) < DMR_SMS_DUP_WINDOW_MS))
+		{
+			const dmrSmsMessage_t *last = dmrSmsGet(0, 0);
+			if (last && (last->peerId == peer) && (last->textLen == got) && (memcmp(last->text, text, (size_t)got) == 0))
+			{
+				s_lastRxIpId = ipId; s_lastRxTmsSeq = tmsSeq; s_lastRxFmt = fmt;   /* its own link-layer repeats, too */
+				return;
+			}
+		}
+		s_lastRxPeer = peer; s_lastRxIpId = ipId; s_lastRxTmsSeq = tmsSeq; s_lastRxFmt = fmt; s_lastRxValid = 1;
+		s_lastRxMs = now;
+	}
 
 	store_add(DMR_SMS_FLAG_UNREAD | (group ? DMR_SMS_FLAG_GROUP : 0), peer, text, got);
 	s_diagMsg++;
@@ -913,7 +1320,10 @@ static void runtimeReset(void)
 	s_diagData = s_diagHdrOk = s_diagHdrBad = s_diagBlkOk = s_diagBlkBad = 0;
 	s_diagPdu = s_diagMsg = 0;
 	s_rxReady = 0;                   /* don't process stray garbage as a PDU */
-	dmrSmsRxReset();                 /* clear the burst accumulator */
+	s_lastRxValid = 0;               /* no "previous message" to de-duplicate against */
+	s_altCount = 0;                  /* no kept copy to merge with (CCM is not zeroed at boot) */
+	s_ackReady = 0;
+	rxAccumReset();                  /* clear the burst accumulator */
 }
 
 #endif /* ENABLE_DMR_DATA && ENABLE_AES */
