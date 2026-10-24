@@ -7,6 +7,8 @@
  * our TX): AES-256-ECB over an IPv4/UDP/TMS plaintext (each 16-byte block independent, no IV),
  * carried in an Unconfirmed data PDU with a Motorola ENC extended header (ALG05 AES256). This
  * is the C port of tools/dmr_enc_sms.py (TX) and the inverse for RX, reusing crypto/dmr_aes.c.
+ * RX also reads the stock radio's other, "DMR format" text (no IP/UDP, see tytTextDecode) and
+ * the network's Defined / Raw Short Data; TX is the IP/UDP/TMS format only.
  */
 #include "functions/dmr_sms.h"
 
@@ -785,6 +787,38 @@ static volatile uint8_t s_rxBitPad;        /* bits of padding before the CRC */
 static volatile uint8_t s_rxPeerDefined;   /* hand-off copies for the main loop */
 static volatile uint8_t s_rxPeerDdFormat;
 static volatile uint8_t s_rxPeerBitPad;
+/* Padding octet count of an Unconfirmed / Confirmed data header (byte 0 bits 4..5, byte 1
+ * bits 0..3): the zero bytes between the payload and the CRC32. The IP format carries its own
+ * length and never needed it; the stock radio's DMR format (below) has none. Main RAM. */
+static volatile uint8_t s_rxPoc;
+static volatile uint8_t s_rxPeerPoc;
+/* The format of the last stored message, for the duplicate rule: its IP identification and
+ * TMS sequence mean nothing against a message in another format. */
+#define RX_FMT_IP     0
+#define RX_FMT_SHORT  1
+#define RX_FMT_TYT    2
+static uint8_t s_lastRxFmt;
+
+/* The stock TYT's "DMR format" text message (the CPS channel option next to the Motorola
+ * IP/UDP/TMS format; RADIO3's "PD-UE" channel on the bench, 2026-10-24). No IP/UDP: a
+ * 5-byte prefix
+ *   [message sequence, +1 per message]  00  [00 private | 02 group]  01  01
+ * then the text in UTF-16BE, the header's padding octets of zeros, the packet CRC32. A
+ * private message went as ONE Confirmed rate-3/4 block, 16 payload bytes ("gm" = 03 00 00
+ * 01 01 00 67 00 6D 00 00 00 + CRC 95 BF FE 7A, POC 3; "gt" = 04 ... BE 13 AC 8D), a group
+ * message as two Unconfirmed rate-1/2 blocks ("gtw", POC 9, CRC 94 BA C0 6D); the three
+ * CRC32s verify with crc32_dmr. With encryption the whole 16-byte blocks of [prefix + text]
+ * are AES-256-ECB like the IP format, the rest clear, so a message of five characters or
+ * fewer (15 bytes) is sent in the clear under its ENC header (the bench's "<= 5 characters"
+ * finding). p = the (decrypted) PDU, len = its bytes before the padding and the CRC. The
+ * three constant bytes gate a wrong-key decrypt (2^-24 against random). */
+#define TYT_FMT_PREFIX  5
+static int ddTextDecode(const uint8_t *p, int len, uint8_t fmt, char *out, int outMax);
+static int tytTextDecode(const uint8_t *p, int len, char *out, int outMax)
+{
+	if ((len < TYT_FMT_PREFIX + 2) || (p[1] != 0x00) || (p[3] != 0x01) || (p[4] != 0x01)) { return -1; }
+	return ddTextDecode(p + TYT_FMT_PREFIX, len - TYT_FMT_PREFIX, 0x14, out, outMax);   /* 0x14 = UTF-16BE */
+}
 
 /* Text from a short data payload in its DD format. Returns the characters written (ASCII,
  * others become '?'), 0 or less when nothing readable is in it. */
@@ -894,6 +928,7 @@ static void rxAccumReset(void)
 	s_rxConfirmed = 0; s_rxBlkLen = BLK_R12_LEN;
 	s_rxKeyId = 0;   /* CCM is not zeroed at boot: a cleartext PDU must not report a stale key id */
 	s_rxDefined = 0;
+	s_rxPoc = 0;
 }
 
 /* Terminator / call end: keep an incomplete copy's blocks for a merge with its retransmission
@@ -1017,6 +1052,7 @@ void dmrSmsRxBurst(int rxDataType, const uint8_t *p)
 			s_rxDefined = ((dpf == DPF_DEFINED_SHORT) || (dpf == DPF_RAW_SHORT)) ? 1 : 0;
 			s_rxDdFormat = (dpf == DPF_DEFINED_SHORT) ? (uint8_t)(p[8] >> 2) : 0x03;
 			s_rxBitPad = s_rxDefined ? p[9] : 0;
+			s_rxPoc = s_rxDefined ? 0 : (uint8_t)((((p[0] >> 4) & 0x03) << 4) | (p[1] & 0x0F));
 			/* a different packet: the kept copy cannot be a retransmission of this one */
 			if (s_altCount && ((s_rxSrc != s_altSrc) || (s_rxDst != s_altDst) ||
 					((uint8_t)((s_rxConfirmed ? DPF_CONFIRMED : DPF_UNCONFIRMED) | (s_rxGroup ? 0x80 : 0)) != s_altHdr)))
@@ -1045,13 +1081,14 @@ void dmrSmsRxBurst(int rxDataType, const uint8_t *p)
 		 * self-terminating and does NOT trust the header's block count (which can be
 		 * stale when a header is missed) — block mixing or truncation simply won't
 		 * produce a valid CRC32, so only a correct, complete PDU is accepted.
-		 * Minimum is 2 blocks: a stock 1-char SMS is BLOCKS 05 = 4 rate-1/2 data blocks
-		 * (a hardcoded >=5 gate here silently dropped every short message — 5+ char msgs
-		 * have 5+ data blocks and worked, 1-char have 4 and never completed). CRC32 gates
-		 * correctness, so checking from 2 up is safe. Gate on s_rxHaveHeader (not s_rxHaveEnc)
-		 * so a CLEARTEXT SMS (no ENC header) also completes; the IPv4/UDP check in the tick
-		 * rejects non-SMS data PDUs, and s_rxHaveEnc is carried through to pick decrypt vs clear. */
-		if (s_rxHaveHeader && (s_rxCount >= 2) && !s_rxReady)
+		 * Checked from the FIRST block: a stock private SMS in the DMR format is one rate-3/4
+		 * block (16 bytes, CRC32 included; bench 2026-10-24), a stock 1-char IP-format SMS is
+		 * BLOCKS 05 = 4 rate-1/2 data blocks (a hardcoded >=5 gate here once dropped every
+		 * short message, then a >=2 gate every one-block message). CRC32 gates correctness,
+		 * so checking from 1 up is safe. Gate on s_rxHaveHeader (not s_rxHaveEnc)
+		 * so a CLEARTEXT SMS (no ENC header) also completes; the format checks in the tick
+		 * reject non-SMS data PDUs, and s_rxHaveEnc is carried through to pick decrypt vs clear. */
+		if (s_rxHaveHeader && (s_rxCount >= 1) && !s_rxReady)
 		{
 			int blkLen = s_rxBlkLen;
 			int total = s_rxCount * blkLen;
@@ -1094,6 +1131,7 @@ void dmrSmsRxBurst(int rxDataType, const uint8_t *p)
 			s_rxPeerDefined = s_rxDefined;
 			s_rxPeerDdFormat = s_rxDdFormat;
 			s_rxPeerBitPad = s_rxBitPad;
+			s_rxPeerPoc = s_rxPoc;
 			s_rxReady = 1;          /* main loop will decrypt (or read cleartext) + store */
 			s_diagPdu++;
 			/* Confirmed, individual, to us, response requested: acknowledge it, whatever the
@@ -1146,11 +1184,14 @@ void dmrSmsRxTick(void)
 	uint8_t  defined = s_rxPeerDefined;
 	uint8_t  ddFormat = s_rxPeerDdFormat;
 	int      ddPad = (int)s_rxPeerBitPad / 8;
+	int      poc = s_rxPeerPoc;
+	uint8_t  fmt = RX_FMT_IP;
 	if (pduLen > (int)sizeof pdu) { pduLen = (int)sizeof pdu; }
 	memcpy(pdu, s_rxPdu, pduLen);
 	s_rxReady = 0;
 
-	if (!defined && (pduLen < 32)) { return; }   /* an IP/UDP/TMS packet is at least that; short data can be a few bytes */
+	/* An IP/UDP/TMS packet is at least 32 bytes (its decoders say so themselves); short data
+	 * and the stock DMR format can be a few bytes plus the CRC32. */
 	if (pduLen < 8) { return; }
 
 	/* Addressing: a private (individual) SMS is ours only when it is sent to our DMR ID (or
@@ -1177,7 +1218,7 @@ void dmrSmsRxTick(void)
 	{
 		int len = pduLen - 4 - ddPad;
 		got = ddTextDecode(pdu, len, ddFormat, text, sizeof text);
-		if (got > 0) { pt = pdu; }
+		if (got > 0) { pt = pdu; fmt = RX_FMT_SHORT; }
 	}
 
 	/* The ENC header decides the first attempt, but either way is tried: the ENC header burst
@@ -1206,16 +1247,46 @@ void dmrSmsRxTick(void)
 			if (r > 0) { got = r; pt = pdu; }
 		}
 	}
+
+	/* Not IP: the stock radio's DMR format (tytTextDecode), in the clear or under a key, the
+	 * ENC header deciding which is tried first as above. Only the whole 16-byte blocks of
+	 * [prefix + text] are ciphertext; a short message has none and reads the same either way. */
+	for (int pass = 0; (pass < 2) && (got <= 0) && !defined; pass++)
+	{
+		int tryDecrypt = (pass == 0) ? (enc != 0) : (enc == 0);
+		int len = pduLen - 4 - poc;
+		if (len < TYT_FMT_PREFIX + 2) { break; }
+		if (tryDecrypt)
+		{
+			for (int attempt = 0; attempt <= DMR_AES_MAX_KEYS && got <= 0; attempt++)
+			{
+				uint8_t k = (attempt == 0) ? keyId : (uint8_t)attempt;
+				const uint8_t *key = ((k != 0) && (k < DMR_AES_MAX_KEYS)) ? dmr_aes_key_ptr(k) : NULL;
+				if (key == NULL) { continue; }
+				memcpy(tmp, pdu, pduLen);
+				dmr_sms_ecb_decrypt(tmp, (len / 16) * 16, key);
+				int r = tytTextDecode(tmp, len, text, sizeof text);
+				if (r > 0) { got = r; pt = tmp; fmt = RX_FMT_TYT; }
+			}
+		}
+		else
+		{
+			int r = tytTextDecode(pdu, len, text, sizeof text);
+			if (r > 0) { got = r; pt = pdu; fmt = RX_FMT_TYT; }
+		}
+	}
 	if (got <= 0 || pt == NULL) { return; }   /* wrong/no key, not IPv4/UDP, or not an SMS */
 
 	/* Duplicate of the message we just stored (an unacknowledged confirmed-delivery retry):
-	 * same sender, same IPv4 identification, same TMS sequence byte. */
+	 * same sender, same format, same IPv4 identification and TMS sequence byte (the DMR format
+	 * has a message sequence byte instead, which its link-layer repeats carry unchanged). */
 	{
 		/* short data has no IP id / TMS sequence; its repeats are caught by the text window below */
-		uint16_t ipId = defined ? 0 : (uint16_t)(((uint16_t)pt[4] << 8) | pt[5]);
-		uint8_t  tmsSeq = defined ? 0 : pt[32];
+		uint16_t ipId = (fmt == RX_FMT_IP) ? (uint16_t)(((uint16_t)pt[4] << 8) | pt[5]) : 0;
+		uint8_t  tmsSeq = (fmt == RX_FMT_IP) ? pt[32] : ((fmt == RX_FMT_TYT) ? pt[0] : 0);
 		uint32_t now = ticksGetMillis();
-		if (!defined && s_lastRxValid && (peer == s_lastRxPeer) && (ipId == s_lastRxIpId) && (tmsSeq == s_lastRxTmsSeq))
+		if ((fmt != RX_FMT_SHORT) && s_lastRxValid && (peer == s_lastRxPeer) && (fmt == s_lastRxFmt) &&
+				(ipId == s_lastRxIpId) && (tmsSeq == s_lastRxTmsSeq))
 		{
 			return;
 		}
@@ -1225,11 +1296,11 @@ void dmrSmsRxTick(void)
 			const dmrSmsMessage_t *last = dmrSmsGet(0, 0);
 			if (last && (last->peerId == peer) && (last->textLen == got) && (memcmp(last->text, text, (size_t)got) == 0))
 			{
-				s_lastRxIpId = ipId; s_lastRxTmsSeq = tmsSeq;   /* its own link-layer repeats, too */
+				s_lastRxIpId = ipId; s_lastRxTmsSeq = tmsSeq; s_lastRxFmt = fmt;   /* its own link-layer repeats, too */
 				return;
 			}
 		}
-		s_lastRxPeer = peer; s_lastRxIpId = ipId; s_lastRxTmsSeq = tmsSeq; s_lastRxValid = 1;
+		s_lastRxPeer = peer; s_lastRxIpId = ipId; s_lastRxTmsSeq = tmsSeq; s_lastRxFmt = fmt; s_lastRxValid = 1;
 		s_lastRxMs = now;
 	}
 

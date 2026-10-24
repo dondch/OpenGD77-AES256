@@ -586,6 +586,136 @@ static void testDefinedShortDataSms(void)
     trxDMRID = 2345678;
 }
 
+/* The stock radio's OTHER text format, "DMR format" (the CPS channel option next to the
+ * Motorola IP/UDP/TMS one), live on the bench 2026-10-24 (RADIO3 12343, channel "PD-UE",
+ * key 1 selected, HackRF + DSD-FME, the fork's burst trace agreeing byte for byte): no IP/UDP,
+ * a 5-byte prefix [sequence 00 00|02 01 01], UTF-16BE text, the header's padding octets, the
+ * CRC32. The private messages went as ONE Confirmed rate-3/4 block (header 43 93: individual,
+ * response requested, DPF 3, SAP 9, POC 3; then the ENC header 4F 10 51 01), the group one as
+ * two Unconfirmed rate-1/2 blocks (82 99 ... : POC 9). All three CRC32s verify. Being 15 bytes
+ * or shorter, none of them was actually encrypted under its ENC header (the firmware ECB-encrypts
+ * whole 16-byte blocks only), so these are the clear forms; the encrypted form is built below. */
+static const uint8_t TYT_PRIV_GM[16] = { 0x03,0x00,0x00,0x01,0x01,0x00,0x67,0x00,0x6D,0x00,0x00,0x00,0x95,0xBF,0xFE,0x7A };
+static const uint8_t TYT_PRIV_GT[16] = { 0x04,0x00,0x00,0x01,0x01,0x00,0x67,0x00,0x74,0x00,0x00,0x00,0xBE,0x13,0xAC,0x8D };
+static const uint8_t TYT_GROUP_GTW[24] = { 0x05,0x00,0x02,0x01,0x01,0x00,0x67,0x00,0x74,0x00,0x77,0x00,
+                                           0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x94,0xBA,0xC0,0x6D };
+static const uint8_t TYT_ENC_HDR[12] = { 0x4F,0x10,0x51,0x01,0,0,0,0,0,0,0,0 };
+
+/* One stock DMR-format PDU as the chip delivers it. Private: the Confirmed header (N(S) ns),
+ * the ENC header, the 16-byte payloads behind a stand-in DBSN/CRC-9 field. Group: the
+ * Unconfirmed header, the ENC header, 12-byte rate-1/2 blocks. */
+static void playTytFormat(uint32_t src, uint32_t dst, int group, uint8_t ns, int poc, const uint8_t *pdu, int pduLen)
+{
+    uint8_t hdr[12] = { 0 };
+    int pay = group ? 12 : 16;
+    int nblk = pduLen / pay;
+    hdr[0] = (uint8_t)(group ? 0x82 : 0x43);
+    hdr[1] = (uint8_t)(0x90 | (poc & 0x0F));
+    hdr[2] = (uint8_t)(dst >> 16); hdr[3] = (uint8_t)(dst >> 8); hdr[4] = (uint8_t)dst;
+    hdr[5] = (uint8_t)(src >> 16); hdr[6] = (uint8_t)(src >> 8); hdr[7] = (uint8_t)src;
+    hdr[8] = (uint8_t)(0x80 | (nblk + 1));                   /* F=1, blocks to follow incl. the ENC header */
+    hdr[9] = (uint8_t)(group ? 0x00 : ((ns & 0x07) << 4));
+    dmrSmsRxBurst(6, hdr);
+    dmrSmsRxBurst(6, TYT_ENC_HDR);
+    for (int b = 0; b < nblk; b++)
+    {
+        if (group) { dmrSmsRxBurst(7, pdu + b * 12); }
+        else
+        {
+            uint8_t raw[18] = { (uint8_t)(b << 1), 0x5A };
+            memcpy(raw + 2, pdu + b * 16, 16);
+            dmrSmsRxBurst(8, raw);
+        }
+    }
+    dmrSmsRxReset();
+    dmrSmsRxTick();
+}
+
+static void testStockDmrFormatSms(void)
+{
+    uint8_t ack[12];
+    const dmrSmsMessage_t *m;
+    fresh();
+    trxDMRID = 12341;
+
+    playTytFormat(12343, 12341, 0, 0, 3, TYT_PRIV_GM, 16);
+    check(dmrSmsCount(0) == 1 && inboxHas("gm"), "a stock private DMR-format SMS (one rate-3/4 block) decodes into the inbox");
+    m = dmrSmsGet(0, 0);
+    check(m && (m->peerId == 12343) && !(m->flags & DMR_SMS_FLAG_GROUP), "stored as private from the stock radio");
+    check((dmrSmsAckTake(ack) == 1) && (ack[9] == 0x08) && (ack[2] == 0x00) && (ack[3] == 0x30) && (ack[4] == 0x37), "its response request is acknowledged to the sender");
+
+    playTytFormat(12343, 12341, 0, 1, 3, TYT_PRIV_GT, 16);
+    check(dmrSmsCount(0) == 2 && inboxHas("gt"), "the next message (sequence 4) is a second message");
+    check((dmrSmsAckTake(ack) == 1) && (ack[9] == 0x09), "acknowledged with its N(S)");
+
+    playTytFormat(12343, 12341, 0, 1, 3, TYT_PRIV_GT, 16);   /* the sender's repeat (no ACK heard) */
+    check(dmrSmsCount(0) == 2 && (dmrSmsAckTake(ack) == 1), "its repeat (same sequence byte) is acknowledged and not stored again");
+
+    clockAdvance(61000);
+    playTytFormat(12343, 12341, 0, 2, 3, TYT_PRIV_GT, 16);   /* same text, same sequence, long after */
+    check(dmrSmsCount(0) == 2 && (dmrSmsAckTake(ack) == 1), "the same sequence byte from the same sender is still a repeat after the text window (and acknowledged)");
+
+    playTytFormat(12343, 9661, 1, 0, 9, TYT_GROUP_GTW, 24);
+    check(dmrSmsCount(0) == 3 && inboxHas("gtw"), "a stock group DMR-format SMS (two rate-1/2 blocks) decodes");
+    m = dmrSmsGet(0, 0);
+    check(m && (m->flags & DMR_SMS_FLAG_GROUP) && (m->peerId == 12343) && (dmrSmsAckTake(ack) == 0), "stored as a group message, not acknowledged");
+
+    playTytFormat(12343, 12399, 0, 0, 3, TYT_PRIV_GM, 16);
+    check(dmrSmsCount(0) == 3 && (dmrSmsAckTake(ack) == 0), "a DMR-format message for another radio is neither stored nor acknowledged");
+
+    /* under a lost ENC header (its burst failed the chip's CRC) a clear-form message still reads */
+    {
+        uint8_t hdr[12] = { 0x43,0x93,0x00,0x30,0x35,0x00,0x30,0x37,0x82,0x00,0,0 };
+        uint8_t raw[18] = { 0x00, 0x5A };
+        memcpy(raw + 2, TYT_PRIV_GM, 16);
+        dmrSmsRxBurst(6, hdr);
+        dmrSmsRxBurst(8, raw);
+        dmrSmsRxReset();
+        dmrSmsRxTick();
+        check(dmrSmsCount(0) == 4 && inboxHas("gm"), "a DMR-format message whose ENC header was lost still decodes");
+    }
+    trxDMRID = 2345678;
+}
+
+/* A longer DMR-format message is encrypted the way the IP format is: AES-256-ECB over the whole
+ * 16-byte blocks of [prefix + text], the tail and the padding clear. Built from the captured
+ * prefix (sequence 6, private), 19 characters = 43 bytes -> 2 blocks encrypted, 11 clear, POC 1
+ * to fill three rate-3/4 payloads. */
+static void testStockDmrFormatEncryptedSms(void)
+{
+    static const char TEXT[] = "Encrypted DMR text!";   /* 19 chars */
+    uint8_t pdu[48];
+    int tlen = (int)strlen(TEXT);
+    int len = 5 + 2 * tlen;                              /* 43 */
+    int total = 48, poc = total - 4 - len;               /* 1 */
+    memset(pdu, 0, sizeof pdu);
+    pdu[0] = 0x06; pdu[1] = 0x00; pdu[2] = 0x00; pdu[3] = 0x01; pdu[4] = 0x01;
+    for (int i = 0; i < tlen; i++) { pdu[5 + 2 * i] = 0x00; pdu[6 + 2 * i] = (uint8_t)TEXT[i]; }
+    for (int i = 0; i + 16 <= len; i += 16) { aes256_ecb_encrypt(KEY1, pdu + i); }
+    uint32_t crc = crc32_dmr(pdu, total);
+    pdu[total - 4] = (uint8_t)(crc >> 24); pdu[total - 3] = (uint8_t)(crc >> 16);
+    pdu[total - 2] = (uint8_t)(crc >> 8);  pdu[total - 1] = (uint8_t)crc;
+
+    fresh();
+    trxDMRID = 12341;
+    playTytFormat(12343, 12341, 0, 0, poc, pdu, total);
+    check(dmrSmsCount(0) == 1 && inboxHas(TEXT), "an encrypted DMR-format SMS decrypts under the signalled key");
+
+    uint8_t other[32]; memcpy(other, KEY1, 32); other[5] ^= 0x33;
+    fresh();
+    trxDMRID = 12341;
+    dmrAesInit(); dmrAesSetKeyRam(1, other);
+    playTytFormat(12343, 12341, 0, 0, poc, pdu, total);
+    check(dmrSmsCount(0) == 0 && notifications == 0, "under the wrong key it is dropped");
+
+    fresh();
+    trxDMRID = 12341;
+    dmrAesInit(); dmrAesSetKeyRam(3, KEY1);              /* the key sits in another slot: every loaded key is tried */
+    playTytFormat(12343, 12341, 0, 0, poc, pdu, total);
+    check(dmrSmsCount(0) == 1 && inboxHas(TEXT), "decrypts under a key loaded in another slot");
+    trxDMRID = 2345678;
+}
+
 static void testEncHeaderWithGroupBit(void)
 {
     stream_t s;
@@ -632,6 +762,8 @@ int main(void)
     testCleartextPduReportsNoKeyId();
     testConfirmedPrivateSmsIsAcknowledged();
     testDefinedShortDataSms();
+    testStockDmrFormatSms();
+    testStockDmrFormatEncryptedSms();
     testEncHeaderWithGroupBit();
     testLostEncHeaderStillDecrypts();
     testWrongKeyIsDropped();
