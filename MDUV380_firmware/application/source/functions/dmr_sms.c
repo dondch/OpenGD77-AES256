@@ -757,6 +757,19 @@ static uint8_t  s_altEnc;          /* ... ENC header seen ...                   
 static uint32_t s_altSrc;          /* ... source ...                                        */
 static uint32_t s_altDst;          /* ... and destination of its data header               */
 #define ALT_MAX_DIFF_BLOCKS  4     /* at most 2^4 - 2 = 14 CRC32 passes in the ISR          */
+/* Acknowledgement of a confirmed private SMS (ETSI TS 102 361-1 Response packet). A stock
+ * radio that sends with "response requested" (header byte 0 bit 6, DPF 3) repeats the whole
+ * PDU up to three times and then once more from the TMS layer when no acknowledgement comes
+ * (bench r3: five copies of one "Hello"). The stock receiver answers in the timeslot right
+ * after the last block, one burst, no CSBK preamble:
+ *   01 40 dst(3) src(3) 00 (08 | N(S)) crc(2)
+ * DPF 1, SAP 4, no blocks to follow, class 0 / type 1 (ACK) / status = the N(S) of the packet
+ * being acknowledged, header CRC masked 0xCCCC like a data header. Built here the moment the
+ * packet completes (ISR) and handed to the HR-C6000 through dmrSmsAckTake(). Main RAM. */
+static volatile uint8_t s_rxHdrA;      /* header byte 0 bit 6: response requested */
+static volatile uint8_t s_rxHdrSeq;    /* header byte 9: S | N(S) | FSN */
+static uint8_t          s_ackHdr[12];
+static volatile uint8_t s_ackReady;
 /* diagnostic counters (visible on the Messages home screen) to localise RX failures */
 static volatile uint32_t s_diagData   DMR_AES_CCM; /* ALL data-sync-class bursts the chip delivered */
 static volatile uint32_t s_diagHdrOk  DMR_AES_CCM; /* type-6 data-header, CRC OK   */
@@ -908,6 +921,14 @@ int dmrSmsRxTrace(uint8_t *out, int maxlen)
 	return n;
 }
 
+int dmrSmsAckTake(uint8_t out[12])
+{
+	if (!s_ackReady) { return 0; }
+	memcpy(out, s_ackHdr, 12);
+	s_ackReady = 0;
+	return 1;
+}
+
 void dmrSmsRxBurst(int rxDataType, const uint8_t *p)
 {
 	{
@@ -948,6 +969,8 @@ void dmrSmsRxBurst(int rxDataType, const uint8_t *p)
 			s_rxHaveHeader = 1;
 			s_rxHaveEnc = 0;
 			s_rxKeyId = 0;              /* set by this packet's ENC header, if one follows */
+			s_rxHdrA = (p[0] & 0x40) ? 1 : 0;
+			s_rxHdrSeq = p[9];
 			/* a different packet: the kept copy cannot be a retransmission of this one */
 			if (s_altCount && ((s_rxSrc != s_altSrc) || (s_rxDst != s_altDst) ||
 					((uint8_t)((s_rxConfirmed ? DPF_CONFIRMED : DPF_UNCONFIRMED) | (s_rxGroup ? 0x80 : 0)) != s_altHdr)))
@@ -1024,6 +1047,26 @@ void dmrSmsRxBurst(int rxDataType, const uint8_t *p)
 			s_rxPeerEnc = s_rxHaveEnc;   /* decrypt if the ENC header was seen, else read cleartext */
 			s_rxReady = 1;          /* main loop will decrypt (or read cleartext) + store */
 			s_diagPdu++;
+			/* Confirmed, individual, to us, response requested: acknowledge it, whatever the
+			 * main loop then makes of the text (a stock radio acknowledges at the link layer). */
+			if (s_rxConfirmed && !s_rxGroup && s_rxHdrA && (s_rxDst == trxDMRID))
+			{
+				uint8_t ns = (uint8_t)((s_rxHdrSeq >> 4) & 0x07);
+				s_ackHdr[0] = 0x01;                                   /* individual, no response wanted, DPF 1 */
+				s_ackHdr[1] = 0x40;                                   /* SAP 4 (IP based), no padding */
+				s_ackHdr[2] = (uint8_t)(s_rxSrc >> 16); s_ackHdr[3] = (uint8_t)(s_rxSrc >> 8); s_ackHdr[4] = (uint8_t)s_rxSrc;
+				s_ackHdr[5] = (uint8_t)(trxDMRID >> 16); s_ackHdr[6] = (uint8_t)(trxDMRID >> 8); s_ackHdr[7] = (uint8_t)trxDMRID;
+				s_ackHdr[8] = 0x00;                                   /* no blocks to follow */
+				s_ackHdr[9] = (uint8_t)(0x08 | ns);                   /* class 0, type ACK, status N(S) */
+				hdr_crc(s_ackHdr, 10, 0xCCCC, s_ackHdr + 10);
+				s_ackReady = 1;
+				{
+					uint8_t *t = s_trace[s_traceW % SMS_TRACE_N];   /* 0xA0 = ACK built, then N(S) and header bytes 8..11 */
+					t[0] = 0xA0; t[1] = ns;
+					t[2] = s_ackHdr[8]; t[3] = s_ackHdr[9]; t[4] = s_ackHdr[10]; t[5] = s_ackHdr[11];
+					s_traceW++;
+				}
+			}
 			/* snapshot raw (still-encrypted) PDU for USB inspection (clamped to the
 			 * snapshot buffer — the reported length must never exceed the bytes stored) */
 			s_diagLastPduLen = (uint16_t)((total > (int)sizeof s_diagLastPdu) ? (int)sizeof s_diagLastPdu : total);
@@ -1145,6 +1188,7 @@ static void runtimeReset(void)
 	s_rxReady = 0;                   /* don't process stray garbage as a PDU */
 	s_lastRxValid = 0;               /* no "previous message" to de-duplicate against */
 	s_altCount = 0;                  /* no kept copy to merge with (CCM is not zeroed at boot) */
+	s_ackReady = 0;
 	rxAccumReset();                  /* clear the burst accumulator */
 }
 
