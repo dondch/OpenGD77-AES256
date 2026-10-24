@@ -196,7 +196,9 @@ typedef enum
 	SATELLITE_PREDICTION_LEVEL_TIME_AND_ELEVATION_ONLY, SATELLITE_PREDICTION_LEVEL_TIME_EL_AND_AZ, SATELLITE_PREDICTION_LEVEL_FULL
 } satellitePredictionLevel_t;
 
-extern satelliteData_t satelliteDataNative[NUM_SATELLITES];
+/* Lives in the feature arena while the satellite screen is on the menu stack; NULL otherwise.
+ * See featureArena.h. Readers outside menuSatelliteScreen.c must check for NULL. */
+extern satelliteData_t *satelliteDataNative;
 extern satelliteData_t *currentActiveSatellite;
 extern satelliteFreq_t currentSatelliteFreqIndex;
 

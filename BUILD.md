@@ -52,16 +52,22 @@ to inspect an over-full build). `make profiles` lists the profiles, `make flags 
 turns on, and `make REPRODUCIBLE=1` pins the compiled-in build time to the commit time so two builds of one
 commit are byte-identical.
 
-Main SRAM (128 KB) and CCM RAM (64 KB) are the binding constraints, not flash: the release build has 7,008 bytes
-of SRAM and 3,188 bytes of CCM spare, and about 111 KB of flash before the fixed AMBE codec slot. Costs below are
+Main SRAM (128 KB) and CCM RAM (64 KB) are the binding constraints, not flash: the release build has 6,988 bytes
+of SRAM and 3,192 bytes of CCM spare, and about 111 KB of flash before the fixed AMBE codec slot. Costs below are
 measured on this tree with arm-none-eabi-gcc 14.2.1 at -Os (2026-10-24) and are deltas against the release build.
+
+Features that are only live while their screen or command runs share one 11,904-byte SRAM block, the **feature
+arena** (`application/source/functions/featureArena.c`): the satellite screen's Keps table owns it while that
+screen is on the menu stack (Keps reload on every entry), the VFO sweep's strip, hold and average buffers own it
+while the sweep runs, and the USB spectrum probe borrows it for one command. A feature that needs a buffer only
+while the user is in it should claim the arena rather than add a static array.
 
 **Feature flags** (user-facing; a build without the flag is unchanged):
 
 | Flag | What it adds | Code | SRAM | CCM |
 | --- | --- | --- | --- | --- |
-| `ENABLE_DMR_DATA` | Encrypted DMR SMS (Messages menu, store, confirmed delivery) and the raw data-frame TX harness (`tools/dmr_data_tx.py`) | +11,336 | +1,432 | +3,188, fills CCM to the last byte |
-| `ENABLE_FAST_SCAN` | Sub-30 ms analog scan steps (20/15/10/6 ms) in the "Scan dwell time" setting, also via CHIRP | +4,800 | +1,552 | 0 |
+| `ENABLE_DMR_DATA` | Encrypted DMR SMS (Messages menu, store, confirmed delivery) and the raw data-frame TX harness (`tools/dmr_data_tx.py`) | +11,328 | +1,424 | +3,184, fills CCM to the last 8 bytes |
+| `ENABLE_FAST_SCAN` | Sub-30 ms analog scan steps (20/15/10/6 ms) in the "Scan dwell time" setting, also via CHIRP | +4,912 | +240 (the sweep traces live in the feature arena) | 0 |
 | `ENABLE_DUAL_SCREEN` | Anytone-style dual screen, row watch, Dual Watch options menu (see "Dual screen build") | +5,080 | +152 | 0 |
 | `ENABLE_TA2TWC_SCREENS` | The TA2TWC redesigned screens, animations and theme (see "TA2TWC screens build") | +14,412 | +96 | 0 |
 
@@ -69,7 +75,7 @@ measured on this tree with arm-none-eabi-gcc 14.2.1 at -Os (2026-10-24) and are 
 
 | Flag | What it adds | Code | SRAM | CCM | Needs |
 | --- | --- | --- | --- | --- | --- |
-| `ENABLE_SPECTRUM` | Swept-RSSI receiver over USB (`tools/sweep.py`, `settle.py`) and the VFO sweep waterfall | about +4,400 | about +900 | 0 | |
+| `ENABLE_SPECTRUM` | Swept-RSSI receiver over USB (`tools/sweep.py`, `settle.py`) and the VFO sweep waterfall | +4,488 | +120 (the probe samples live in the feature arena) | 0 | |
 | `ENABLE_SCAN_PROFILER` | DWT scan-step profiler, CPS 0xA9 (`tools/scanprof.py`) | about +700 | +544 | 0 | `ENABLE_SPECTRUM` (Makefile error otherwise) |
 | `ENABLE_KEY_INJECTION` | USB display mirror, remote key injection and DFU jump (`fbmirror.py`, `rkey.py`) | about +1,800 | +168 | 0 | |
 | `ENABLE_GPS_NMEA_LOG` | GPS NMEA logging to SPI flash (defines `LOG_GPS_DATA`) | +664 | +4,132 | 0 | |
@@ -83,16 +89,16 @@ The "about" figures for the three sweep-bench flags were measured on the pre-mer
 
 | Profile | Flags | SRAM spare | CCM spare |
 | --- | --- | --- | --- |
-| `release` (default) | none | 7,008 | 3,188 |
-| `full` | all four feature flags | 3,784 | 0 |
-| `dev-sweep` | `ENABLE_SPECTRUM ENABLE_FAST_SCAN ENABLE_KEY_INJECTION` | 4,392 | 3,188 |
-| `dev-prof` | `ENABLE_SPECTRUM ENABLE_SCAN_PROFILER ENABLE_KEY_INJECTION` | 5,384 | 3,188 |
-| `dev-aes` | `DMR_AES_DIAG_RX ENABLE_KEY_INJECTION` | 6,828 | 2,564 |
-| `dev-gps` | `ENABLE_GPS_NMEA_LOG` | 2,876 | 3,192 |
+| `release` (default) | none | 6,988 | 3,192 |
+| `full` | all four feature flags | 5,100 | 8 |
+| `dev-sweep` | `ENABLE_SPECTRUM ENABLE_FAST_SCAN ENABLE_KEY_INJECTION` | 6,492 | 3,192 |
+| `dev-prof` | `ENABLE_SPECTRUM ENABLE_SCAN_PROFILER ENABLE_KEY_INJECTION` | 6,156 | 3,192 |
+| `dev-aes` | `DMR_AES_DIAG_RX ENABLE_KEY_INJECTION` | 6,820 | 2,564 |
+| `dev-gps` | `ENABLE_GPS_NMEA_LOG` | 2,868 | 3,192 |
 
-`full` plus `ENABLE_SPECTRUM` and `ENABLE_KEY_INJECTION` still links, with 2,724 bytes of SRAM and 8 bytes of CCM
-spare; adding `DMR_AES_DIAG_RX` to any `ENABLE_DMR_DATA` build overflows CCM. The CCM ceiling is the next thing
-the RAM work has to move.
+`full` plus `ENABLE_SPECTRUM` and `ENABLE_KEY_INJECTION` links with 4,836 bytes of SRAM and 8 bytes of CCM spare,
+and every flag at once (adding `ENABLE_SCAN_PROFILER`) with 4,292 bytes of SRAM; adding `DMR_AES_DIAG_RX` to any
+`ENABLE_DMR_DATA` build overflows CCM. The CCM ceiling is the next thing the RAM work has to move.
 
 ## Manual flash
 ```sh

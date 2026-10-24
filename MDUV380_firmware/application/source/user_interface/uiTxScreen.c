@@ -549,7 +549,7 @@ static void handleEvent(uiEvent_t *ev)
 		{
 			if (isSatelliteScreen)
 			{
-				if (satelliteDataNative[uiDataGlobal.SatelliteAndAlarmData.currentSatellite].freqs[currentSatelliteFreqIndex].armCTCSS != 0)
+				if ((satelliteDataNative != NULL) && (satelliteDataNative[uiDataGlobal.SatelliteAndAlarmData.currentSatellite].freqs[currentSatelliteFreqIndex].armCTCSS != 0))
 				{
 					trxActivateRx(true);
 					trxSetTxCSS(satelliteDataNative[uiDataGlobal.SatelliteAndAlarmData.currentSatellite].freqs[currentSatelliteFreqIndex].armCTCSS);
@@ -604,7 +604,7 @@ static void handleEvent(uiEvent_t *ev)
 	{
 		if (isSatelliteScreen)
 		{
-			if (satelliteDataNative[uiDataGlobal.SatelliteAndAlarmData.currentSatellite].freqs[currentSatelliteFreqIndex].armCTCSS != 0)
+			if ((satelliteDataNative != NULL) && (satelliteDataNative[uiDataGlobal.SatelliteAndAlarmData.currentSatellite].freqs[currentSatelliteFreqIndex].armCTCSS != 0))
 			{
 				trxActivateRx(true);
 				trxSetTxCSS(currentChannelData->txTone);
