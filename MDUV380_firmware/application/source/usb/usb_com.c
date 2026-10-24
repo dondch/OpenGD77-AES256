@@ -470,6 +470,22 @@ bool usbKeyInjectTick(uint8_t *outEvent, char *outKey, uint32_t *outButtons)
 	return true;
 }
 
+/* keyboardReset() for the injected key: a handler that resets the keyboard after a key's
+ * DOWN expects to hear nothing more of that key -- the real driver goes to
+ * KEY_WAIT_RELEASED and the physical release produces no event. The injector used to go
+ * on and emit the release anyway, so a key that stopped the sweep (the "any key stops the
+ * scan" barrier resets the keyboard and returns on the DOWN) then delivered a SHORTUP to
+ * the normal screen: RED out of the sweep landed in Channel mode on the bench, twice.
+ * Drop the key whose DOWN has been delivered; keys still queued have not been pressed. */
+void usbKeyInjectReset(void)
+{
+	if ((s_injTail != s_injHead) && (s_injPhase != 0))
+	{
+		s_injPhase = 0;
+		s_injTail = (uint8_t)((s_injTail + 1) % INJ_RING);
+	}
+}
+
 void usbFuncInjectPush(uint16_t function)
 {
 	s_injFunction = function;

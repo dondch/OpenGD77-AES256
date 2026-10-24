@@ -78,6 +78,9 @@ void USB_DEBUG_printf(const char *format, ...) __attribute__((format(__printf__,
  * fills *outEvent (keyboardCode_t.event bits) + *outKey, sets *outButtons to the
  * modifier buttons to report as held with it (BUTTON_SK2 or 0), and returns true. */
 bool usbKeyInjectTick(uint8_t *outEvent, char *outKey, uint32_t *outButtons);
+/* Called by keyboardReset(): forget the injected key whose press has been delivered, so
+ * its release is never emitted -- as the real driver does for a physical key. */
+void usbKeyInjectReset(void);
 
 /* Inject a UI FUNCTION event (menuSystem.h FUNC_*), the same mechanism a quick-key
  * uses. Injecting a KEY event cannot reliably reach every handler: the UI tests keys in
