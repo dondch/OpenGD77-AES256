@@ -45,6 +45,15 @@
 
 
 #define STORAGE_MAGIC_NUMBER          0x4780 // NOTE: never use 0xDEADBEEF, it's reserved value
+
+#if defined(PLATFORM_MDUV380)
+// The saved-settings layout. A build flag that adds or removes a member of settingsStruct_t
+// changes what a radio reads back from flash without changing STORAGE_MAGIC_NUMBER (seen
+// 2026-10-24 when LOG_GPS_DATA became optional: every member after gpsLogMemOffset moved by
+// 4 bytes and an upgraded radio came up with scrambled settings). Bump the magic number, which
+// resets every user's settings, or keep the member, but never let the size drift silently.
+_Static_assert(sizeof(settingsStruct_t) == 0x74, "settingsStruct_t layout changed: saved settings would be misread");
+#endif
 // 0x4780: voxTailUnits member change, [1..11] (0.001s AKA no Vox Tail, 0.5 up to 5.0 seconds, 500ms steps)
 // 0x477F: new gpsModeAndBaudsIndex and lastTalkerOnScreenTimer members, need to ensure lastTalkerOnScreenTimer equal to zero
 // 0x477E: set BIT_UI_USES_DOUBLE_HEIGHT to false, and change extendedInfosOnScreen back to false by default
