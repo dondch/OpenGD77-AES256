@@ -161,7 +161,7 @@ const frequencyBand_t DEFAULT_USER_FREQUENCY_BANDS[RADIO_BANDS_TOTAL_NUM] =  {
 static volatile ticksTimer_t trxNextRssiNoiseSampleTimer = { 0, 0 };
 static volatile ticksTimer_t trxNextSquelchCheckingTimer = { 0, 0 };
 
-#if defined(HAS_DUAL_WATCH_OPTIONS)
+#if defined(ENABLE_DUAL_SCREEN)
 // While the dual screen's row watch listens to the other row, its squelch level and tone are the ones to use
 static bool trxSquelchOverride = false;
 static uint8_t trxSquelchOverrideSql = 0;

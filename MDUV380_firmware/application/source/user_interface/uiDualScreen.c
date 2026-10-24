@@ -36,7 +36,7 @@
 #include "functions/sound.h"
 #include "functions/rxPowerSaving.h"
 
-#if defined(HAS_DUAL_WATCH_OPTIONS)
+#if defined(ENABLE_DUAL_SCREEN)
 
 // "Dual screen": like the Anytone radios, two rows, A on top and B below. Each row is independently a VFO
 // (row A = VFO A, row B = VFO B) or a channel of the current zone. One row is active: the radio is tuned to
@@ -783,4 +783,4 @@ bool uiDualScreenHandleKey(uiEvent_t *ev, bool channelScreen, bool busy)
 	return false;
 }
 
-#endif // HAS_DUAL_WATCH_OPTIONS
+#endif // ENABLE_DUAL_SCREEN

@@ -121,7 +121,7 @@ static void updateScreen(bool isFirstRun)
 			if (menuDataGlobal.currentMenuList[mNum].stringOffset >= 0)
 			{
 				const char *menuName = (currentLanguage->LANGUAGE_NAME + (menuDataGlobal.currentMenuList[mNum].stringOffset * LANGUAGE_TEXTS_LENGTH));
-#if defined(HAS_DUAL_WATCH_OPTIONS)
+#if defined(ENABLE_DUAL_SCREEN)
 				if (menuDataGlobal.currentMenuList[mNum].menuNum == MENU_DUAL_WATCH)
 				{
 					menuName = "DW Options";
