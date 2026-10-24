@@ -561,6 +561,25 @@ static uint32_t vfoSweepSpan(void)
 #define VFO_SWEEP_TRACE_START_Y   VFO_SWEEP_GRAPH_START_Y
 #define VFO_SWEEP_TRACE_HEIGHT_Y  VFO_SWEEP_GRAPH_HEIGHT_Y
 #endif
+#if defined(ENABLE_FAST_SCAN) && (defined(PLATFORM_MD380) || defined(PLATFORM_MDUV380) || defined(PLATFORM_RT84_DM1701) || defined(PLATFORM_MD2017))
+// Band scope + scrolling waterfall on the colour displays (after mangelajo's
+// opengd77-rt3s-experiments b7a0d36, reworked for this sweep): the top third of the trace
+// area keeps a bar per column, tinted blue-cyan-yellow-red by level, and the lower two
+// thirds hold one row per completed pass, scrolled down a pixel at every pass end. The
+// history lives in the framebuffer only, so uiVFOModeUpdateScreen() leaves those rows alone
+// while sweeping and the column-strip blit carries the newest row's pixels with the bars.
+// SK2 + STAR while sweeping switches between the waterfall and the full-height bars; bit
+// 15 of vfoSweepSettings is taken by the wide span, so the choice is not persisted and the
+// waterfall is on by default.
+#define VFO_SWEEP_WATERFALL
+#define VFO_SWEEP_BARS_HEIGHT        (VFO_SWEEP_TRACE_HEIGHT_Y / 3)
+#define VFO_SWEEP_WATERFALL_START_Y  (VFO_SWEEP_TRACE_START_Y + VFO_SWEEP_BARS_HEIGHT)
+#define VFO_SWEEP_WATERFALL_HEIGHT   (VFO_SWEEP_TRACE_HEIGHT_Y - VFO_SWEEP_BARS_HEIGHT)
+static uint16_t vfoSweepWaterfallPalette[32];   // level 0..31 -> native pixel, built at sweep entry (panel type is a runtime property)
+static uint16_t vfoSweepBarPalette[32];         // the same hue at 150% brightness for the bar tips
+static bool     vfoSweepWaterfallOn = true;
+static uint32_t vfoSweepFreqForSample(int16_t index);
+#endif
 static uint8_t vfoSweepRssiNoiseFloor = VFO_SWEEP_RSSI_NOISE_FLOOR_DEFAULT;
 static uint8_t vfoSweepGain = VFO_SWEEP_GAIN_DEFAULT;
 static bool vfoSweepSavedBandwidth;
@@ -590,6 +609,12 @@ menuStatus_t uiVFOMode(uiEvent_t *ev, bool isFirstRun)
 
 			if (screenOperationMode[nonVolatileSettings.currentVFONumber] == VFO_SCREEN_OPERATION_SWEEP)
 			{
+#if defined(VFO_SWEEP_WATERFALL)
+				if (vfoSweepWaterfallOn)
+				{
+					vfoSweepWaterfallClear();   // the lock screen drew over the history
+				}
+#endif
 				for(int i = 0; i < VFO_SWEEP_NUM_SAMPLES; i++)
 				{
 					vfoSweepDrawSample(i);
@@ -912,7 +937,19 @@ void uiVFOModeUpdateScreen(int txTimeSecs)
 		uiDataGlobal.displayQSOState = QSO_DISPLAY_DEFAULT_SCREEN;
 	}
 
-	displayClearBuf();
+#if defined(VFO_SWEEP_WATERFALL)
+	if (vfoSweepWaterfallOn && (screenOperationMode[nonVolatileSettings.currentVFONumber] == VFO_SCREEN_OPERATION_SWEEP))
+	{
+		// Keep the waterfall history across the redraw; clear only above and below it.
+		displayFillRect(0, 0, DISPLAY_SIZE_X, VFO_SWEEP_WATERFALL_START_Y, true);
+		displayFillRect(0, (VFO_SWEEP_WATERFALL_START_Y + VFO_SWEEP_WATERFALL_HEIGHT), DISPLAY_SIZE_X,
+				(DISPLAY_SIZE_Y - (VFO_SWEEP_WATERFALL_START_Y + VFO_SWEEP_WATERFALL_HEIGHT)), true);
+	}
+	else
+#endif
+	{
+		displayClearBuf();
+	}
 	uiUtilityRenderHeader(uiVFOModeDualWatchIsScanning(), uiVFOModeSweepScanning(true),
 #if defined(PLATFORM_MD9600) || defined(CPU_MK22FN512VLL12)
 			false
@@ -1067,6 +1104,18 @@ void uiVFOModeUpdateScreen(int txTimeSecs)
 								false, (selectedFreq == VFO_SELECTED_FREQUENCY_INPUT_RX),
 								(uiDataGlobal.reverseRepeaterVFO ? currentChannelData->txFreq : currentChannelData->rxFreq), true,
 								(screenOperationMode[nonVolatileSettings.currentVFONumber] == VFO_SCREEN_OPERATION_SCAN), 0);
+#if defined(VFO_SWEEP_WATERFALL)
+						if (screenOperationMode[nonVolatileSettings.currentVFONumber] == VFO_SCREEN_OPERATION_SWEEP)
+						{
+							// The span's edge frequencies, small, in the free band between the graph and the frequency line.
+							uint32_t fLo = vfoSweepFreqForSample(0);
+							uint32_t fHi = vfoSweepFreqForSample(VFO_SWEEP_NUM_SAMPLES - 1);
+							snprintf(buffer, SCREEN_LINE_BUFFER_SIZE, "%u.%03u", (unsigned)(fLo / 100000), (unsigned)((fLo % 100000) / 100));
+							displayPrintCore(2, (VFO_SWEEP_GRAPH_START_Y + VFO_SWEEP_GRAPH_HEIGHT_Y), buffer, FONT_SIZE_1, TEXT_ALIGN_LEFT, false);
+							snprintf(buffer, SCREEN_LINE_BUFFER_SIZE, "%u.%03u", (unsigned)(fHi / 100000), (unsigned)((fHi % 100000) / 100));
+							displayPrintCore(2, (VFO_SWEEP_GRAPH_START_Y + VFO_SWEEP_GRAPH_HEIGHT_Y), buffer, FONT_SIZE_1, TEXT_ALIGN_RIGHT, false);
+						}
+#endif
 					}
 					else
 					{
@@ -1501,6 +1550,29 @@ static void handleEvent(uiEvent_t *ev)
 			// below and otherwise unused on this screen, so it needs no new exemption --
 			// and a control that stopped the sweep in order to configure the sweep would
 			// be useless here.
+#if defined(VFO_SWEEP_WATERFALL)
+			// SK2 + STAR while sweeping: waterfall or full-height bars. STAR passes the barrier
+			// below with or without SK2, so this comes before the two plain-STAR uses.
+			if ((ev->keys.key == KEY_STAR) && BUTTONCHECK_DOWN(ev, BUTTON_SK2) && KEYCHECK_SHORTUP(ev->keys, KEY_STAR) &&
+					(screenOperationMode[nonVolatileSettings.currentVFONumber] == VFO_SCREEN_OPERATION_SWEEP))
+			{
+				vfoSweepWaterfallOn = !vfoSweepWaterfallOn;
+				if (vfoSweepWaterfallOn)
+				{
+					vfoSweepWaterfallClear();   // stale full-height bar pixels sit where the history goes
+				}
+				uiDataGlobal.displayQSOState = QSO_DISPLAY_DEFAULT_SCREEN;
+				uiVFOModeUpdateScreen(0);
+				vfoSweepUpdateSamples(0, true, 0);   // every column repainted in the new layout
+				keyboardReset();
+				return;
+			}
+			if ((ev->keys.key == KEY_STAR) && BUTTONCHECK_DOWN(ev, BUTTON_SK2) &&
+					(screenOperationMode[nonVolatileSettings.currentVFONumber] == VFO_SCREEN_OPERATION_SWEEP))
+			{
+				return;   // the DOWN half of SK2 + STAR: neither the scroll toggle nor the resume
+			}
+#endif
 			if ((vfoSweepListening == false) && (ev->keys.key == KEY_STAR) &&
 					(screenOperationMode[nonVolatileSettings.currentVFONumber] == VFO_SCREEN_OPERATION_SWEEP))
 			{
@@ -3074,7 +3146,124 @@ static void vfoSweepDrawPeakMarker(void)
 }
 #endif
 
-static void vfoSweepDrawSample(int offset)
+#if defined(VFO_SWEEP_WATERFALL)
+static void vfoSweepBuildWaterfallPalette(void)
+{
+	static const uint32_t stops[5] = { 0x000040, 0x0000FF, 0x00FFFF, 0xFFFF00, 0xFF0000 };
+
+	for (int i = 0; i < 32; i++)
+	{
+		uint32_t a = stops[i >> 3];
+		uint32_t b = stops[(i >> 3) + 1];
+		int t = (i & 0x7);
+		uint32_t r  = ((((a >> 16) & 0xFF) * (8 - t)) + (((b >> 16) & 0xFF) * t)) / 8;
+		uint32_t g  = ((((a >> 8)  & 0xFF) * (8 - t)) + (((b >> 8)  & 0xFF) * t)) / 8;
+		uint32_t bl = (((a & 0xFF) * (8 - t)) + ((b & 0xFF) * t)) / 8;
+
+		vfoSweepWaterfallPalette[i] = displayConvertRGB888ToNative((r << 16) | (g << 8) | bl);
+
+		uint32_t rb = MIN(255U, (r  * 3) / 2);
+		uint32_t gb = MIN(255U, (g  * 3) / 2);
+		uint32_t bb = MIN(255U, (bl * 3) / 2);
+		vfoSweepBarPalette[i] = displayConvertRGB888ToNative((rb << 16) | (gb << 8) | bb);
+	}
+}
+
+// Scroll the history down one row so the freshest pass stays on top.
+static void vfoSweepWaterfallScroll(void)
+{
+	uint16_t *fb = displayGetScreenBuffer();
+
+	for (int y = (VFO_SWEEP_WATERFALL_START_Y + VFO_SWEEP_WATERFALL_HEIGHT - 1); y > VFO_SWEEP_WATERFALL_START_Y; y--)
+	{
+		memmove(&fb[y * DISPLAY_SIZE_X], &fb[(y - 1) * DISPLAY_SIZE_X], DISPLAY_SIZE_X * sizeof(uint16_t));
+	}
+}
+
+// Slide the history sideways with a retune, blanking the columns not swept yet (the sample
+// buffer is shifted the same way).
+static void vfoSweepWaterfallShift(int pixels)
+{
+	uint16_t *fb = displayGetScreenBuffer();
+	int n = ((pixels < 0) ? -pixels : pixels);
+
+	if (n > DISPLAY_SIZE_X)
+	{
+		n = DISPLAY_SIZE_X;
+	}
+
+	for (int y = VFO_SWEEP_WATERFALL_START_Y; y < (VFO_SWEEP_WATERFALL_START_Y + VFO_SWEEP_WATERFALL_HEIGHT); y++)
+	{
+		uint16_t *row = &fb[y * DISPLAY_SIZE_X];
+
+		if (pixels > 0)
+		{
+			memmove(&row[0], &row[n], (DISPLAY_SIZE_X - n) * sizeof(uint16_t));
+			memset(&row[DISPLAY_SIZE_X - n], 0x00, n * sizeof(uint16_t));
+		}
+		else
+		{
+			memmove(&row[n], &row[0], (DISPLAY_SIZE_X - n) * sizeof(uint16_t));
+			memset(&row[0], 0x00, n * sizeof(uint16_t));
+		}
+	}
+}
+
+// Blank the history: on entry, on a zoom (the Hz per column changed) and when the wide
+// span restarts the trace.
+static void vfoSweepWaterfallClear(void)
+{
+	memset(&displayGetScreenBuffer()[VFO_SWEEP_WATERFALL_START_Y * DISPLAY_SIZE_X], 0x00,
+			VFO_SWEEP_WATERFALL_HEIGHT * DISPLAY_SIZE_X * sizeof(uint16_t));
+}
+
+static void vfoSweepDrawWaterfallSample(int offset)
+{
+	int rssi = MAX(vfoSweepSamples[offset] - VFO_SWEEP_FLOOR_ACTIVE, 0);
+	int level = MIN(31, (rssi * 31) / VFO_SWEEP_GAIN_ACTIVE);
+	int16_t barHeight = MIN(VFO_SWEEP_BARS_HEIGHT, (rssi * VFO_SWEEP_BARS_HEIGHT) / VFO_SWEEP_GAIN_ACTIVE);
+	int16_t barsBottom = (VFO_SWEEP_TRACE_START_Y + VFO_SWEEP_BARS_HEIGHT);
+	uint16_t *fb = displayGetScreenBuffer();
+
+	// The bar, in the top third: cleared above, tinted below.
+	displayThemeApply(THEME_ITEM_FG_RSSI_BAR, THEME_ITEM_BG);
+	displayDrawFastVLine(offset, VFO_SWEEP_TRACE_START_Y, (VFO_SWEEP_BARS_HEIGHT - barHeight), false);
+	displayThemeResetToDefault();
+	for (int16_t y = (barsBottom - barHeight); y < barsBottom; y++)
+	{
+		fb[(y * DISPLAY_SIZE_X) + offset] = vfoSweepBarPalette[level];
+	}
+
+	// Max hold, one pixel above the bar, on the same terms as the full-height view.
+	{
+		int16_t holdHeight = MAX(vfoSweepHold[offset] - VFO_SWEEP_FLOOR_ACTIVE, 0);
+		int16_t liftPx = (VFO_SWEEP_HOLD_MIN_LIFT * VFO_SWEEP_BARS_HEIGHT) / VFO_SWEEP_TRACE_HEIGHT_Y;
+		holdHeight = MIN(VFO_SWEEP_BARS_HEIGHT, ((holdHeight * VFO_SWEEP_BARS_HEIGHT) / VFO_SWEEP_GAIN_ACTIVE));
+		if (holdHeight > (barHeight + MAX(1, liftPx)))
+		{
+			displayThemeApply(THEME_ITEM_FG_DECORATION, THEME_ITEM_BG);
+			displaySetPixel(offset, (barsBottom - holdHeight), true);
+			displayThemeResetToDefault();
+		}
+	}
+
+	// Centre-frequency marker: dotted down the bar area.
+	if (offset == (DISPLAY_SIZE_X >> 1))
+	{
+		displayThemeApply(THEME_ITEM_FG_DECORATION, THEME_ITEM_BG);
+		for (int16_t y = VFO_SWEEP_TRACE_START_Y; y < barsBottom; y += 2)
+		{
+			displaySetPixel(offset, y, true);
+		}
+		displayThemeResetToDefault();
+	}
+
+	// Waterfall: this column's level on the top history row.
+	fb[(VFO_SWEEP_WATERFALL_START_Y * DISPLAY_SIZE_X) + offset] = vfoSweepWaterfallPalette[level];
+}
+#endif
+
+static void vfoSweepDrawBarSample(int offset)
 {
 	int16_t graphHeight = MAX(vfoSweepSamples[offset] - VFO_SWEEP_FLOOR_ACTIVE, 0);
 	graphHeight = (graphHeight * VFO_SWEEP_TRACE_HEIGHT_Y) / VFO_SWEEP_GAIN_ACTIVE;
@@ -3127,6 +3316,18 @@ static void vfoSweepDrawSample(int offset)
 	displayThemeResetToDefault();
 }
 
+static void vfoSweepDrawSample(int offset)
+{
+#if defined(VFO_SWEEP_WATERFALL)
+	if (vfoSweepWaterfallOn)
+	{
+		vfoSweepDrawWaterfallSample(offset);
+		return;
+	}
+#endif
+	vfoSweepDrawBarSample(offset);
+}
+
 static void vfoSweepUpdateSamples(int offset, bool forceRedraw, int bandwidthRescale)
 {
 	const int SHIFT_DISTANCE[7] = {6,6,6,6,8,8,8};
@@ -3150,6 +3351,12 @@ static void vfoSweepUpdateSamples(int offset, bool forceRedraw, int bandwidthRes
 	{
 		memset(vfoSweepSamples, 0x00, sizeof(vfoSweepSamples));
 		memset(vfoSweepAvg, 0x00, sizeof(vfoSweepAvg));
+#if defined(VFO_SWEEP_WATERFALL)
+		if (vfoSweepWaterfallOn)
+		{
+			vfoSweepWaterfallClear();   // the trace restarts from the new centre; so does the history
+		}
+#endif
 		uiDataGlobal.Scan.sweepSampleIndex = 0;
 		offset = 0;
 		forceRedraw = true;
@@ -3158,6 +3365,12 @@ static void vfoSweepUpdateSamples(int offset, bool forceRedraw, int bandwidthRes
 
 	if (offset != 0)
 	{
+#if defined(VFO_SWEEP_WATERFALL)
+		if (vfoSweepWaterfallOn)
+		{
+			vfoSweepWaterfallShift(offset);   // the history follows the retune like the bars do
+		}
+#endif
 		if (offset > 0)
 		{
 			uiDataGlobal.Scan.sweepSampleIndex = VFO_SWEEP_NUM_SAMPLES - 1 - offset;
@@ -3175,6 +3388,12 @@ static void vfoSweepUpdateSamples(int offset, bool forceRedraw, int bandwidthRes
 
 	if (bandwidthRescale != 0)
 	{
+#if defined(VFO_SWEEP_WATERFALL)
+		if (vfoSweepWaterfallOn)
+		{
+			vfoSweepWaterfallClear();   // a zoom changes the Hz per column; the old rows no longer line up
+		}
+#endif
 		uint8_t tmp[VFO_SWEEP_NUM_SAMPLES];
 		memset(tmp, 0x00, VFO_SWEEP_NUM_SAMPLES);
 		int newStartSample = (VFO_SWEEP_NUM_SAMPLES / 2) - (VFO_SWEEP_NUM_SAMPLES / 4);
@@ -4566,6 +4785,10 @@ static void sweepScanInit(void)
 	// spectrum screen into a mode you cannot see and did not ask for this time.
 	vfoSweepAutoScale = true;
 	vfoSweepAutoPrimed = false;
+#if defined(VFO_SWEEP_WATERFALL)
+	vfoSweepBuildWaterfallPalette();
+	vfoSweepWaterfallClear();
+#endif
 #endif
 
 	menuSystemPopAllAndDisplaySpecificRootMenu(UI_VFO_MODE, true);
@@ -4773,6 +4996,15 @@ static void sweepScanStep(void)
 			// it here rather than per sample means the marker holds still while the trace
 			// redraws under it, and the one full-width blit it costs lands once per pass
 			// (12.5 ms against a 1-4 s sweep) instead of once per sample.
+#if defined(VFO_SWEEP_WATERFALL)
+			if (vfoSweepWaterfallOn)
+			{
+				// The pass just drawn becomes history: push the rows down before the next
+				// pass starts writing the top one. The full-width blit that the marker repaint
+				// causes on the next sample carries the scrolled rows to the panel.
+				vfoSweepWaterfallScroll();
+			}
+#endif
 			vfoSweepShownPeakLevel = vfoSweepPeakLevel;
 			vfoSweepShownPeakIndex = vfoSweepPeakIndex;
 			vfoSweepPeakLevel = 0;
