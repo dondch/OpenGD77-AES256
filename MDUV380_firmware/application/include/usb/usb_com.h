@@ -61,13 +61,11 @@ extern USB_DMA_NONINIT_DATA_ALIGN(USB_DATA_ALIGN_SIZE) uint8_t usbComSendBuf[COM
 #endif
 extern bool isCompressingAMBE;
 
-extern volatile bool usbIsResetting;
-
 void tick_com_request(void);
 void send_packet(uint8_t val_0x82, uint8_t val_0x86, int ram);
 void send_packet_big(uint8_t val_0x82, uint8_t val_0x86, int ram1, int ram2);
 void add_to_commbuffer(uint8_t value);
-bool USB_DeviceIsResetting(void);
+void usbEnsureFullClockIfConnected(void); // see usb_com.c: formerly USB_DeviceIsResetting(), whose return value was always false
 
 void USB_DEBUG_PRINT(const char *str);
 void USB_DEBUG_printf(const char *format, ...) __attribute__((format(__printf__, 1, 2)));

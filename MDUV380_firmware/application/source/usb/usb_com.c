@@ -111,7 +111,6 @@ bool isCompressingAMBE = false;
 volatile static bool hasToReply = false;
 volatile static uint32_t replyLength = 0;
 
-volatile bool usbIsResetting = false;
 
 #if defined(ENABLE_KEY_INJECTION)
 /* ---- DEV: USB remote keypad --------------------------------------------------
@@ -2262,12 +2261,18 @@ void USB_DEBUG_printf(const char *format, ...)
 
 extern USBD_HandleTypeDef hUsbDeviceFS;
 
-bool USB_DeviceIsResetting(void)
+/*
+ * Formerly USB_DeviceIsResetting(), which returned usbIsResetting -- a flag that was
+ * assigned exactly once in the whole tree (= false) and never set true. As a condition
+ * it was dead; its side effect was live: once USB enumeration completes, force the
+ * full-speed clock. The name now says what it does, it returns nothing, and the caller
+ * in rxPowerSavingTick() invokes it on its own line rather than as the first term of
+ * the Eco wake condition.
+ */
+void usbEnsureFullClockIfConnected(void)
 {
 	if ((hUsbDeviceFS.dev_state == USBD_STATE_CONFIGURED) && (clockManagerGetRunMode() != CLOCK_MANAGER_SPEED_RUN))
 	{
 		clockManagerSetRunMode(kAPP_PowerModeRun, CLOCK_MANAGER_SPEED_RUN);
 	}
-
-	return usbIsResetting;
 }

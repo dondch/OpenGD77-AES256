@@ -1469,6 +1469,8 @@ void applicationMainTask(void)
 #endif
 
 			rxPowerSavingTick(&ev, hasSignal);
+			// After rxPowerSavingTick(), so the owner sees this tick's Eco state.
+			ledsTick();
 		}
 
 		int8_t latestVolume = getVolumeControl();

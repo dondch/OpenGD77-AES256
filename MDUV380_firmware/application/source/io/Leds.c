@@ -28,6 +28,11 @@
  */
 #include "interfaces/gpio.h"
 #include "io/LEDs.h"
+#include "functions/trx.h"
+#include "functions/rxPowerSaving.h"
+#include "hardware/HR-C6000.h"
+#include "hardware/radioHardwareInterface.h"
+#include "user_interface/menuSystem.h"
 
 #if ! defined(PLATFORM_GD77S)
 uint8_t LEDsState[NUM_LEDS] = { 0, 0 };
@@ -57,6 +62,98 @@ void LedWrite(LEDs_t theLED, uint8_t output)
 #endif
 	{
 		LedWriteDirect(theLED, output);
+	}
+}
+
+/*
+ * Who owns the green LED.
+ *
+ * Before this, nobody did. There are 29 LedWrite(LED_GREEN, ...) call sites spread
+ * over ten modules, and every one of them is an EDGE write: "my state machine just
+ * changed, so poke the LED on the way past". Nothing ever re-derived the indicator
+ * from the state it is supposed to represent, so a single transition that got
+ * skipped -- by an early return, by a path nobody expected, by two writers racing --
+ * left the LED wrong until some unrelated transition happened to correct it.
+ *
+ * That is not a theory. trxCheckAnalogSquelch() closes the squelch with
+ *
+ *     if (currentRadioDevice->analogSignalReceived || LedRead(LED_GREEN))
+ *
+ * -- reading the LED back as if it were the state variable, because that state has
+ * no home. And the CTCSS-hold branch just above it clears analogSignalReceived
+ * without touching the LED at all.
+ *
+ * Eco turns any such slip into a permanent one. With the receiver powered down,
+ * trxReadRSSIAndNoise() stops sampling, so the squelch test can never again reach
+ * its LED-off branch. Green then stays lit while the receiver is switched off --
+ * the one thing this indicator must never claim.
+ *
+ * So the fix is not to chase the 29 writers; there is no way to prove that set is
+ * complete. It is to add the one that was missing: a level-driven owner that
+ * recomputes the indicator from current state every tick. The edge writes are left
+ * exactly as they are. They now only lower latency, and anything they get wrong is
+ * corrected within one tick instead of never.
+ */
+bool ledsGreenShouldBeOn(void)
+{
+	// Transmit belongs to the red LED.
+	if (trxIsTransmitting || trxTransmissionEnabled)
+	{
+		return false;
+	}
+
+	// Eco has powered the receiver down, so nothing can be arriving.
+	if (rxPowerSavingIsRxOn() == false)
+	{
+		return false;
+	}
+
+	switch (currentRadioDevice->currentMode)
+	{
+		case RADIO_MODE_ANALOG:
+			return currentRadioDevice->analogSignalReceived;
+
+		case RADIO_MODE_DIGITAL:
+			// Two independent views of "a call is up": digitalSignalReceived is the
+			// RSSI one (trx.c), slotState is the frame one (HR-C6000.c). Either can
+			// be the live one, so the indicator is the union.
+			return (currentRadioDevice->digitalSignalReceived ||
+					(slotState == DMR_STATE_RX_1) || (slotState == DMR_STATE_RX_2));
+
+		default:
+			return false;   // RADIO_MODE_NONE: CPS screen and friends
+	}
+}
+
+static uint32_t greenCorrections = 0;
+
+uint32_t ledsGreenCorrectionCount(void)
+{
+	return greenCorrections;
+}
+
+void ledsTick(void)
+{
+	// Screens that drive the LEDs deliberately keep ownership while they are up.
+	switch (menuSystemGetCurrentMenuNumber())
+	{
+		case UI_CPS:
+		case UI_HOTSPOT_MODE:
+		case UI_TX_SCREEN:
+			return;
+
+		default:
+			break;
+	}
+
+	uint8_t want = (ledsGreenShouldBeOn() ? 1 : 0);
+
+	if (LedRead(LED_GREEN) != want)
+	{
+		// Counted, not just corrected: this number is the evidence for whether the
+		// edge writers actually get it wrong, and how often.
+		greenCorrections++;
+		LedWrite(LED_GREEN, want);
 	}
 }
 
