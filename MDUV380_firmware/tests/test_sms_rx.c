@@ -528,6 +528,64 @@ static void testConfirmedPrivateSmsIsAcknowledged(void)
     check(dmrSmsCount(0) == 1 && (dmrSmsAckTake(ack) == 0), "an unconfirmed group SMS is not acknowledged");
 }
 
+/* A network-relayed SMS (BrandMeister through a repeater or hotspot, MOTOTRBO gateways)
+ * arrives as Defined Short Data: header DPF 0x0D, SAP 0xA, the text itself in the blocks
+ * with no IP/UDP framing, UTF-16BE (DD format 0x14) or 8-bit, bit padding in header byte 9,
+ * the packet CRC32 in the last block like any data PDU. Build one and play it. */
+static void playDefinedShortData(uint32_t src, uint32_t dst, int group, int respReq, uint8_t ddFormat,
+                                 const uint8_t *payload, int payloadLen)
+{
+    uint8_t pdu[120];
+    int total = ((payloadLen + 4 + 11) / 12) * 12;
+    int pad = total - 4 - payloadLen;
+    int nblk = total / 12;
+    uint8_t hdr[12] = { 0 };
+    memset(pdu, 0, sizeof pdu);
+    memcpy(pdu, payload, (size_t)payloadLen);
+    uint32_t crc = crc32_dmr(pdu, total);
+    pdu[total - 4] = (uint8_t)(crc >> 24); pdu[total - 3] = (uint8_t)(crc >> 16);
+    pdu[total - 2] = (uint8_t)(crc >> 8);  pdu[total - 1] = (uint8_t)crc;
+    hdr[0] = (uint8_t)((group ? 0x80 : 0) | (respReq ? 0x40 : 0) | (((nblk >> 4) & 0x03) << 4) | 0x0D);
+    hdr[1] = (uint8_t)(0xA0 | (nblk & 0x0F));
+    hdr[2] = (uint8_t)(dst >> 16); hdr[3] = (uint8_t)(dst >> 8); hdr[4] = (uint8_t)dst;
+    hdr[5] = (uint8_t)(src >> 16); hdr[6] = (uint8_t)(src >> 8); hdr[7] = (uint8_t)src;
+    hdr[8] = (uint8_t)((ddFormat << 2) | 0x01);            /* DD format, SARQ 0, F 1 */
+    hdr[9] = (uint8_t)(pad * 8);                           /* bit padding */
+    dmrSmsRxBurst(6, hdr);
+    for (int b = 0; b < nblk; b++) { dmrSmsRxBurst(7, pdu + b * 12); }
+    dmrSmsRxReset();
+    dmrSmsRxTick();
+}
+
+static void testDefinedShortDataSms(void)
+{
+    static const uint8_t HELLO_BE[] = { 0,'N',0,'e',0,'t',0,' ',0,'h',0,'e',0,'l',0,'l',0,'o' };   /* "Net hello" UTF-16BE */
+    static const uint8_t EIGHT_BIT[] = "Latin text";
+    uint8_t ack[12];
+    const dmrSmsMessage_t *m;
+
+    fresh();
+    trxDMRID = 12342;
+    playDefinedShortData(2621234, 12342, 0, 1, 0x14, HELLO_BE, sizeof HELLO_BE);
+    check(dmrSmsCount(0) == 1 && inboxHas("Net hello"), "a private Defined Short Data message in UTF-16BE decodes into the inbox");
+    m = dmrSmsGet(0, 0);
+    check(m && (m->peerId == 2621234) && !(m->flags & DMR_SMS_FLAG_GROUP), "stored as private from the network sender");
+    check((dmrSmsAckTake(ack) == 1) && ((ack[0] & 0x0F) == 0x01) && (ack[9] == 0x08), "its response request is acknowledged (status 0, no N(S) in a short data header)");
+
+    playDefinedShortData(2621234, 12342, 0, 1, 0x14, HELLO_BE, sizeof HELLO_BE);   /* the network repeats it */
+    check(dmrSmsCount(0) == 1 && (dmrSmsAckTake(ack) == 1), "a repeat within the window is acknowledged and not stored again");
+
+    clockAdvance(61000);
+    playDefinedShortData(2621234, 9, 1, 0, 0x03, EIGHT_BIT, (int)strlen((const char *)EIGHT_BIT));
+    check(dmrSmsCount(0) == 2 && inboxHas("Latin text"), "a group Defined Short Data message in 8-bit text decodes");
+    m = dmrSmsGet(0, 0);
+    check(m && (m->flags & DMR_SMS_FLAG_GROUP) && (dmrSmsAckTake(ack) == 0), "stored as a group message; no acknowledgement for a group message");
+
+    playDefinedShortData(2621234, 12399, 0, 1, 0x14, HELLO_BE, sizeof HELLO_BE);
+    check(dmrSmsCount(0) == 2 && (dmrSmsAckTake(ack) == 0), "a private short data message for another radio is neither stored nor acknowledged");
+    trxDMRID = 2345678;
+}
+
 static void testEncHeaderWithGroupBit(void)
 {
     stream_t s;
@@ -573,6 +631,7 @@ int main(void)
     testDiagResetForgetsLastMessage();
     testCleartextPduReportsNoKeyId();
     testConfirmedPrivateSmsIsAcknowledged();
+    testDefinedShortDataSms();
     testEncHeaderWithGroupBit();
     testLostEncHeaderStillDecrypts();
     testWrongKeyIsDropped();

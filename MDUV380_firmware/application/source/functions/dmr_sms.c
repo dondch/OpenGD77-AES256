@@ -31,6 +31,8 @@
 #define DPF_UNCONFIRMED  0x02
 #define DPF_CONFIRMED    0x03
 #define DPF_PROPRIETARY  0x0F
+#define DPF_DEFINED_SHORT 0x0D   /* Defined Short Data: the text itself in the blocks, DD format in the header */
+#define DPF_RAW_SHORT     0x0E   /* Raw Short Data: same block layout, no format given (8-bit assumed) */
 /* Block payloads (ETSI TS 102 361-1 9.2.7/9.2.8). Unconfirmed: the whole block is payload,
  * 12 bytes at rate 1/2, 18 at rate 3/4. Confirmed: the block leads with a 2-byte
  * DBSN(7)+CRC-9 field, leaving 10 / 16 payload bytes. The packet CRC32 (and the ECB
@@ -770,6 +772,46 @@ static volatile uint8_t s_rxHdrA;      /* header byte 0 bit 6: response requeste
 static volatile uint8_t s_rxHdrSeq;    /* header byte 9: S | N(S) | FSN */
 static uint8_t          s_ackHdr[12];
 static volatile uint8_t s_ackReady;
+/* Defined / Raw Short Data (ETSI TS 102 361-1 DD_HEAD, R_HEAD): how a network delivers an SMS
+ * through a repeater or hotspot (BrandMeister, MOTOTRBO gateways). The header carries the
+ * appended block count in byte 0 bits 4..5 + byte 1 bits 0..3, SAP 0xA, the DD format in byte
+ * 8 bits 2..7 and the bit padding in byte 9; the blocks carry the text itself, no IP/UDP, and
+ * end with the packet CRC32 like any data PDU, so the CRC-driven reassembly is unchanged.
+ * Text formats seen on air: UTF-16BE (0x14, also 0x13), UTF-16LE (0x15), 8-bit (0x03 8859-1,
+ * 0x12 UTF-8 taken as ASCII). Main RAM. */
+static volatile uint8_t s_rxDefined;       /* this PDU is short data */
+static volatile uint8_t s_rxDdFormat;      /* its DD format (0 for raw) */
+static volatile uint8_t s_rxBitPad;        /* bits of padding before the CRC */
+static volatile uint8_t s_rxPeerDefined;   /* hand-off copies for the main loop */
+static volatile uint8_t s_rxPeerDdFormat;
+static volatile uint8_t s_rxPeerBitPad;
+
+/* Text from a short data payload in its DD format. Returns the characters written (ASCII,
+ * others become '?'), 0 or less when nothing readable is in it. */
+static int ddTextDecode(const uint8_t *p, int len, uint8_t fmt, char *out, int outMax)
+{
+	int n = 0, printable = 0;
+	int wide = ((fmt == 0x13) || (fmt == 0x14) || (fmt == 0x15) || (fmt == 0x16) || (fmt == 0x17) || (fmt == 0x18));
+	int le = (fmt == 0x15) || (fmt == 0x18);
+	int step = ((fmt >= 0x16) && (fmt <= 0x18)) ? 4 : (wide ? 2 : 1);
+
+	if ((len <= 0) || (outMax <= 1)) { return -1; }
+	if ((fmt == 0x00) || (fmt == 0x01) || ((fmt >= 0x08) && (fmt <= 0x09))) { return -1; }   /* binary, BCD, manufacturer specific */
+	for (int i = 0; (i + step - 1) < len && n < outMax - 1; i += step)
+	{
+		uint32_t cp;
+		if (step == 1)      { cp = p[i]; }
+		else if (step == 2) { cp = le ? (uint32_t)(p[i] | (p[i + 1] << 8)) : (uint32_t)((p[i] << 8) | p[i + 1]); }
+		else                { cp = le ? ((uint32_t)p[i] | ((uint32_t)p[i + 1] << 8) | ((uint32_t)p[i + 2] << 16) | ((uint32_t)p[i + 3] << 24))
+		                               : (((uint32_t)p[i] << 24) | ((uint32_t)p[i + 1] << 16) | ((uint32_t)p[i + 2] << 8) | (uint32_t)p[i + 3]); }
+		if (cp == 0) { break; }
+		if ((cp == 0x0A) || (cp == 0x0D) || (cp == 0x09)) { out[n++] = ' '; continue; }
+		if ((cp >= 0x20) && (cp < 0x7F)) { out[n++] = (char)cp; printable++; }
+		else { out[n++] = '?'; }
+	}
+	out[n] = 0;
+	return (printable > 0) ? n : -1;
+}
 /* diagnostic counters (visible on the Messages home screen) to localise RX failures */
 static volatile uint32_t s_diagData   DMR_AES_CCM; /* ALL data-sync-class bursts the chip delivered */
 static volatile uint32_t s_diagHdrOk  DMR_AES_CCM; /* type-6 data-header, CRC OK   */
@@ -851,6 +893,7 @@ static void rxAccumReset(void)
 	s_rxHaveHeader = 0; s_rxHaveEnc = 0; s_rxExpBlocks = 0; s_rxCount = 0;
 	s_rxConfirmed = 0; s_rxBlkLen = BLK_R12_LEN;
 	s_rxKeyId = 0;   /* CCM is not zeroed at boot: a cleartext PDU must not report a stale key id */
+	s_rxDefined = 0;
 }
 
 /* Terminator / call end: keep an incomplete copy's blocks for a merge with its retransmission
@@ -971,6 +1014,9 @@ void dmrSmsRxBurst(int rxDataType, const uint8_t *p)
 			s_rxKeyId = 0;              /* set by this packet's ENC header, if one follows */
 			s_rxHdrA = (p[0] & 0x40) ? 1 : 0;
 			s_rxHdrSeq = p[9];
+			s_rxDefined = ((dpf == DPF_DEFINED_SHORT) || (dpf == DPF_RAW_SHORT)) ? 1 : 0;
+			s_rxDdFormat = (dpf == DPF_DEFINED_SHORT) ? (uint8_t)(p[8] >> 2) : 0x03;
+			s_rxBitPad = s_rxDefined ? p[9] : 0;
 			/* a different packet: the kept copy cannot be a retransmission of this one */
 			if (s_altCount && ((s_rxSrc != s_altSrc) || (s_rxDst != s_altDst) ||
 					((uint8_t)((s_rxConfirmed ? DPF_CONFIRMED : DPF_UNCONFIRMED) | (s_rxGroup ? 0x80 : 0)) != s_altHdr)))
@@ -1045,13 +1091,17 @@ void dmrSmsRxBurst(int rxDataType, const uint8_t *p)
 			s_rxPeerGroup = s_rxGroup;
 			s_rxPeerKeyId = s_rxKeyId;
 			s_rxPeerEnc = s_rxHaveEnc;   /* decrypt if the ENC header was seen, else read cleartext */
+			s_rxPeerDefined = s_rxDefined;
+			s_rxPeerDdFormat = s_rxDdFormat;
+			s_rxPeerBitPad = s_rxBitPad;
 			s_rxReady = 1;          /* main loop will decrypt (or read cleartext) + store */
 			s_diagPdu++;
 			/* Confirmed, individual, to us, response requested: acknowledge it, whatever the
 			 * main loop then makes of the text (a stock radio acknowledges at the link layer). */
-			if (s_rxConfirmed && !s_rxGroup && s_rxHdrA && (s_rxDst == trxDMRID))
+			if ((s_rxConfirmed || s_rxDefined) && !s_rxGroup && s_rxHdrA && (s_rxDst == trxDMRID))
 			{
-				uint8_t ns = (uint8_t)((s_rxHdrSeq >> 4) & 0x07);
+				/* status = N(S) of a confirmed packet; a short data header has no N(S) (byte 9 is padding) */
+				uint8_t ns = s_rxConfirmed ? (uint8_t)((s_rxHdrSeq >> 4) & 0x07) : 0;
 				s_ackHdr[0] = 0x01;                                   /* individual, no response wanted, DPF 1 */
 				s_ackHdr[1] = 0x40;                                   /* SAP 4 (IP based), no padding */
 				s_ackHdr[2] = (uint8_t)(s_rxSrc >> 16); s_ackHdr[3] = (uint8_t)(s_rxSrc >> 8); s_ackHdr[4] = (uint8_t)s_rxSrc;
@@ -1093,11 +1143,15 @@ void dmrSmsRxTick(void)
 	uint8_t  group = s_rxPeerGroup;
 	uint8_t  keyId = s_rxPeerKeyId;
 	uint8_t  enc = s_rxPeerEnc;
+	uint8_t  defined = s_rxPeerDefined;
+	uint8_t  ddFormat = s_rxPeerDdFormat;
+	int      ddPad = (int)s_rxPeerBitPad / 8;
 	if (pduLen > (int)sizeof pdu) { pduLen = (int)sizeof pdu; }
 	memcpy(pdu, s_rxPdu, pduLen);
 	s_rxReady = 0;
 
-	if (pduLen < 32) { return; }            /* whole PDU is passed; decrypt derives the enc len */
+	if (!defined && (pduLen < 32)) { return; }   /* an IP/UDP/TMS packet is at least that; short data can be a few bytes */
+	if (pduLen < 8) { return; }
 
 	/* Addressing: a private (individual) SMS is ours only when it is sent to our DMR ID (or
 	 * all-call). Everything else on the channel is somebody else's conversation. Group messages
@@ -1118,10 +1172,18 @@ void dmrSmsRxTick(void)
 	const uint8_t *pt = NULL;   /* the plaintext IPv4/UDP/TMS packet, once decoded */
 	int got = -1;
 
+	/* Short data: the blocks are the text, in the header's format, minus the padding and the CRC. */
+	if (defined)
+	{
+		int len = pduLen - 4 - ddPad;
+		got = ddTextDecode(pdu, len, ddFormat, text, sizeof text);
+		if (got > 0) { pt = pdu; }
+	}
+
 	/* The ENC header decides the first attempt, but either way is tried: the ENC header burst
 	 * can fail its CRC and never reach us (the blocks still decrypt under our keys), and a
 	 * cleartext PDU never passes the IPv4/UDP check through a decrypt, nor ciphertext without one. */
-	for (int pass = 0; pass < 2 && got <= 0; pass++)
+	for (int pass = 0; (pass < 2) && (got <= 0) && !defined; pass++)
 	{
 		int tryDecrypt = (pass == 0) ? (enc != 0) : (enc == 0);
 		if (tryDecrypt)
@@ -1149,10 +1211,11 @@ void dmrSmsRxTick(void)
 	/* Duplicate of the message we just stored (an unacknowledged confirmed-delivery retry):
 	 * same sender, same IPv4 identification, same TMS sequence byte. */
 	{
-		uint16_t ipId = (uint16_t)(((uint16_t)pt[4] << 8) | pt[5]);
-		uint8_t  tmsSeq = pt[32];
+		/* short data has no IP id / TMS sequence; its repeats are caught by the text window below */
+		uint16_t ipId = defined ? 0 : (uint16_t)(((uint16_t)pt[4] << 8) | pt[5]);
+		uint8_t  tmsSeq = defined ? 0 : pt[32];
 		uint32_t now = ticksGetMillis();
-		if (s_lastRxValid && (peer == s_lastRxPeer) && (ipId == s_lastRxIpId) && (tmsSeq == s_lastRxTmsSeq))
+		if (!defined && s_lastRxValid && (peer == s_lastRxPeer) && (ipId == s_lastRxIpId) && (tmsSeq == s_lastRxTmsSeq))
 		{
 			return;
 		}
