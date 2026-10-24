@@ -61,7 +61,8 @@ cd MDUV380_firmware && sh tests/run_all.sh
 Builds and runs every `tests/test_*.c` against the real `crypto/` and `functions/dmr_sms.c` sources with the
 small firmware stand-ins in `tests/stubs/` (each test's header carries its own gcc line). Covers the AES
 primitives, the late-entry MI and EMB codings, the RX bootstrap / PI seeding across call boundaries, the TX
-state at key-up, and the SMS receive path (unconfirmed and confirmed delivery, addressing, retransmissions).
+state at key-up, and the SMS receive path (unconfirmed and confirmed delivery, addressing, retransmissions, the
+acknowledgement, the network's short data, and the stock radio's "DMR format" text, from captured PDUs).
 
 ## Dual screen build
 `ENABLE_DUAL_SCREEN=1` adds the Anytone-style dual screen (two rows, A and B, each a VFO or a zone channel;
