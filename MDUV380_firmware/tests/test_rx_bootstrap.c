@@ -19,12 +19,14 @@
 #include "crypto/dmr_aes.h"
 #include "crypto/dmr_aes_hook.h"
 #include "functions/codeplug.h"
+#include "functions/ticks.h"
 #include "hardware/SPI_Flash.h"
 
 bool SPI_Flash_read(uint32_t a, uint8_t *b, int n) { (void)a; memset(b, 0xFF, (size_t)n); return true; }
 bool SPI_Flash_write(uint32_t a, uint8_t *b, int n) { (void)a; (void)b; (void)n; return true; }
 bool codeplugGetOpenGD77CustomDataBounded(CodeplugCustomDataType_t t, uint8_t *b, int n) { (void)t; (void)b; (void)n; return false; }
 bool codeplugSetOpenGD77CustomData(CodeplugCustomDataType_t t, uint8_t *b, int n) { (void)t; (void)b; (void)n; return false; }
+uint32_t ticksGetMillis(void) { static uint32_t t = 0; return t += 60; }   /* for the -DDMR_AES_DIAG_RX build */
 
 static const uint8_t KEY1[32] = {
     0x8a,0xfb,0x6a,0x02,0x46,0x07,0xf0,0x7d, 0x1e,0x6e,0xde,0xc7,0x91,0xab,0xce,0x09,

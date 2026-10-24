@@ -34,6 +34,9 @@
 #include "interfaces/gpio.h"
 #include "interfaces/adc.h"
 #include "io/buttons.h"
+#if defined(ENABLE_KEY_INJECTION)
+void usbKeyInjectReset(void);   /* usb_com.c; declared here rather than pulling in usb_com.h's USB stack */
+#endif
 
 // Keyboard Keys
 typedef struct
@@ -281,6 +284,9 @@ void keyboardReset(void)
 	keyState = KEY_WAIT_RELEASED;
 #if defined(PLATFORM_MD2017)
 	trackballReset();
+#endif
+#if defined(ENABLE_KEY_INJECTION)
+	usbKeyInjectReset();   // DEV: the injected key's release is dropped like a physical one's
 #endif
 }
 

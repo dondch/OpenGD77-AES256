@@ -3,6 +3,7 @@
  * Build & run on a PC (no radio needed), from MDUV380_firmware/:
  *     gcc -O2 -Wall -Iapplication/include -Iapplication/include/crypto -o /tmp/test_dmr_aes \
  *          tests/test_dmr_aes.c application/source/crypto/dmr_aes.c && /tmp/test_dmr_aes
+ * (tests/run_all.sh builds and runs every host test in one go.)
  * Verifies the crypto is bit-exact before integrating into OpenGD77.
  */
 #include "dmr_aes.h"

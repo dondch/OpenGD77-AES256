@@ -140,13 +140,23 @@ static void homeUpdate(void)
 	displayRender();
 }
 
-static void openFolder(int folder)
+/* Show a folder's list with the cursor on row `cursor` (clamped to the list, which may have
+ * just shrunk by a delete). Coming back from a read message, that is the message's row, so
+ * the cursor does not jump back to the newest message after each one read. */
+static void openFolderAt(int folder, int cursor)
 {
 	s_msg.folder = (uint8_t)folder;
 	s_msg.view = MSG_LIST;
-	menuDataGlobal.currentItemIndex = 0;
 	menuDataGlobal.numItems = dmrSmsCount(folder) + 1;   // +1 for "[Delete all]"
+	if (cursor >= menuDataGlobal.numItems) { cursor = menuDataGlobal.numItems - 1; }
+	if (cursor < 0) { cursor = 0; }
+	menuDataGlobal.currentItemIndex = cursor;
 	listUpdate();
+}
+
+static void openFolder(int folder)
+{
+	openFolderAt(folder, 0);
 }
 
 static void startCompose(void)
@@ -337,12 +347,12 @@ static void readEvent(uiEvent_t *ev)
 	if (KEYCHECK_SHORTUP(ev->keys, KEY_GREEN) && BUTTONCHECK_DOWN(ev, BUTTON_SK2))
 	{
 		dmrSmsDelete(s_msg.folder, s_msg.readIdx);
-		openFolder(s_msg.folder);
+		openFolderAt(s_msg.folder, s_msg.readIdx);   // the row that took the deleted message's place
 		return;
 	}
 	if (KEYCHECK_SHORTUP(ev->keys, KEY_RED) || KEYCHECK_SHORTUP(ev->keys, KEY_GREEN))
 	{
-		openFolder(s_msg.folder);
+		openFolderAt(s_msg.folder, s_msg.readIdx);   // back on the message just read
 		return;
 	}
 }

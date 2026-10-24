@@ -232,7 +232,11 @@ static void updateScreen(uiEvent_t *ev, bool forceRedraw)
 {
 	static bool blink = false;
 	bool renderArrowOnly = true;
-	char buffer[SCREEN_LINE_BUFFER_SIZE];
+	// The Location screen writes a 19-byte "__.____N ___.____E" string into this buffer, both
+	// with its own sprintf and through buildLocationAndMaidenheadStrings(), whose snprintf is
+	// bounded to LOCATION_TEXT_BUFFER_SIZE whatever buffer it is given. The other callers of
+	// that function size their buffer so; a 17-byte line buffer overflowed here.
+	char buffer[LOCATION_TEXT_BUFFER_SIZE];
 #if defined(HAS_COLOURS)
 	bool dblHeight = settingsIsOptionBitSet(BIT_UI_USES_DOUBLE_HEIGHT);
 #else

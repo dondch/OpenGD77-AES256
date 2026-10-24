@@ -25,7 +25,8 @@ except ImportError:
     sys.exit("pyserial required: pip install pyserial")
 
 AES_VID, AES_PID = 0x1FC9, 0x0094
-TYPE = {1: "PI    ", 2: "WRAP  ", 3: "LCRSET", 4: "RXEND ", 5: "IVGEN ", 6: "BOOT  ", 7: "RESEED", 8: "LATENT"}
+TYPE = {1: "PI    ", 2: "WRAP  ", 3: "LCRSET", 4: "RXEND ", 5: "IVGEN ", 6: "BOOT  ", 7: "RESEED", 8: "LATENT",
+        9: "IDLE  "}   # 9: RX ended by silence (end-tick or interrupt timeout) -> dmrAesRxEnd
 SLOTSTATE = {0: "IDLE", 1: "RX_1", 2: "RX_2", 3: "RX_END",
              4: "TXS1", 5: "TXS2", 6: "TXS3", 7: "TXS4", 8: "TXS5"}
 
@@ -70,13 +71,17 @@ def main():
     leOk, leFail = struct.unpack_from("<2H", data, 20)
     lcReads, piValid, burstCalls = struct.unpack_from("<3H", data, 24)
     leInt = struct.unpack_from("<H", data, 30)[0] if len(data) >= 32 else 0
-    body = data[32:32 + ring * rec]
+    hdr = data[3] or 32                        # header length when the firmware states it (0 = the 32-byte layout)
+    body = data[hdr:hdr + ring * rec]
 
     print(f"port {port}  ring={ring} rec={rec} writeIdx={w}")
     print(f"counts: PI={cnt[0]} WRAP={cnt[1]} LCRESET={cnt[2]} RXEND={cnt[3]} IVGEN={cnt[4]} "
           f"BOOTSTRAP={cnt[5]} RESEED={cnt[6]} LATEENTRY-int={leInt}   late-entry-decode: ok={leOk} fail={leFail}")
     print(f"        LC-reads={lcReads}  valid-PI={piValid}  RxBurst-calls={burstCalls}  "
           f"(non-PI LCs = {lcReads-piValid})")
+    if hdr >= 38:                              # 40-byte header: decoded frames while decrypting
+        frSil, frCcr, frXor = struct.unpack_from("<3H", data, 32)
+        print(f"        decoded frames while decrypting: XORed={frXor}  silence-skipped={frSil}  ccr-skipped={frCcr}")
     print("-" * 90)
     print(" # |   ts   dT | type   | seq last | mi        leMi      | flags")
     print("-" * 90)
@@ -102,6 +107,7 @@ def main():
             if fl & 1: f.append("valid")
             f.append("SEEDED" if (fl & 2) else "no-seed")
             f.append("wasActive" if (fl & 4) else "wasIdle")
+            if fl & 8: f.append("stale-ignored")   # PI of the stream that just ended, not seeded on
             fs = " ".join(f)
         elif t == 2:   # WRAP (active self-advance)
             fs = ("LE-OK" if (fl & 1) else "LE-FAIL") + (" confirmed" if (fl & 8) else "")
@@ -109,7 +115,7 @@ def main():
             fs = ("LE-OK" if (fl & 1) else "LE-FAIL") + (" confirmed" if (fl & 8) else "") + (" ACTIVATED" if (fl & 0x10) else " (no-seed)")
         elif t == 7:   # RESEED (active track switch on diverging confirmed late entry)
             fs = "SWITCHED-TRACK" + (" confirmed" if (fl & 8) else "")
-        elif t in (3, 4):
+        elif t in (3, 4, 9):
             fs = "wasActive" if (fl & 1) else "wasIdle"
         elif t == 8:   # LATEENTRY: chip late-entry interrupt fired. seq = slotState it fired in.
             st = SLOTSTATE.get(seq, f"st{seq}")

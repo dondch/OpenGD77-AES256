@@ -72,6 +72,24 @@ ifeq ($(ENABLE_FAST_SCAN),1)
 DEFS += -DENABLE_FAST_SCAN
 endif
 
+# Dual screen (two rows, A and B, each a VFO or a zone channel, like the Anytone radios), the
+# row watch, and the Dual Watch options menu (home side, speed, stay, channel as side B).
+# Ported from erenbozaci/md-uv390-firmware (Eren TA3BZC). A user-facing feature flag; a build
+# without it stays stock.
+ifeq ($(ENABLE_DUAL_SCREEN),1)
+DEFS += -DENABLE_DUAL_SCREEN
+endif
+
+# The TA2TWC screens (josephddt/OpenGD77-TA2TWC): redesigned Channel home screen with the
+# S-meter, dBm, signal quality, battery voltage, temperature and a signal history, caller and
+# TX screens, telemetry lines on the VFO screen, an analog S-meter on the RSSI screen, boot
+# and shutdown animations, a dark default theme and compact 9-line menus. A user-facing
+# feature flag; a build without it stays stock. With ENABLE_DUAL_SCREEN as well, the dual
+# screen takes the home screen over while its option is on.
+ifeq ($(ENABLE_TA2TWC_SCREENS),1)
+DEFS += -DENABLE_TA2TWC_SCREENS
+endif
+
 CFLAGS  = $(CPU) $(DEFS) $(INCS) -Os -g3 -ffunction-sections -fdata-sections -Wall -MMD -MP
 LDSCRIPT = STM32F405VGTX_FLASH.ld
 LDFLAGS = $(CPU) -T$(LDSCRIPT) --specs=nano.specs -Wl,--gc-sections -Wl,-Map=$(BUILD)/$(TARGET).map -lc -lm -lnosys

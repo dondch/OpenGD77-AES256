@@ -316,6 +316,9 @@ static bool hrc6000CallAcceptFilter(void);
 static void hrc6000SendPcOrTgLCHeader(void);
 #if defined(ENABLE_DMR_DATA)
 static void hrc6000DataTxStartBurst(void);
+#if defined(ENABLE_AES)
+static void hrc6000DataAckStart(const uint8_t *hdr12);
+#endif
 #endif
 #ifdef ENABLE_AES
 static uint32_t hrc6000AesRngSeed(void);
@@ -1091,19 +1094,43 @@ static inline void hrc6000SysReceivedDataInt(void)
 
 #if defined(ENABLE_DMR_DATA) && defined(ENABLE_AES)
 	// Encrypted-SMS RX: the chip BPTC-decodes + CRC-checks each data-sync burst and presents
-	// its 96 info bits at page 0x02 (the same path the PI header uses). Hand Data Header (6)
-	// and Rate-1/2 (7) bursts to the SMS reassembler; it accumulates the PDU and the main loop
-	// (dmrSmsRxTick) decrypts + stores it. Skip our own TX echoes.
+	// its 96 info bits at page 0x02 (the same path the PI header uses). Hand Data Header (6),
+	// Rate-1/2 (7) and Rate-3/4 (8) bursts to the SMS reassembler; it accumulates the PDU and
+	// the main loop (dmrSmsRxTick) decrypts + stores it. Skip our own TX echoes.
+	//
+	// Rate 3/4 is what a stock TYT uses for a PRIVATE (confirmed-delivery) SMS: 144 info
+	// bits = 18 bytes after the chip's trellis decode. UNVERIFIED on the bench: that the
+	// chip reports these bursts as type 8 with a valid CRC flag and that the 18 bytes sit
+	// at page 0x02 reg 0x00..0x11 like the BPTC output does. The dmrSmsRxDiag counters and
+	// the 0x95 raw-PDU snapshot are the way to find out from a replayed stock capture.
 	if ((hrc.transmissionEnabled == false) && (rxSyncClass == SYNC_CLASS_DATA))
 	{
 		int crcOk = hrc6000CrcIsValid() ? 1 : 0;
 		dmrSmsRxDiagBurst(rxDataType, crcOk);   // log every data-sync burst (any type/CRC)
-		if (crcOk && ((rxDataType == 6) || (rxDataType == 7)))
+		if (crcOk && ((rxDataType == 6) || (rxDataType == 7) || (rxDataType == 8)))
 		{
-			uint8_t dataBurst[LC_DATA_LENGTH];
-			if (SPI0ReadPageRegByteArray(0x02, 0x00, dataBurst, LC_DATA_LENGTH) == kStatus_Success)
+			uint8_t dataBurst[18];
+			int dataLen = (rxDataType == 8) ? 18 : LC_DATA_LENGTH;
+			if (SPI0ReadPageRegByteArray(0x02, 0x00, dataBurst, dataLen) == kStatus_Success)
 			{
 				dmrSmsRxBurst(rxDataType, dataBurst);
+				// A confirmed private SMS to us just completed: a stock sender expects the
+				// acknowledgement in the very next timeslot, so it is keyed from here, not
+				// from the main loop (bench: the stock receiver's ACK starts 0-1 ms after the
+				// sender's last burst ends, or the sender repeats the PDU up to four times).
+				// Not when relaying as a hotspot: the host handles data then.
+				{
+					uint8_t ackHdr[LC_DATA_LENGTH];
+					// Never from an Rx-Only channel or with TX inhibited: the acknowledgement is a
+					// transmission like any other, and the sender then simply repeats as it
+					// would to a radio that is not listening.
+					if (dmrSmsAckTake(ackHdr) && (settingsUsbMode != USB_MODE_HOTSPOT) && (slotState < DMR_STATE_TX_START_1) &&
+							(codeplugChannelGetFlag(currentChannelData, CHANNEL_FLAG_RX_ONLY) == 0) &&
+							(settingsIsOptionBitSet(BIT_TX_INHIBIT) == false))
+					{
+						hrc6000DataAckStart(ackHdr);
+					}
+				}
 			}
 		}
 	}
@@ -1804,10 +1831,11 @@ void hrc6000TimeslotInterruptHandler(void)
 				// the AES PI headers, and every radio holding that key would then "decrypt" the
 				// clear relayed voice into noise (issue #2).
 				if (settingsUsbMode == USB_MODE_HOTSPOT) { aesTxKeyId = 0; }
-				if (aesTxKeyId != 0)
-				{
-					dmrAesTxStart(aesTxKeyId, hrc6000AesRngSeed()); // begin encrypted call (fresh MI)
-				}
+				// Always called: key id 0 starts a CLEAR call and ends any encrypted state left
+				// behind by a previous call that never reached DMR_STATE_TX_END_1 (interrupt
+				// timeout, mode change, slot reset). Otherwise that stale state would put the
+				// encryption LC flags, PI headers and an encrypted codec stream on a clear call.
+				dmrAesTxStart(aesTxKeyId, (aesTxKeyId != 0) ? hrc6000AesRngSeed() : 0); // begin encrypted call (fresh MI), or clear
 			}
 #endif
 #if defined(ENABLE_DMR_DATA)
@@ -2056,6 +2084,17 @@ void hrc6000TimeslotInterruptHandler(void)
 #endif
 			break;
 
+#if defined(ENABLE_DMR_DATA) && defined(ENABLE_AES)
+		case DMR_STATE_TX_ACK_1: // the SMS acknowledgement header is going out in this timeslot
+			SPI0WritePageRegByte(0x04, 0x41, 0x00);   // and nothing in the next one
+			slotState = DMR_STATE_TX_ACK_2;
+			break;
+		case DMR_STATE_TX_ACK_2: // sent: back to receive, as the end of a DMO transmission does
+			addTimerCallback(hrc6000TxBurstCallback, 29, MENU_ANY, false);
+			HRC6000InitDigitalDmrRx();
+			slotState = DMR_STATE_TX_END_3_DMO;
+			break;
+#endif
 		case DMR_STATE_TX_END_3_DMO:
 			slotState = DMR_STATE_IDLE;
 			trxIsTransmitting = false;
@@ -2135,6 +2174,18 @@ void hrc6000TimeslotInterruptHandler(void)
 		{
 			HRC6000InitDigitalDmrRx();
 			HRC6000ClearActiveDMRID();
+#ifdef ENABLE_AES
+			// RX ended by silence: END_TICK_TIMEOUT timeslots (13 x 30 ms) without a CRC-valid
+			// burst. This is the path the chip takes when a carrier simply drops mid-call, and
+			// it does NOT go through hrc6000InitDigitalState(). The encrypted stream has ended
+			// with the carrier; otherwise a call that lost its Terminator (and whose successor
+			// has no Voice LC Header) keeps decrypting into the next, clear, call (bench: a
+			// 0.5 s gap, 18-36 clear frames decrypted).
+#ifdef DMR_AES_DIAG_RX
+			dmrAesDiagRxMark(9); // IDLE: RX end-tick timeout
+#endif
+			dmrAesRxEnd();
+#endif
 			audioAmpDisable(AUDIO_AMP_CHANNEL_RF);
 			if ((voicePromptsIsPlaying() == false) && (soundMelodyIsPlaying() == false))
 			{
@@ -2210,6 +2261,15 @@ static void hrc6000InitDigitalState(void)
 	hrc.interruptTimeout = 0;
 	slotState = DMR_STATE_IDLE;
 	trxIsTransmitting = false;
+#ifdef ENABLE_AES
+	// The DMR slot machine is being reset to IDLE: at init, on a mode change, and when the
+	// receive interrupts have stopped for INTERRUPT_TIMEOUT (the air went quiet). Whatever
+	// encrypted stream was being decrypted has ended with it. Without this an encrypted call
+	// whose Terminator AND whose successor's Voice LC Header were both missed kept decrypting
+	// into the following clear call (bench: 51 of 54 clear frames decrypted). A gap shorter
+	// than INTERRUPT_TIMEOUT with both boundaries lost still is not caught here.
+	dmrAesRxEnd();
+#endif
 	hrc.tickCount = 0;
 	hrc.skipCount = 0;
 	hrc.tsAgreed = 0;
@@ -2399,6 +2459,26 @@ static void hrc6000DataTxStartBurst(void)
 		SPI0WritePageRegByte(0x04, 0x50, 0x10);    // fallback: Voice-LC header
 	}
 }
+
+#if defined(ENABLE_AES)
+// Send one data-header burst in the NEXT timeslot, from the receive state, without the
+// data-call key-up (CSBK preamble, active timing, Voice LC). The chip keeps the passive
+// timing it locked to the sender, so the burst lands in the slot after the sender's last
+// one, where a stock radio puts its acknowledgement; the RF_TX interrupt keys the PA before
+// the burst exactly as it does for a repeater-timed transmission, and the timeslot
+// interrupt turns it off again (hrc6000RxInterruptHandler). TX_ACK_1/2 then return to
+// receive the way a DMO transmission ends. The UI is not told: nothing that short needs
+// a TX screen, and trxTransmissionEnabled stays false so the receive hooks keep their
+// state for the sender's possible Terminator.
+static void hrc6000DataAckStart(const uint8_t *hdr12)
+{
+	audioAmpDisable(AUDIO_AMP_CHANNEL_RF);
+	SPI0WritePageRegByteArray(0x02, 0x00, (uint8_t *)hdr12, LC_DATA_LENGTH);
+	SPI0WritePageRegByte(0x04, 0x50, 0x60);    // Data Header, Data, LCSS=00
+	SPI0WritePageRegByte(0x04, 0x41, 0x80);    // transmit during next timeslot
+	slotState = DMR_STATE_TX_ACK_1;
+}
+#endif
 #endif
 
 #ifdef ENABLE_AES
@@ -2633,6 +2713,12 @@ static void hrc6000Tick(void)
 
 			if (hrc.interruptTimeout == INTERRUPT_TIMEOUT)
 			{
+#if defined(ENABLE_AES) && defined(DMR_AES_DIAG_RX)
+				// The DMR subsystem stopped interrupting for INTERRUPT_TIMEOUT ms. The AES stream
+				// is ended by hrc6000InitDigitalState() inside HRC6000InitDigital(); mark it here
+				// first so the ring records whether decryption was still active.
+				dmrAesDiagRxMark(9); // IDLE: interrupt timeout
+#endif
 				HRC6000InitDigital();// sets 	interruptTimeout=0;
 				HRC6000ClearActiveDMRID();
 				if (uiDataGlobal.displayQSOState != QSO_DISPLAY_DEFAULT_SCREEN)
@@ -3082,6 +3168,13 @@ bool HRC6000IRQHandlerIsRunning(void)
 {
 	return hrc.inIRQHandler;
 }
+
+#if defined(ENABLE_TA2TWC_SCREENS)
+uint8_t HRC6000GetReceivedColourCode(void)
+{
+	return hrc.rxColorCode;
+}
+#endif
 
 bool HRC6000HasGotSync(void)
 {

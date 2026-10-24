@@ -191,6 +191,28 @@ void radioSetRssiCountDefault(void)
 }
 #endif
 
+#if defined(ENABLE_FAST_SCAN)
+void radioSweepRetune(uint32_t freq)
+{
+	// Exact integer conversion: the channel word LSB is 62.5 Hz and freq is in 10 Hz
+	// units, so word = freq * 4 / 25. radioSetFrequency()'s `f * 0.16f` loses the low
+	// bits above ~167 MHz (24-bit float mantissa), which would make fine sweep bins
+	// unevenly spaced.
+	uint32_t f = (freq * 4U) / 25U;
+	uint8_t hi30 = (currentRadioDevice->currentBandWidthIs25kHz ? 0x70 : 0x60);
+
+	// Same bracket radioSetFrequency() uses, same register values: RX off, PLL, RX on.
+	// Writing 0x29/0x2A alone does NOT retune (measured: the chip keeps receiving on the
+	// old frequency); the RX off->on edge is what latches the new channel word.
+	taskENTER_CRITICAL();
+	radioWriteReg2byte(0x30, hi30, 0x06);                            // RX off
+	radioWriteReg2byte(0x29, (f >> 24) & 0xFF, (f >> 16) & 0xFF);
+	radioWriteReg2byte(0x2a, (f >> 8) & 0xFF, f & 0xFF);
+	radioWriteReg2byte(0x30, hi30, 0x26);                            // RX on
+	taskEXIT_CRITICAL();
+}
+#endif
+
 void radioSetMode(int mode) // Called withing trx.c: in task critical sections
 {
 	if (mode == RADIO_MODE_ANALOG)
