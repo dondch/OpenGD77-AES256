@@ -1,4 +1,4 @@
-/* Host test of the DMR SMS receive path in functions/dmr_sms.c (ENABLE_DMR_DATA + ENABLE_AES).
+/* Host test of the DMR SMS receive path in functions/dmr_sms.c (ENABLE_DMR_DATA).
  *
  * The real dmrSmsSend() builds the on-air burst stream (CSBK preamble, data header, ENC header,
  * rate-1/2 blocks) exactly as a stock TYT does; the test captures that stream from the data-TX
@@ -13,7 +13,7 @@
  *     as a second message;
  *   - an ENC header with the group bit set, or a lost ENC header burst, must still decode.
  *
- * Build: gcc -O2 -DENABLE_AES -DENABLE_DMR_DATA -Itests/stubs -Iapplication/include \
+ * Build: gcc -O2 -DENABLE_DMR_DATA -Itests/stubs -Iapplication/include \
  *          -o /tmp/test_sms_rx tests/test_sms_rx.c application/source/functions/dmr_sms.c \
  *          application/source/crypto/dmr_aes_hook.c application/source/crypto/dmr_aes.c \
  *          && /tmp/test_sms_rx

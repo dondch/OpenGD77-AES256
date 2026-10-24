@@ -13,7 +13,7 @@ The per-channel byte is honoured only when the channel does NOT use a per-channe
 "optional DMR ID" (that feature repurposes the same byte to hold the DMR ID). If a key
 slot has no key loaded, the firmware transmits in the clear (no garble).
 
-Runs over USB CDC (radio enumerates as 1fc9:0094); requires an ENABLE_AES build.
+Runs over USB CDC (radio enumerates as 1fc9:0094); requires this fork's firmware.
 
 Usage:
   aes_channel_key.py --channel N --slot K     # encrypt channel N with AES key slot K (1..15)
@@ -50,7 +50,7 @@ def cmd_get(ser, ch):
     ser.reset_input_buffer(); ser.write(req); ser.flush(); time.sleep(0.15)
     r = ser.read(8)
     if len(r) < 3 or r[0] != ord("C"):
-        raise RuntimeError("bad reply (is this an ENABLE_AES build?): %r" % r[:8])
+        raise RuntimeError("bad reply (is this the OpenGD77-AES256 firmware?): %r" % r[:8])
     return r[1], r[2]  # encrypt byte, flags (bit0 = optional-DMRID set)
 
 

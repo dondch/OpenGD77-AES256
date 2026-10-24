@@ -13,7 +13,7 @@ vs the 5W radios, and newer production batches have low-brightness LCDs - all ha
 # 1. install the official ARM GNU toolchain (14.2.Rel1) and python deps:
 pip install -r MDUV380_firmware/tools/requirements.txt
 # 2. put the radio in DFU/bootloader mode, then:
-./flash.sh /path/to/MD9600-CSV2571V5-V26.45.bin        # add 'aes' for the experimental AES build
+./flash.sh /path/to/MD9600-CSV2571V5-V26.45.bin
 ```
 `flash.sh` builds the firmware, validates the codec donor, merges the AMBE codec, and DFU-flashes the radio.
 
@@ -33,11 +33,12 @@ python3 MDUV380_firmware/tools/verify_codec_donor.py <donor.bin>     # prints VA
 ## Manual build
 ```sh
 cd MDUV380_firmware
-make -j$(nproc)                 # stock; or: make ENABLE_AES=1
+make -j$(nproc)
 # -> build/openuv380-10w.bin  (~806 KB: code + reserved codec region)
 ```
 The `Makefile` mirrors the CubeIDE `MDUV380_10W_PLUS_FW` release config (-Os, `-mcpu=cortex-m4 -mfpu=fpv4-sp-d16
--mfloat-abi=hard`, defines `USE_HAL_DRIVER STM32F405xx PLATFORM_MDUV380 PLATFORM_VARIANT_UV380_PLUS_10W`, linker
+-mfloat-abi=hard`, defines `USE_HAL_DRIVER STM32F405xx PLATFORM_MDUV380 PLATFORM_VARIANT_UV380_PLUS_10W NDEBUG
+GITVERSION=<git short hash>`, linker
 `STM32F405VGTX_FLASH.ld`) and auto-creates the empty codec placeholder via `tools/codec_cleaner.Linux -C`.
 
 ## Manual flash
@@ -50,9 +51,9 @@ It prints **"Patching for DMR"** on success (vs **"Flashing FM Only firmware"** 
 
 ## Build test
 ```sh
-./test_build.sh [optional-donor.bin]   # builds both variants, asserts each is codec-merge-capable
+./test_build.sh [optional-donor.bin]   # builds the firmware, asserts it is codec-merge-capable
 ```
-CI (`.github/workflows/build.yml`) runs the same for `ENABLE_AES` 0 and 1 and asserts the merge-capable size.
+CI (`.github/workflows/build.yml`) runs the same build and asserts the merge-capable size.
 
 ## Host tests (no radio, plain gcc)
 ```sh
@@ -90,21 +91,21 @@ screen; boot and shutdown animations with the radio's callsign and DMR ID; a dar
 `ENABLE_DUAL_SCREEN=1` as well, the dual screen takes the home screen over while its option is on. The fork's
 own spectrum module is not taken (this tree's sweep has its waterfall), nor its settings defaults.
 
-## AES build
-`ENABLE_AES=1` compiles in DMRA (Motorola/Hytera-compatible) AES-256 encrypted voice — both **transmit and
-receive**, interoperable with a stock TYT MD-UV390 ("Universal" AES256). The default build is stock OpenGD77
-(no AES symbols) plus the upstream bound-checks in `usb_com.c`, `hotspot.c`, `uiUtilities.c` and
-`menuRadioInfos.c`.
+## AES
+Every build includes DMRA (Motorola/Hytera-compatible) AES-256 encrypted voice — both **transmit and
+receive**, interoperable with a stock TYT MD-UV390 ("Universal" AES256). There is no AES-off variant: AES is
+the purpose of this fork.
 
-**Checking the stock build.** `arm-none-eabi-size` cannot see code changes in this firmware: `.text` growth is
+**Checking a build's size.** `arm-none-eabi-size` cannot see code changes in this firmware: `.text` growth is
 absorbed byte for byte by the fixed-address AMBE placeholder section (`.codec_bin_section_1`), so its text
-total stays 728864 whatever changes. Compare section sizes instead, `arm-none-eabi-objdump -h build/openuv380-10w.elf`:
-`.text 0x3F184 .rodata 0xC8A0 .data 0x4238 .bss 0x1AB64` is the plain `make` reference (the pure R20260131
-sources gave `.text 0x3F0C4`). The build is not bit-reproducible either: the build time is compiled in as
-immediates, so two builds of one commit differ in a few hundred `.text` bytes. Crypto lives in `application/source/crypto/` (host-unit-tested: FIPS-197 AES,
+total stays 728864 whatever changes. Compare section sizes instead with
+`arm-none-eabi-objdump -h build/openuv380-10w.elf` (or `arm-none-eabi-size -A`). Two builds of one commit are
+only byte-identical when `SOURCE_DATE_EPOCH` is set in the environment (the build date and time are compiled
+into the firmware-info screen) and `GITVERSION=<hash>` is passed to `make` when the trees differ in commit.
+Crypto lives in `application/source/crypto/` (host-unit-tested: FIPS-197 AES,
 LFSR128d, OFB keystream, Golay(24,12) late-entry MI, EMB BPTC single block); the HR-C6000 and codec hooks are
 in `HR-C6000.c` and `dmr_codec/codec_interface.c`. Optional, off-by-default diagnostics are gated behind
-`DMR_AES_DIAG_RX` / `DMR_AES_DIAG_PATTERN` / `DMR_AES_DIAG_ENCPAT` (e.g. `make ENABLE_AES=1 DMR_AES_DIAG_RX=1`,
+`DMR_AES_DIAG_RX` / `DMR_AES_DIAG_PATTERN` / `DMR_AES_DIAG_ENCPAT` (e.g. `make DMR_AES_DIAG_RX=1`,
 read with `tools/rxdiag.py` / `tools/fragcap.py`). Encrypted voice is for licensed commercial/PMR use only; it
 is not legal on amateur bands in most countries.
 

@@ -9,7 +9,7 @@
  *   RECIPIENT : destination DMR ID / talkgroup + Group/Private + send
  *
  * Sending and the store live in functions/dmr_sms.c (the on-air-validated AES-256-ECB
- * scheme a stock TYT decrypts). Compiles to nothing unless -DENABLE_AES -DENABLE_DMR_DATA.
+ * scheme a stock TYT decrypts). Compiles to nothing unless -DENABLE_DMR_DATA.
  *
  * LEGAL: encrypted traffic is illegal on amateur bands in most jurisdictions. PMR/commercial.
  */
@@ -24,7 +24,7 @@
 #include <string.h>
 #include <stdlib.h>
 
-#if defined(ENABLE_AES) && defined(ENABLE_DMR_DATA)
+#if defined(ENABLE_DMR_DATA)
 
 enum { MSG_HOME = 0, MSG_LIST, MSG_READ, MSG_COMPOSE, MSG_RECIPIENT, MSG_RESULT };
 
@@ -558,4 +558,4 @@ static void resultUpdate(void)
 	displayRender();
 }
 
-#endif // ENABLE_AES && ENABLE_DMR_DATA
+#endif // ENABLE_DMR_DATA

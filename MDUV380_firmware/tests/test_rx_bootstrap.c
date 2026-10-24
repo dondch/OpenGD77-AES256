@@ -9,7 +9,7 @@
  * Drives the real dmrAesRxBurst / dmrAesRxLateEntry / dmrAesRxCodecFrame, in the
  * order HR-C6000.c and codecDecode call them.
  *
- * Build: gcc -O2 -DENABLE_AES -Itests/stubs -Iapplication/include -o /tmp/test_rx_bootstrap \
+ * Build: gcc -O2 -Itests/stubs -Iapplication/include -o /tmp/test_rx_bootstrap \
  *          tests/test_rx_bootstrap.c application/source/crypto/dmr_aes_hook.c \
  *          application/source/crypto/dmr_aes.c && /tmp/test_rx_bootstrap
  */

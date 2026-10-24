@@ -335,12 +335,10 @@ typedef struct
    const char text_size[LANGUAGE_TEXTS_LENGTH];
    const char last_talker[LANGUAGE_TEXTS_LENGTH];
    const char mute[LANGUAGE_TEXTS_LENGTH];
-#if defined(ENABLE_AES)
    const char aes_keys[LANGUAGE_TEXTS_LENGTH];// appended LAST so non-AES builds stay byte-identical
    const char encrypt_tx[LANGUAGE_TEXTS_LENGTH];
 #if defined(ENABLE_DMR_DATA)
    const char messages[LANGUAGE_TEXTS_LENGTH];// encrypted-SMS menu (appended last under the combined guard)
-#endif
 #endif
 } stringsTable_t;
 

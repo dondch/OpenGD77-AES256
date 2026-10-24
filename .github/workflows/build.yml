@@ -8,10 +8,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        aes: ["0", "1"]
-    name: build (ENABLE_AES=${{ matrix.aes }})
+    name: build
     steps:
       - uses: actions/checkout@v4
       - name: Install ARM GNU toolchain
@@ -20,7 +17,7 @@ jobs:
           release: "14.2.Rel1"
       - name: Build
         working-directory: MDUV380_firmware
-        run: make -j$(nproc) ENABLE_AES=${{ matrix.aes }}
+        run: make -j$(nproc)
       - name: Report size
         working-directory: MDUV380_firmware
         run: arm-none-eabi-size build/openuv380-10w.elf
@@ -34,7 +31,7 @@ jobs:
           echo "OK: reserved codec region present, ready for flash-time merge."
       - uses: actions/upload-artifact@v4
         with:
-          name: openuv380-10w-aes${{ matrix.aes }}
+          name: openuv380-10w
           path: |
             MDUV380_firmware/build/*.bin
             MDUV380_firmware/build/*.hex
