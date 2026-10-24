@@ -397,13 +397,20 @@ static void usbInjectJumpToBootloader(void)
 	while (1) { }   /* unreachable */
 }
 
-bool usbKeyInjectTick(uint8_t *outEvent, char *outKey)
+bool usbKeyInjectTick(uint8_t *outEvent, char *outKey, uint32_t *outButtons)
 {
 	if (s_injTail == s_injHead) { return false; }   /* nothing queued */
 	uint8_t key = s_injKey[s_injTail];
 	bool isLong = ((s_injFlags[s_injTail] & 0x01) != 0);
 	bool isHold = ((s_injFlags[s_injTail] & 0x02) != 0);
 	*outKey = (char)key;
+	/* flags bit2 = SK2 held while this key is pressed and released (BUTTON_SK2 = 0x20 in
+	 * io/buttons.h). The UI reads modifier buttons straight from ev->buttons with
+	 * BUTTONCHECK_DOWN(), never from a button event, so reporting the bit on the iterations
+	 * that carry this key's events is all a handler sees of a real held SK2. Reaches the
+	 * SK2+GREEN delete in the Messages menu and SK2+UP (wide span) in the sweep, neither of
+	 * which a key alone can. */
+	*outButtons = ((s_injFlags[s_injTail] & 0x04) != 0) ? 0x20u : 0u;
 
 	/* Replay the SAME event sequence the real keypad driver produces (the state machine
 	 * in keyboard.c), because the UI is written against it:
@@ -1515,7 +1522,8 @@ static void cpsHandleCommand(void)
 			return;   /* NOT break -- see above */
 #endif
 #ifdef ENABLE_KEY_INJECTION
-		case 0x96: // DEV: inject a keypad key: [2]=keycode, [3]=flags (bit0 = long press).
+		case 0x96: // DEV: inject a keypad key: [2]=keycode, [3]=flags (bit0 = long press,
+			//        bit1 = hold (no release), bit2 = SK2 held for this key).
 			//        Queued here; usbKeyInjectTick() feeds it to the normal UI (DOWN then UP)
 			//        from the main loop. Pairs with the USB display mirror (fbmirror.py).
 			usbKeyInjectPush(com_requestbuffer[2], com_requestbuffer[3]);
