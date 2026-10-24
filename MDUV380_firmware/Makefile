@@ -50,6 +50,13 @@ ifeq ($(ENABLE_SPECTRUM),1)
 DEFS += -DENABLE_SPECTRUM
 endif
 
+# Dev-only: GPS NMEA logging to SPI flash (defines LOG_GPS_DATA). Off by default: its
+# 4 KB NMEARecordingBuffer is the single largest optional SRAM user, and the buffer's
+# .data placement also adds 4 KB of zeros to the flash image.
+ifeq ($(ENABLE_GPS_NMEA_LOG),1)
+DEFS += -DENABLE_GPS_NMEA_LOG
+endif
+
 # Dev-only: DWT scan-step profiler (CPS 0xA9, tools/scanprof.py). Costs 544 bytes of RAM
 # for the slot table, which is a lot on a target with under 2 KB spare, so it is separate
 # from ENABLE_SPECTRUM -- the sweep tooling is worth keeping when the profiler is not.
