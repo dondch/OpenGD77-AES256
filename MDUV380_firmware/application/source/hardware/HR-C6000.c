@@ -3169,6 +3169,13 @@ bool HRC6000IRQHandlerIsRunning(void)
 	return hrc.inIRQHandler;
 }
 
+#if defined(ENABLE_TA2TWC_SCREENS)
+uint8_t HRC6000GetReceivedColourCode(void)
+{
+	return hrc.rxColorCode;
+}
+#endif
+
 bool HRC6000HasGotSync(void)
 {
 	return (hrc.timeCode != -1);

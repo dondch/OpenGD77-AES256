@@ -32,6 +32,8 @@
 #include "user_interface/uiUtilities.h"
 #include "user_interface/uiLocalisation.h"
 #include "hardware/radioHardwareInterface.h"
+#include "user_interface/uiAnalogMeter.h"
+#include "user_interface/uiCustomStrings.h"
 
 
 #if defined(PLATFORM_MD2017)
@@ -71,6 +73,19 @@ static uint8_t rawNoise[RADIO_DEVICE_MAX] =
 
 static bool displayRawValues = false;
 
+#if defined(HAS_ANALOG_METER)
+#define METER_UPDATE_PERIOD          ANALOG_METER_UPDATE_PERIOD_MS
+#define METER_NEEDLE_DAMPING         3     // the needle moves by 1/3 of the remaining distance at each update
+#define METER_PEAK_HOLD_MS           1500U
+#define METER_PEAK_DECAY_X10         5     // tenths of dB per update, once the hold time has elapsed
+
+static int16_t meterNeedleX10 = 0;
+static int16_t meterPeakX10 = 0;
+static uint32_t meterPeakTime = 0;
+#else
+#define METER_UPDATE_PERIOD          RSSI_UPDATE_COUNTER_RELOAD
+#endif
+
 static const int barX = 9;
 DECLARE_SMETER_ARRAY(rssiMeterBar, (DISPLAY_SIZE_X - (barX - 1)));
 
@@ -96,7 +111,7 @@ menuStatus_t menuRSSIScreen(uiEvent_t *ev, bool isFirstRun)
 			handleEvent(ev);
 		}
 
-		if((ev->time - m) > RSSI_UPDATE_COUNTER_RELOAD)
+		if((ev->time - m) > METER_UPDATE_PERIOD)
 		{
 			m = ev->time;
 			updateScreen(false, false);
@@ -196,6 +211,64 @@ static void updateScreen(bool forceRedraw, bool isFirstRun)
 		voicePromptsAppendPrompt(PROMPT_SILENCE);
 		updateVoicePrompts(false, true);
 	}
+
+#if defined(HAS_ANALOG_METER)
+	{
+		uiAnalogMeterData_t meter;
+		int16_t target = (dBm[RADIO_DEVICE_PRIMARY] * 10);
+		uint32_t now = ticksGetMillis();
+
+		if (forceRedraw)
+		{
+			meterNeedleX10 = target;
+			meterPeakX10 = target;
+			meterPeakTime = now;
+		}
+		else
+		{
+			meterNeedleX10 += ((target - meterNeedleX10) / METER_NEEDLE_DAMPING);
+
+			if (target >= meterPeakX10)
+			{
+				meterPeakX10 = target;
+				meterPeakTime = now;
+			}
+			else if ((now - meterPeakTime) > METER_PEAK_HOLD_MS)
+			{
+				meterPeakX10 = MAX((meterPeakX10 - METER_PEAK_DECAY_X10), target);
+			}
+		}
+
+		meter.needledBmX10 = meterNeedleX10;
+		meter.peakdBmX10 = meterPeakX10;
+		meter.rssidBm = dBm[RADIO_DEVICE_PRIMARY];
+		meter.noiseRaw = trxGetNoiseRaw(RADIO_DEVICE_PRIMARY);
+		meter.infoText = NULL;
+
+		if (displayRawValues)
+		{
+			snprintf(buffer, LOCATION_TEXT_BUFFER_SIZE, "%s %u / %u", uiCustomStringGet(CUSTOM_STRING_RAW), rawSignal[RADIO_DEVICE_PRIMARY], rawNoise[RADIO_DEVICE_PRIMARY]);
+			meter.infoText = buffer;
+		}
+
+		uiAnalogMeterDraw(&meter);
+
+		if (forceRedraw || uiNotificationIsVisible())
+		{
+			displayRender();
+		}
+		else
+		{
+			displayRenderRows(1, DISPLAY_NUMBER_OF_ROWS);
+		}
+
+		UNUSED_PARAMETER(barWidth);
+		UNUSED_PARAMETER(rssi);
+		UNUSED_PARAMETER(yValuePos);
+		UNUSED_PARAMETER(yBarPos);
+		return;
+	}
+#endif
 
 	if (forceRedraw)
 	{

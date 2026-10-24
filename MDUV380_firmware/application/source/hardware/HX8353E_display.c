@@ -1518,6 +1518,60 @@ void displayGetForegroundAndBackgroundColours(uint16_t *fgNativeColour, uint16_t
 }
 
 #if defined(HAS_COLOURS)
+#if defined(ENABLE_TA2TWC_SCREENS)
+// TA2TWC screens: light texts on a dark blue background, used until the user stores his own theme with the CPS or the Theme options.
+static const uint32_t THEME_DEFAULT_COLOURS[THEME_ITEM_MAX] =
+{
+		[THEME_ITEM_FG_DEFAULT]              = 0xD8F1FFU,
+		[THEME_ITEM_BG]                      = 0x03070EU,
+		[THEME_ITEM_FG_DECORATION]           = 0x2A8FAAU,
+		[THEME_ITEM_FG_TEXT_INPUT]           = 0xFFFFFFU,
+		[THEME_ITEM_FG_SPLASHSCREEN]         = 0xD8F1FFU,
+		[THEME_ITEM_BG_SPLASHSCREEN]         = 0x03070EU,
+		[THEME_ITEM_FG_NOTIFICATION]         = 0xD8F1FFU,
+		[THEME_ITEM_FG_WARNING_NOTIFICATION] = 0xFFB000U,
+		[THEME_ITEM_FG_ERROR_NOTIFICATION]   = 0xFF5050U,
+		[THEME_ITEM_BG_NOTIFICATION]         = 0x0C2A3AU,
+		[THEME_ITEM_FG_MENU_NAME]            = 0x00E5FFU,
+		[THEME_ITEM_BG_MENU_NAME]            = 0x0C2A3AU,
+		[THEME_ITEM_FG_MENU_ITEM]            = 0xD8F1FFU,
+		[THEME_ITEM_BG_MENU_ITEM_SELECTED]   = 0x00B8D4U,
+		[THEME_ITEM_FG_OPTIONS_VALUE]        = 0xFFB000U,
+		[THEME_ITEM_FG_HEADER_TEXT]          = 0x7FC4D8U,
+		[THEME_ITEM_BG_HEADER_TEXT]          = 0x03070EU,
+		[THEME_ITEM_FG_RSSI_BAR]             = 0x00E5FFU,
+		[THEME_ITEM_FG_RSSI_BAR_S9P]         = 0xFF5050U,
+		[THEME_ITEM_FG_CHANNEL_NAME]         = 0xFFFFFFU,
+		[THEME_ITEM_FG_CHANNEL_CONTACT]      = 0x00E5FFU,
+		[THEME_ITEM_FG_CHANNEL_CONTACT_INFO] = 0x39FF7AU,
+		[THEME_ITEM_FG_ZONE_NAME]            = 0x7FC4D8U,
+		[THEME_ITEM_FG_RX_FREQ]              = 0x39FF7AU,
+		[THEME_ITEM_FG_TX_FREQ]              = 0xFF7070U,
+		[THEME_ITEM_FG_CSS_SQL_VALUES]       = 0xFFB000U,
+		[THEME_ITEM_FG_TX_COUNTER]           = 0xFF5050U,
+		[THEME_ITEM_FG_POLAR_DRAWING]        = 0x2A8FAAU,
+		[THEME_ITEM_FG_SATELLITE_COLOUR]     = 0x00E5FFU,
+		[THEME_ITEM_FG_GPS_NUMBER]           = 0xD8F1FFU,
+		[THEME_ITEM_FG_GPS_COLOUR]           = 0x4DA6FFU,
+		[THEME_ITEM_FG_BD_COLOUR]            = 0xFF5050U,
+};
+
+void themeInitToDefaultValues(DayTime_t daytime, bool invert)
+{
+	UNUSED_PARAMETER(invert); // The same dark theme is used for the day and the night
+
+	for (uint32_t i = 0; i < THEME_ITEM_MAX; i++)
+	{
+		themeItems[daytime][i] = PLATFORM_COLOUR_FORMAT_SWAP_BYTES(RGB888_TO_PLATFORM_COLOUR_FORMAT(THEME_DEFAULT_COLOURS[i]));
+	}
+
+	foregroundThemeItem = THEME_ITEM_FG_DEFAULT;
+	backgroundThemeItem = THEME_ITEM_BG;
+	foregroundColour = themeItems[daytime][THEME_ITEM_FG_DEFAULT];
+	backgroundColour = themeItems[daytime][THEME_ITEM_BG];
+}
+
+#else
 void themeInitToDefaultValues(DayTime_t daytime, bool invert)
 {
 	foregroundColour = PLATFORM_COLOUR_FORMAT_SWAP_BYTES(RGB888_TO_PLATFORM_COLOUR_FORMAT((invert ? 0xFFFFFFU : 0x000000)));
@@ -1559,6 +1613,7 @@ void themeInitToDefaultValues(DayTime_t daytime, bool invert)
 	themeItems[daytime][THEME_ITEM_FG_GPS_COLOUR] = PLATFORM_COLOUR_FORMAT_SWAP_BYTES(RGB888_TO_PLATFORM_COLOUR_FORMAT(0x0000FFU));
 	themeItems[daytime][THEME_ITEM_FG_BD_COLOUR] = PLATFORM_COLOUR_FORMAT_SWAP_BYTES(RGB888_TO_PLATFORM_COLOUR_FORMAT(0xFF0000U));
 }
+#endif // ENABLE_TA2TWC_SCREENS
 
 void themeInit(bool SPIFlashAvailable)
 {

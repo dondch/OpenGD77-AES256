@@ -35,7 +35,18 @@
 #include "functions/voicePrompts.h"
 
 
-#if defined(PLATFORM_MD380) || defined(PLATFORM_MDUV380) || defined(PLATFORM_RT84_DM1701) || defined(PLATFORM_MD2017)
+#if defined(ENABLE_TA2TWC_SCREENS) && (defined(PLATFORM_MDUV380) || defined(PLATFORM_RT84_DM1701))
+// Compact menu lists: single height font, more entries on the screen
+#if defined(PLATFORM_VARIANT_DM1701)
+#define MENU_MAX_DISPLAYED_ENTRIES 8 // 120 rows
+#else
+#define MENU_MAX_DISPLAYED_ENTRIES 9
+#endif
+#define MENU_LIST_ENTRY_HEIGHT     12
+#define MENU_LIST_Y_POS_HIGHLIGHT  (MENU_HEADER_HEIGHT + 4 + ((-MENU_START_ITERATION_VALUE) * MENU_LIST_ENTRY_HEIGHT))
+#define MENU_LIST_FONT             FONT_SIZE_2
+#define MENU_LIST_TEXT_Y_OFFSET    2
+#elif defined(PLATFORM_MD380) || defined(PLATFORM_RT84_DM1701) || defined(PLATFORM_MD2017)
 #if defined(PLATFORM_VARIANT_DM1701)
 #define MENU_MAX_DISPLAYED_ENTRIES 6
 #else
@@ -44,6 +55,13 @@
 #else
 // Black and white smaller height screeens (MD9600 and GD77 etc)
 #define MENU_MAX_DISPLAYED_ENTRIES 3
+#endif
+
+#if !defined(MENU_LIST_ENTRY_HEIGHT)
+#define MENU_LIST_ENTRY_HEIGHT     MENU_ENTRY_HEIGHT
+#define MENU_LIST_Y_POS_HIGHLIGHT  DISPLAY_Y_POS_MENU_ENTRY_HIGHLIGHT
+#define MENU_LIST_FONT             FONT_SIZE_3
+#define MENU_LIST_TEXT_Y_OFFSET    0
 #endif
 
 // These macros are taking care of the odd/even value of MENU_MAX_DISPLAYED_ENTRIES (-x..0..+x)
