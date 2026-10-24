@@ -51,6 +51,8 @@ void codecDecode(uint8_t *indata_ptr, int numbBlocks)
 	register int r1 asm ("r1") __attribute__((unused));
 	register int r2 asm ("r2") __attribute__((unused));
 
+	codecPrepareDecode();// load the decoder image if the encoder (or nothing) is in codecState
+
     for (int idx = 0; idx < numbBlocks; idx++)
     {
 		initFrame(indata_ptr, bitbuffer_decode);
@@ -114,6 +116,8 @@ void codecEncodeBlock(uint8_t *outdata_ptr)
 
 	memset((uint8_t *)outdata_ptr, 0, 9);// fills with zeros
 	memset(bitbuffer_encode, 0, sizeof(bitbuffer_encode));// faster to call memset as it will be compiled as optimised code
+
+	codecPrepareEncode();// load the encoder + FEC images if the decoder (or nothing) is in codecState
 
 
 	soundRetrieveBuffer();// gets currentWaveBuffer pointer used as input r2 to the encoder
