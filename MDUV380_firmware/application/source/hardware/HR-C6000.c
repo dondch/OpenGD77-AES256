@@ -1121,7 +1121,12 @@ static inline void hrc6000SysReceivedDataInt(void)
 				// Not when relaying as a hotspot: the host handles data then.
 				{
 					uint8_t ackHdr[LC_DATA_LENGTH];
-					if (dmrSmsAckTake(ackHdr) && (settingsUsbMode != USB_MODE_HOTSPOT) && (slotState < DMR_STATE_TX_START_1))
+					// Never from an Rx-Only channel or with TX inhibited: the acknowledgement is a
+					// transmission like any other, and the sender then simply repeats as it
+					// would to a radio that is not listening.
+					if (dmrSmsAckTake(ackHdr) && (settingsUsbMode != USB_MODE_HOTSPOT) && (slotState < DMR_STATE_TX_START_1) &&
+							(codeplugChannelGetFlag(currentChannelData, CHANNEL_FLAG_RX_ONLY) == 0) &&
+							(settingsIsOptionBitSet(BIT_TX_INHIBIT) == false))
 					{
 						hrc6000DataAckStart(ackHdr);
 					}

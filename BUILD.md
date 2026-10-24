@@ -65,8 +65,16 @@ state at key-up, and the SMS receive path (unconfirmed and confirmed delivery, a
 
 ## AES build
 `ENABLE_AES=1` compiles in DMRA (Motorola/Hytera-compatible) AES-256 encrypted voice — both **transmit and
-receive**, interoperable with a stock TYT MD-UV390 ("Universal" AES256). The default build is byte-for-byte
-stock OpenGD77 (no AES symbols). Crypto lives in `application/source/crypto/` (host-unit-tested: FIPS-197 AES,
+receive**, interoperable with a stock TYT MD-UV390 ("Universal" AES256). The default build is stock OpenGD77
+(no AES symbols) plus the upstream bound-checks in `usb_com.c`, `hotspot.c`, `uiUtilities.c` and
+`menuRadioInfos.c`.
+
+**Checking the stock build.** `arm-none-eabi-size` cannot see code changes in this firmware: `.text` growth is
+absorbed byte for byte by the fixed-address AMBE placeholder section (`.codec_bin_section_1`), so its text
+total stays 728864 whatever changes. Compare section sizes instead, `arm-none-eabi-objdump -h build/openuv380-10w.elf`:
+`.text 0x3F184 .rodata 0xC8A0 .data 0x4238 .bss 0x1AB64` is the plain `make` reference (the pure R20260131
+sources gave `.text 0x3F0C4`). The build is not bit-reproducible either: the build time is compiled in as
+immediates, so two builds of one commit differ in a few hundred `.text` bytes. Crypto lives in `application/source/crypto/` (host-unit-tested: FIPS-197 AES,
 LFSR128d, OFB keystream, Golay(24,12) late-entry MI, EMB BPTC single block); the HR-C6000 and codec hooks are
 in `HR-C6000.c` and `dmr_codec/codec_interface.c`. Optional, off-by-default diagnostics are gated behind
 `DMR_AES_DIAG_RX` / `DMR_AES_DIAG_PATTERN` / `DMR_AES_DIAG_ENCPAT` (e.g. `make ENABLE_AES=1 DMR_AES_DIAG_RX=1`,
