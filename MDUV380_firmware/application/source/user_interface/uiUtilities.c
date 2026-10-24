@@ -2265,13 +2265,14 @@ void uiUtilityRenderHeader(bool isVFODualWatchScanning, bool isVFOSweepScanning,
 		int unread = dmrSmsUnreadCount();
 		if (unread > 0)
 		{
-			int16_t ex = DISPLAY_SIZE_X - 24;
+			int16_t ex = DISPLAY_SIZE_X - 30;                  // room for two characters after the icon
 			int16_t ey = DISPLAY_Y_POS_BAR + 6;
 			displayDrawRect(ex, ey, 13, 9, true);              // envelope body
 			displayDrawLine(ex, ey, ex + 6, ey + 4, true);     // flap (left)
 			displayDrawLine(ex + 12, ey, ex + 6, ey + 4, true);// flap (right)
 			char nb[4];
-			snprintf(nb, sizeof nb, "%d", (unread > 9) ? 9 : unread);
+			if (unread > 9) { strcpy(nb, "9+"); }              // one digit under-reported 10+ unread as "9"
+			else            { snprintf(nb, sizeof nb, "%d", unread); }
 			displayPrintCore(ex + 15, ey, nb, FONT_SIZE_1, TEXT_ALIGN_LEFT, false);
 		}
 	}
