@@ -1582,9 +1582,21 @@ static void cpsHandleCommand(void)
 			//        here), and the bench cannot power-cycle: a DFU reboot after this is the
 			//        nearest thing to a power cycle for a settings-persistence check.
 			//        (0x9E is the flash-word programmer below; this once shadowed it.)
-			usbComSendBuf[0] = com_requestbuffer[0];
-			usbComSendBuf[1] = 0x98;
-			usbComSendBuf[2] = settingsSaveSettings(true) ? 1 : 0;
+			//        The save erases and rewrites two SPI-flash sectors (the settings and the
+			//        VFOs, through EEPROM_Write -> SPI_Flash_write), whose busy polling sleeps
+			//        with osDelay(): inside the CPS TASK_LOCK_WRITE() critical section the
+			//        sleeps return at once, the poll runs out while the erase is still going,
+			//        the rewrite is skipped and the reply says 0 -- with the sectors left blank.
+			//        Bracket it like every other flash write in this file.
+			{
+				bool saved;
+				TASK_UNLOCK_WRITE();
+				saved = settingsSaveSettings(true);
+				TASK_LOCK_WRITE();
+				usbComSendBuf[0] = com_requestbuffer[0];
+				usbComSendBuf[1] = 0x98;
+				usbComSendBuf[2] = saved ? 1 : 0;
+			}
 			hasToReply = true;
 			replyLength = 3;
 			return;   /* NOT break -- the generic '-' reply would clobber this */
