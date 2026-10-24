@@ -429,6 +429,45 @@ static void testRetransmissionIsNotASecondMessage(void)
     check(dmrSmsCount(0) == 3, "the same text from a different sender right away is a new message");
 }
 
+/* Bench: sms_diag.py --reset (USB 0x94) is used between replays of the same capture; it must
+ * also forget the retransmission filter's last message, or the replay is dropped as a repeat
+ * and the radio has to be rebooted (reflashed) for a clean run. */
+static void testDiagResetForgetsLastMessage(void)
+{
+    stream_t s, c;
+    fresh();
+    sendAndCapture("again", trxDMRID, 0, 1, &s);
+    toConfirmed(&s, plaintextLen("again"), trxDMRID, &c);
+    playback(&c, 0);
+    playback(&c, 0);
+    check(dmrSmsCount(0) == 1, "the same packet twice is one message");
+    dmrSmsRxDiagReset();
+    playback(&c, 0);
+    check(dmrSmsCount(0) == 2, "after the diag reset the same packet is received as new");
+}
+
+/* Bench: the 0x95 last-PDU dump showed keyId=69 (0x45) after a cleartext PDU. The key id is
+ * set only by an ENC header and lives in CCM, which is not zeroed at boot; a cleartext PDU
+ * must report 0, also right after an encrypted one. */
+static void testCleartextPduReportsNoKeyId(void)
+{
+    stream_t s, c;
+    CodeplugChannel_t ch = { 0xFF };
+    uint8_t out[16];
+    fresh();
+    sendAndCapture("enc", trxDMRID, 0, 1, &s);
+    toConfirmed(&s, plaintextLen("enc"), trxDMRID, &c);
+    playback(&c, 0);
+    check(dmrSmsRxLastPdu(out, sizeof out) >= 8 && out[2] == 1, "the encrypted PDU reports key id 1");
+    currentChannelData = &ch;
+    sendAndCapture("clear", trxDMRID, 0, 0, &s);
+    currentChannelData = NULL;
+    toConfirmed(&s, plaintextLen("clear"), trxDMRID, &c);
+    playback(&c, 0);
+    check(dmrSmsCount(0) == 2 && inboxHas("clear"), "the cleartext PDU after it decodes");
+    check(dmrSmsRxLastPdu(out, sizeof out) >= 8 && out[2] == 0, "and reports key id 0, not the previous packet's");
+}
+
 static void testEncHeaderWithGroupBit(void)
 {
     stream_t s;
@@ -471,6 +510,8 @@ int main(void)
     testStockRetransmitBlockMerge();
     testPrivateSmsToAnotherRadioIsNotOurs();
     testRetransmissionIsNotASecondMessage();
+    testDiagResetForgetsLastMessage();
+    testCleartextPduReportsNoKeyId();
     testEncHeaderWithGroupBit();
     testLostEncHeaderStillDecrypts();
     testWrongKeyIsDropped();
