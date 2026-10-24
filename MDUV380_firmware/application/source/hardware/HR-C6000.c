@@ -2513,7 +2513,17 @@ static bool hrc6000SendAesPIHeader(void)
 	{
 		return false;
 	}
-	SPI0WritePageRegByteArray(0x02, 0x00, spi_tx, LC_DATA_LENGTH); // PI LC: 25 10 01 <MI4>
+	// Bytes 7..9 carry the call's destination, as a stock TYT's PI header does (bench
+	// capture 2026-10-24: "25 10 01 <MI> 00 25 BD" for TG 9661).
+	spi_tx[7] = (trxTalkGroupOrPcId >> 16) & 0xFF;
+	spi_tx[8] = (trxTalkGroupOrPcId >> 8) & 0xFF;
+	spi_tx[9] = (trxTalkGroupOrPcId >> 0) & 0xFF;
+	// Write the 80 information bits ONLY. The stock firmware hands the chip 9 bytes for a
+	// voice LC header and 10 for a PI header (S219.43, 0x0805b1d2: len 10, then reg 0x50 = 0)
+	// and lets it add the check field itself. Writing the full 12-byte LC_DATA_LENGTH here,
+	// as for the LC header, left every PI burst unreadable to dsd-fme and to stock radios
+	// (they fell back to late entry from the voice bits), while our own HR-C6000 decoded it.
+	SPI0WritePageRegByteArray(0x02, 0x00, spi_tx, 10); // PI header: 25 10 01 <MI4> <dst3>
 	SPI0WritePageRegByte(0x04, 0x50, 0x00); // Data Type 0000 (PI Header), Data, LCSS=00
 	return true;
 }
