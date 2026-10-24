@@ -2499,6 +2499,15 @@ bool uiUtilityDrawTelemetryRx(int16_t y, int16_t historyY, int16_t historyHeight
 	static uint32_t historyLastSampleTime = 0;
 	static uint32_t historyFrequency = 0;
 
+#if defined(ENABLE_DUAL_SCREEN)
+	// The dual screen owns the whole home area while its option is on; the meter rows and the
+	// history would land on its second row (bench: the block sat where row B's frequency goes).
+	if (uiDualScreenIsEnabled())
+	{
+		return false;
+	}
+#endif
+
 	bool isHomeScreen = uiUtilityHomeScreenIsActive(); // it has the room for everything, whatever is displayed
 
 	// On the classic screens, the double height font, the channel details and the notifications are using the same area
@@ -2775,6 +2784,12 @@ void uiUtilityHomeScreenDrawStatusBar(void)
 void uiUtilityDrawTelemetryDmr(void)
 {
 #if defined(HAS_TELEMETRY)
+#if defined(ENABLE_DUAL_SCREEN)
+	if (uiDualScreenIsEnabled())
+	{
+		return;   // as for the meter rows: the dual screen owns the area
+	}
+#endif
 	if ((trxGetMode() == RADIO_MODE_DIGITAL) && uiDataGlobal.isDisplayingQSOData && (HRC6000GetReceivedTgOrPcId() != 0) &&
 			((LinkHead->talkGroupOrPcId >> 24) != PC_CALL_FLAG) &&
 			(settingsIsOptionBitSet(BIT_UI_USES_DOUBLE_HEIGHT) == false) && (uiNotificationIsVisible() == false))
