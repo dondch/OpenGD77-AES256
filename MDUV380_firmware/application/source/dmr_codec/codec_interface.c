@@ -56,8 +56,8 @@ void codecDecode(uint8_t *indata_ptr, int numbBlocks)
 		initFrame(indata_ptr, bitbuffer_decode);
 		indata_ptr += 9;
 
-		// AES: decrypt the 49 decoded AMBE voice bits in place (no-op unless ENABLE_AES
-		// and an active encrypted stream). This is the correct layer — validated vs DSD-FME.
+		// AES: decrypt the 49 decoded AMBE voice bits in place (no-op unless
+		// an encrypted stream is active). This is the correct layer — validated vs DSD-FME.
 		dmrAesRxCodecFrame(bitbuffer_decode, idx);
 
 		soundSetupBuffer();// this just sets currentWaveBuffer but the compiler seems to optimise out the code if I try to do it in this file
@@ -162,18 +162,18 @@ void codecEncodeBlock(uint8_t *outdata_ptr)
 		"POP {R4-R11}"
 	);
 
-#if defined(ENABLE_AES) && defined(DMR_AES_DIAG_PATTERN)
+#if defined(DMR_AES_DIAG_PATTERN)
 	// DIAGNOSTIC: replace the voice params with a known pattern (unencrypted) so the
 	// over-the-air decode reveals the codec encode->decode param permutation.
 	dmrAesDiagPattern(bitbuffer_encode);
-#elif defined(ENABLE_AES) && defined(DMR_AES_DIAG_ENCPAT)
+#elif defined(DMR_AES_DIAG_ENCPAT)
 	// DIAGNOSTIC: set a CONSTANT known plaintext, THEN encrypt it, so the received
 	// ciphertext directly reveals the firmware's applied TX keystream (enc ^ const).
 	dmrAesDiagConstPattern(bitbuffer_encode);
 	dmrAesTxCodecFrame(bitbuffer_encode);
 #else
 	// AES: encrypt the 49 decoded AMBE voice params before the FEC encode (mirror of the
-	// RX decrypt in codecDecode). No-op unless ENABLE_AES and an active encrypted TX.
+	// RX decrypt in codecDecode). No-op unless an active encrypted TX.
 	dmrAesTxCodecFrame(bitbuffer_encode);
 #endif
 
@@ -192,8 +192,8 @@ void codecEncodeBlock(uint8_t *outdata_ptr)
 	);
 
 	// AES: stuff the DMRA Late-Entry MI into the post-ECC codeword (bitbuffer_encode now
-	// holds the 72-bit FEC frame). No-op unless ENABLE_AES and an active encrypted TX.
-#if !(defined(ENABLE_AES) && defined(DMR_AES_DIAG_PATTERN))
+	// holds the 72-bit FEC frame). No-op unless an active encrypted TX.
+#if !defined(DMR_AES_DIAG_PATTERN)
 	dmrAesTxStuffMI(bitbuffer_encode);
 #endif
 

@@ -11,7 +11,7 @@
  * Also round-trips the TX codec path into the real RX path (PI seed + late-entry MI chain), the
  * way a stock radio or our own RX decodes our transmission.
  *
- * Build: gcc -O2 -DENABLE_AES -Itests/stubs -Iapplication/include -o /tmp/test_tx_state \
+ * Build: gcc -O2 -Itests/stubs -Iapplication/include -o /tmp/test_tx_state \
  *          tests/test_tx_state.c application/source/crypto/dmr_aes_hook.c \
  *          application/source/crypto/dmr_aes.c && /tmp/test_tx_state
  */

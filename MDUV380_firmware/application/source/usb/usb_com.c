@@ -32,9 +32,7 @@
 #include "user_interface/uiUtilities.h"
 #include "user_interface/menuSystem.h"
 #include "usb/usb_com.h"
-#ifdef ENABLE_AES
 #include "crypto/dmr_aes.h"
-#endif
 #include "functions/ticks.h"
 #include "interfaces/wdog.h"
 #include "hardware/HR-C6000.h"
@@ -1713,7 +1711,6 @@ static void cpsHandleCommand(void)
 			replyLength = 1;
 			break;
 #endif
-#ifdef ENABLE_AES
 		case 0x80: // SUB set AES key: [2]=keyId, [3..34]=32-byte key (persistent flash store)
 			// dmrAesStoreKey writes flash (SPI_Flash_write -> osDelay), which must NOT run inside
 			// the CPS TASK_LOCK_WRITE critical section. Bracket with unlock/lock like the 'X' write.
@@ -1856,7 +1853,6 @@ static void cpsHandleCommand(void)
 				return;
 			}
 #endif
-#endif
 #if defined(ENABLE_DMR_DATA)
 		case 0x90: // SUB reboot into the STM32 ROM DFU bootloader (button-free USB flashing)
 			dmrDataTriggerReboot();   // deferred ~500 ms so this ACK is sent first
@@ -1870,7 +1866,6 @@ static void cpsHandleCommand(void)
 			hasToReply = true;
 			replyLength = 1;
 			break;
-#if defined(ENABLE_AES)
 		case 0x93: // DIAGNOSTIC: dump the SMS RX diag counters -> [cmd, len_hi, len_lo, 7x uint32 LE +
 			   //  txActive byte]. Counters: d=all data bursts, hOk,hBad,bOk,bBad,pdu,msg.
 			{
@@ -1933,7 +1928,6 @@ static void cpsHandleCommand(void)
 				replyLength = 2;
 				return; // bypass the trailing generic '-' reply
 			}
-#endif
 #endif
 		case 0:
 #if defined(HAS_GPS)

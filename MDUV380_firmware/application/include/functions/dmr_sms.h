@@ -8,7 +8,7 @@
  *   - hardware/HR-C6000.c  : the RX interrupt hands each BPTC-decoded, CRC-checked data
  *                            burst (page 0x02) to dmrSmsRxBurst() for software reassembly.
  *
- * The whole module is behind ENABLE_AES + ENABLE_DMR_DATA, so stock builds are byte-identical.
+ * The whole module is behind ENABLE_DMR_DATA, so builds without it are unchanged.
  * Message store lives in the OpenGD77 custom-data MESSAGES block (SPI flash) so it survives a
  * power-cycle; a CCM-RAM working copy is the live store (no net-new main RAM -> AMBE codec
  * buffer addresses don't shift). See dmr_sms.c.
@@ -20,7 +20,7 @@
 
 #include <stdint.h>
 
-#if defined(ENABLE_DMR_DATA) && defined(ENABLE_AES)
+#if defined(ENABLE_DMR_DATA)
 
 #define DMR_SMS_TEXT_MAX    144    /* hard max chars stored/composed per message (buffer size) */
 #define DMR_SMS_STORE_DATA  1342   /* packed variable-length message bytes (keeps the MSGS block
@@ -127,5 +127,5 @@ int  dmrSmsSend(const char *text, uint32_t dst, int group, uint8_t keyId);
  * The menu path never sets this; it is toggled only around the 0x97 handler call. */
 void dmrSmsDiagSetSkipStore(int skip);
 
-#endif /* ENABLE_DMR_DATA && ENABLE_AES */
+#endif /* ENABLE_DMR_DATA */
 #endif /* _OPENGD77_DMR_SMS_H_ */

@@ -10,9 +10,6 @@ SIZE     = $(CROSS)size
 CPU   = -mcpu=cortex-m4 -mthumb -mfpu=fpv4-sp-d16 -mfloat-abi=hard
 GITVERSION := $(shell git rev-parse --short HEAD 2>/dev/null || echo UNKNOWN)
 DEFS  = -DGITVERSION=$(GITVERSION) -DUSE_HAL_DRIVER -DSTM32F405xx -DPLATFORM_MDUV380 -DPLATFORM_VARIANT_UV380_PLUS_10W -DNDEBUG
-# DMRA AES-256 encrypted voice is always compiled in: it is the point of this fork.
-# (ENABLE_AES used to be an opt-in flag; the source guards remain until they are stripped.)
-DEFS += -DENABLE_AES
 INCS  = -I. -ICore/Inc \
         -IDrivers/CMSIS/Device/ST/STM32F4xx/Include -IDrivers/CMSIS/Include \
         -IDrivers/STM32F4xx_HAL_Driver/Inc -IDrivers/STM32F4xx_HAL_Driver/Inc/Legacy \

@@ -7,8 +7,7 @@
  * (SPI-flash 0x20000) the host aes_key_store.py / the CHIRP module use, so the
  * format is shared (see crypto/dmr_aes_hook.c). Key material is never displayed.
  *
- * This whole file compiles to nothing unless built with -DENABLE_AES, so stock
- * builds are byte-identical. Persistent menu state lives in CCM (.aes_ccmram) — not
+ * Persistent menu state lives in CCM (.aes_ccmram) — not
  * required (the AMBE codec addresses its buffers via the pointer passed in r1, so
  * its RAM placement floats freely), just tidy: it keeps this state alongside the
  * other AES state and out of scarce main RAM. CCM is not zeroed at boot, so all of
@@ -27,7 +26,6 @@
 #include "crypto/dmr_aes_hook.h"
 #include <string.h>
 
-#if defined(ENABLE_AES)
 
 // List layout: 15 key-slot rows (keyId 1..15) then the global TX-key row.
 #define AES_NUM_KEYS        15
@@ -364,4 +362,3 @@ static void editorHandleEvent(uiEvent_t *ev)
 	}
 }
 
-#endif // ENABLE_AES

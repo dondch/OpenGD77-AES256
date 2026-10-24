@@ -38,7 +38,7 @@ make -j$(nproc)
 ```
 The `Makefile` mirrors the CubeIDE `MDUV380_10W_PLUS_FW` release config (-Os, `-mcpu=cortex-m4 -mfpu=fpv4-sp-d16
 -mfloat-abi=hard`, defines `USE_HAL_DRIVER STM32F405xx PLATFORM_MDUV380 PLATFORM_VARIANT_UV380_PLUS_10W NDEBUG
-GITVERSION=<git short hash> ENABLE_AES`, linker
+GITVERSION=<git short hash>`, linker
 `STM32F405VGTX_FLASH.ld`) and auto-creates the empty codec placeholder via `tools/codec_cleaner.Linux -C`.
 
 ## Manual flash

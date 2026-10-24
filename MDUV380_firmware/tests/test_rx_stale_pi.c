@@ -8,7 +8,7 @@
  * more. Decryption must not engage on that: a PI whose MI is the one the call that just ended
  * was seeded with is stale. A new call always carries a fresh (random) MI.
  *
- * Build: gcc -O2 -DENABLE_AES -Itests/stubs -Iapplication/include -o /tmp/test_rx_stale_pi \
+ * Build: gcc -O2 -Itests/stubs -Iapplication/include -o /tmp/test_rx_stale_pi \
  *          tests/test_rx_stale_pi.c application/source/crypto/dmr_aes_hook.c \
  *          application/source/crypto/dmr_aes.c && /tmp/test_rx_stale_pi
  */
