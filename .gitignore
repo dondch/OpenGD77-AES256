@@ -1,4 +1,6 @@
 MDUV380_firmware/build/
+MDUV380_firmware/build-*/
+MDUV380_firmware/build-*.log
 *.o
 *.d
 *.map
