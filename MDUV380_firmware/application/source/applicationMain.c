@@ -609,11 +609,13 @@ void applicationMainTask(void)
 		{
 			uint8_t injEvent;
 			char injKey;
-			if (usbKeyInjectTick(&injEvent, &injKey))
+			uint32_t injButtons;
+			if (usbKeyInjectTick(&injEvent, &injKey, &injButtons))
 			{
 				keys.event = injEvent;
 				keys.key = injKey;
 				key_event = EVENT_KEY_CHANGE;
+				buttons |= injButtons;   // SK2 reported as held with this key only (flags bit2)
 			}
 		}
 #endif
