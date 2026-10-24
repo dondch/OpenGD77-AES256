@@ -31,6 +31,7 @@
 #include <ctype.h>
 #include <math.h>
 #include "functions/satellite.h"
+#include "functions/featureArena.h"
 #include "interfaces/pit.h"
 #include "user_interface/uiGlobals.h"
 #include "user_interface/menuSystem.h"
@@ -100,7 +101,8 @@ const int SATELLITE_PREDICTION_INITIAL_TIME_STEP = 256;
 #define currentSatelliteData_EQC2  0.00035
 
 
-satelliteData_t satelliteDataNative[NUM_SATELLITES];// Store native format Keps for each satellite
+satelliteData_t *satelliteDataNative = NULL;// Native format Keps for each satellite, in the feature arena while the satellite screen is up
+_Static_assert((sizeof(satelliteData_t) * NUM_SATELLITES) <= FEATURE_ARENA_SIZE, "satellite table does not fit the feature arena");
 
 satelliteObserver_t observerData;
 

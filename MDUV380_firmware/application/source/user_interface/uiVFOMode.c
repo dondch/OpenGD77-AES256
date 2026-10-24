@@ -34,6 +34,7 @@
 #include "functions/rxPowerSaving.h"
 #include "functions/spectrum.h"   /* SCANPROF_*: dev-only scan-step profiler, no-ops otherwise */
 #include "functions/scanreject.h" /* the fast reject; compiles to nothing in a stock build */
+#include "functions/featureArena.h" /* the sweep's strip, hold and average buffers */
 #include "user_interface/menuSystem.h"
 #include "user_interface/uiUtilities.h"
 #include "user_interface/uiDualScreen.h"
@@ -265,7 +266,12 @@ static uint32_t      vfoSweepListenFreq = 0;
 // This is the knob that trades readability against catching a marginal held signal. It is
 // the first thing to change if the hold feels either too noisy or too deaf.
 #define VFO_SWEEP_HOLD_MIN_LIFT  6
-static uint8_t vfoSweepHold[VFO_SWEEP_NUM_SAMPLES];
+// The hold and average traces, and the display strip buffer, are the sweep's share of the
+// feature arena (featureArena.h): claimed in sweepScanInit(), released in
+// uiVFOModeStopScanning(). They exist only while the sweep runs; every access is on a
+// sweep-only path, and the clears go through vfoSweepClearTraces(), which tolerates NULL.
+static featureArenaSweep_t *vfoSweepArena = NULL;
+static uint8_t *vfoSweepHold = NULL;
 
 // ---- automatic noise floor and gain ----
 // The two manual knobs were the last thing standing between this and a display you can
@@ -401,7 +407,24 @@ static uint16_t vfoSweepColumnSum = 0;     // and their running sum, for the ave
  *
  * With N == 1 the average and the peak are the same number, so the narrow span behaves
  * exactly as it always has. */
-static uint8_t vfoSweepAvg[VFO_SWEEP_NUM_SAMPLES];
+static uint8_t *vfoSweepAvg = NULL;
+
+// Clear the hold and/or average trace. Safe when the sweep is not running (no arena).
+static void vfoSweepClearTraces(bool hold, bool avg)
+{
+	if (vfoSweepArena == NULL)
+	{
+		return;
+	}
+	if (hold)
+	{
+		memset(vfoSweepHold, 0x00, VFO_SWEEP_NUM_SAMPLES);
+	}
+	if (avg)
+	{
+		memset(vfoSweepAvg, 0x00, VFO_SWEEP_NUM_SAMPLES);
+	}
+}
 
 // ---- auto scroll ----
 // A 20 MHz window still only covers a sixth of UHF. Advancing the centre by exactly one span
@@ -1548,6 +1571,12 @@ void uiVFOModeStopScanning(void)
 		screenOperationMode[nonVolatileSettings.currentVFONumber] = VFO_SCREEN_OPERATION_NORMAL;
 #if defined(ENABLE_FAST_SCAN)
 		vfoSweepRetuneFull(currentChannelData->rxFreq);   // forces the full retune the bare sweep retunes owe
+		// Hand the arena back; the traces go with it.
+		displaySetStripBuffer(NULL);
+		vfoSweepHold = NULL;
+		vfoSweepAvg = NULL;
+		vfoSweepArena = NULL;
+		featureArenaRelease(FEATURE_ARENA_VFO_SWEEP);
 #else
 		trxSetFrequency(currentChannelData->rxFreq, currentChannelData->txFreq, (((currentChannelData->chMode == RADIO_MODE_DIGITAL) && codeplugChannelGetFlag(currentChannelData, CHANNEL_FLAG_FORCE_DMO)) ? DMR_MODE_DMO : DMR_MODE_AUTO));
 #endif
@@ -2256,7 +2285,7 @@ static void handleEvent(uiEvent_t *ev)
 				// This is already the "put the display back to a clean state" gesture, so
 				// it is also where the max hold gets cleared and automatic scaling comes
 				// back on. Saves inventing controls on a keypad that has none free.
-				memset(vfoSweepHold, 0x00, sizeof(vfoSweepHold));
+				vfoSweepClearTraces(true, false);
 				vfoSweepAutoScale = true;
 				vfoSweepAutoPrimed = false;
 #endif
@@ -3146,8 +3175,8 @@ static void vfoSweepAdvanceWindow(void)
 	// hold especially: showing a held peak against the new window would be a claim about
 	// a frequency it was never measured at.
 	memset(vfoSweepSamples, 0x00, sizeof(vfoSweepSamples));
-		memset(vfoSweepAvg, 0x00, sizeof(vfoSweepAvg));
-	memset(vfoSweepHold, 0x00, sizeof(vfoSweepHold));
+		vfoSweepClearTraces(false, true);
+	vfoSweepClearTraces(true, false);
 	vfoSweepShownPeakLevel = 0;
 	vfoSweepShownPeakIndex = -1;
 	vfoSweepPeakLevel = 0;
@@ -3586,7 +3615,7 @@ static void vfoSweepUpdateSamples(int offset, bool forceRedraw, int bandwidthRes
 	// about a frequency it was never measured at, which is worse than losing it. Drop it.
 	if ((offset != 0) || (bandwidthRescale != 0))
 	{
-		memset(vfoSweepHold, 0x00, sizeof(vfoSweepHold));
+		vfoSweepClearTraces(true, false);
 	}
 
 	// SHIFT_DISTANCE is the UP/DOWN frequency step expressed in NARROW columns. A wide
@@ -3597,7 +3626,7 @@ static void vfoSweepUpdateSamples(int offset, bool forceRedraw, int bandwidthRes
 	if (vfoSweepWide && (offset != 0))
 	{
 		memset(vfoSweepSamples, 0x00, sizeof(vfoSweepSamples));
-		memset(vfoSweepAvg, 0x00, sizeof(vfoSweepAvg));
+		vfoSweepClearTraces(false, true);
 #if defined(VFO_SWEEP_WATERFALL)
 		if (vfoSweepWaterfallOn)
 		{
@@ -3767,8 +3796,8 @@ static void setSweepIncDecSetting(sweepSetting_t type, bool increment)
 						// Entering or leaving the wide span changes what every bin covers,
 						// so nothing measured carries over -- same reasoning as a scroll.
 						memset(vfoSweepSamples, 0x00, sizeof(vfoSweepSamples));
-		memset(vfoSweepAvg, 0x00, sizeof(vfoSweepAvg));
-						memset(vfoSweepHold, 0x00, sizeof(vfoSweepHold));
+		vfoSweepClearTraces(false, true);
+						vfoSweepClearTraces(true, false);
 						vfoSweepShownPeakLevel = 0;
 						vfoSweepShownPeakIndex = -1;
 						vfoSweepPeakLevel = 0;
@@ -4834,8 +4863,8 @@ void uiVFOModeSweepSetModes(bool wide, bool autoScroll, uint8_t stepIndex, bool 
 
 		// Same invalidation the SK2 path does: every bin covers a different frequency now.
 		memset(vfoSweepSamples, 0x00, sizeof(vfoSweepSamples));
-		memset(vfoSweepAvg, 0x00, sizeof(vfoSweepAvg));
-		memset(vfoSweepHold, 0x00, sizeof(vfoSweepHold));
+		vfoSweepClearTraces(false, true);
+		vfoSweepClearTraces(true, false);
 		vfoSweepShownPeakLevel = 0;
 		vfoSweepShownPeakIndex = -1;
 		vfoSweepPeakLevel = 0;
@@ -4989,6 +5018,20 @@ static void sweepScanInit(void)
 {
 	trxTerminateCheckAnalogSquelch(RADIO_DEVICE_PRIMARY);
 
+#if defined(ENABLE_FAST_SCAN)
+	// The traces and the strip buffer live in the feature arena while the sweep runs.
+	// Nothing else can hold it here (the satellite screen stops the sweep before it
+	// claims), so a refusal means a leaked claim: fall back to full-row rendering and no
+	// hold/average trace rather than a NULL dereference.
+	vfoSweepArena = (featureArenaSweep_t *)featureArenaClaim(FEATURE_ARENA_VFO_SWEEP, sizeof(featureArenaSweep_t));
+	if (vfoSweepArena != NULL)
+	{
+		vfoSweepHold = vfoSweepArena->hold;
+		vfoSweepAvg = vfoSweepArena->avg;
+		displaySetStripBuffer(vfoSweepArena->strip);
+	}
+#endif
+
 	uiDataGlobal.Scan.active = true;
 	uiDataGlobal.Scan.state = SCAN_STATE_SCANNING;
 	uiDataGlobal.Scan.scanType = SCAN_TYPE_NORMAL_STEP;
@@ -5029,7 +5072,7 @@ static void sweepScanInit(void)
 
 	memset(vfoSweepSamples, 0x00, VFO_SWEEP_NUM_SAMPLES * sizeof(uint8_t));
 #if defined(ENABLE_FAST_SCAN)
-	memset(vfoSweepAvg, 0x00, sizeof(vfoSweepAvg));
+	vfoSweepClearTraces(false, true);
 #endif
 
 #if defined(ENABLE_FAST_SCAN)
@@ -5045,7 +5088,7 @@ static void sweepScanInit(void)
 	vfoSweepShownPeakLevel = 0;
 	vfoSweepShownPeakIndex = -1;
 	vfoSweepPassComplete = false;
-	memset(vfoSweepHold, 0x00, sizeof(vfoSweepHold));
+	vfoSweepClearTraces(true, false);
 	// Come back in automatic, and re-prime rather than carrying the last visit's scaling
 	// into a band that may be nothing like it. Manual scaling is not persisted and has no
 	// indicator on screen, so leaving it latched across visits would mean opening the
