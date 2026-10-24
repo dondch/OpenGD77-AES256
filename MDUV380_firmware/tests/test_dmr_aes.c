@@ -1,7 +1,8 @@
 /*
  * test_dmr_aes.c — host unit tests for the DMRA AES-256 module.
- * Build & run on a PC (no radio needed):
- *     gcc -O2 -Wall -o test_dmr_aes test_dmr_aes.c dmr_aes.c && ./test_dmr_aes
+ * Build & run on a PC (no radio needed), from MDUV380_firmware/:
+ *     gcc -O2 -Wall -Iapplication/include -Iapplication/include/crypto -o /tmp/test_dmr_aes \
+ *          tests/test_dmr_aes.c application/source/crypto/dmr_aes.c && /tmp/test_dmr_aes
  * Verifies the crypto is bit-exact before integrating into OpenGD77.
  */
 #include "dmr_aes.h"
