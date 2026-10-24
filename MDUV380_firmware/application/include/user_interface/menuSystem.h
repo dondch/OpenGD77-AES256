@@ -527,9 +527,9 @@ menuStatus_t menuAESKeys(uiEvent_t *ev, bool isFirstRun);
 #endif
 #if defined(ENABLE_AES) && defined(ENABLE_DMR_DATA)
 menuStatus_t menuMessages(uiEvent_t *ev, bool isFirstRun);
+#endif
 #if defined(ENABLE_DUAL_SCREEN)
 menuStatus_t menuDualWatchOptions(uiEvent_t *ev, bool isFirstRun);
-#endif
 #endif
 #if defined(HAS_COLOURS)
 menuStatus_t menuThemeOptions(uiEvent_t *ev, bool isFirstRun);
