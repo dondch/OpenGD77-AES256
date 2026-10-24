@@ -2271,8 +2271,7 @@ void uiUtilityRenderHeader(bool isVFODualWatchScanning, bool isVFOSweepScanning,
 			displayDrawLine(ex, ey, ex + 6, ey + 4, true);     // flap (left)
 			displayDrawLine(ex + 12, ey, ex + 6, ey + 4, true);// flap (right)
 			char nb[4];
-			if (unread > 9) { strcpy(nb, "9+"); }              // one digit under-reported 10+ unread as "9"
-			else            { snprintf(nb, sizeof nb, "%d", unread); }
+			snprintf(nb, sizeof nb, "%d", (unread > 99) ? 99 : unread);   // two characters: the count up to 99
 			displayPrintCore(ex + 15, ey, nb, FONT_SIZE_1, TEXT_ALIGN_LEFT, false);
 		}
 	}
