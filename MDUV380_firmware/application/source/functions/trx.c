@@ -544,6 +544,16 @@ bool trxCheckAnalogSquelch(void)
 		return false;
 	}
 
+	// Eco has the receiver powered down. trxReadRSSIAndNoise() has refused to sample
+	// since it went off, so trxRxNoise is up to a whole off-window old; deciding the
+	// squelch on it would let the open branch below light the green LED and unmute the
+	// audio amp for a receiver that is physically switched off. Report what was last
+	// known instead, which leaves rxPowerSavingTick()'s hasSignal logic unchanged.
+	if (rxPowerSavingIsRxOn() == false)
+	{
+		return currentRadioDevice->analogSignalReceived;
+	}
+
 	trxReadRSSIAndNoise(0);
 
 	if (ticksTimerHasExpired((ticksTimer_t *)&trxNextSquelchCheckingTimer))
