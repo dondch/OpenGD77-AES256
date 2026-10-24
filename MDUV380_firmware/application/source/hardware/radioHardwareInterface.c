@@ -141,6 +141,10 @@ void radioPowerOff(bool invalidateFrequency, bool includeMic)
 		radioWriteReg2byte(0x30, 0x40, 0x06); // RX off
 	}
 
+	// The RX-on write that undoes this on power-up is the one at the end of
+	// AT1846sSetBandWidth(); its ENABLE_FAST_SCAN cache must not skip it.
+	AT1846sInvalidateBandwidthCache();
+
 	if (invalidateFrequency)
 	{
 		trxInvalidateCurrentFrequency();

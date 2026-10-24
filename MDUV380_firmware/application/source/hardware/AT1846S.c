@@ -358,6 +358,24 @@ void AT1846sSetBandWidth(bool Is25K)
 	taskEXIT_CRITICAL();
 }
 
+/*
+ * The receiver has just been switched off on the chip (register 0x30 RX bit cleared) by a
+ * path that does not go through AT1846sSetBandWidth(): Eco's radioPowerOff(). The cache
+ * above assumes the opposite ("RX is already on"), and on the Eco wake-up the only RX-on
+ * write is the one at the end of AT1846sSetBandWidth(), so a cache hit there left the
+ * AT1846S receiving nothing: RSSI and noise read 0/0, noise 0 is below any squelch, the
+ * digital squelch latched 'signal', the green LED stayed on, the S-meter froze at
+ * -151 dBm, and since that latched flag feeds hasSignal, Eco never cycled again to undo
+ * it (bench, 2026-10-24, channel mode, PROFILE=full). Without ENABLE_FAST_SCAN there is no
+ * cache and this is a no-op, as the stock code path is.
+ */
+void AT1846sInvalidateBandwidthCache(void)
+{
+#if defined(ENABLE_FAST_SCAN)
+	bandwidthCached[currentRadioDeviceId] = false;
+#endif
+}
+
 bool radioWriteReg2byte(uint8_t reg, uint8_t val1, uint8_t val2)
 {
 	if (reg == 0xFF)

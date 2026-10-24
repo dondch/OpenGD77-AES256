@@ -69,6 +69,7 @@ void AT1846sSetRssiCount(uint8_t count);
 void AT1846sInit(void);
 void AT1846sPostInit(void);
 void AT1846sSetBandWidth(bool Is25K);
+void AT1846sInvalidateBandwidthCache(void); // after an RX-off write made outside AT1846sSetBandWidth()
 void AT1846sSetMode(int mode);
 void AT1846sSetRxCSSOff(RadioDevice_t deviceId);
 void AT1846sSetRxCTCSS(RadioDevice_t deviceId, uint16_t tone);
