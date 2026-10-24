@@ -112,7 +112,10 @@ void rxPowerSavingTick(uiEvent_t *ev, bool hasSignal)
 {
 	if ((settingsUsbMode != USB_MODE_HOTSPOT) || (rxPowerSavingState != ECOPHASE_POWERSAVE_INACTIVE))
 	{
-		if (USB_DeviceIsResetting() || isCompressingAMBE || hasSignal || trxTransmissionEnabled || trxIsTransmitting ||
+		// Not a wake condition (it was never true): it forces the full-speed clock while USB is connected.
+		usbEnsureFullClockIfConnected();
+
+		if (isCompressingAMBE || hasSignal || trxTransmissionEnabled || trxIsTransmitting ||
 				(menuSystemGetCurrentMenuNumber() == UI_TX_SCREEN) || (menuSystemGetCurrentMenuNumber() == UI_CPS) ||
 				(uiDataGlobal.Scan.active && uiDataGlobal.Scan.scanType == SCAN_TYPE_NORMAL_STEP) || ev->hasEvent)
 		{
@@ -121,6 +124,14 @@ void rxPowerSavingTick(uiEvent_t *ev, bool hasSignal)
 				if (rxPowerSavingState == ECOPHASE_POWERSAVE_ACTIVE___RX_IS_OFF)
 				{
 					hrc6000IsPoweredOff = trxPowerUpDownRxAndC6000(true, hrc6000IsPoweredOff, false);// Power up AT1846S, C6000 and preamp
+					// The periodic wake below gives itself 25 ms before the next RSSI
+					// and noise sample; this path did not, so the first reading after
+					// a key press could be taken on a receiver that had only just been
+					// re-enabled. A low reading there is indistinguishable from a
+					// carrier, which latches the squelch open -- and since that flag
+					// comes straight back as hasSignal, Eco then stops re-entering and
+					// the green LED stays lit with nothing on frequency.
+					trxPostponeReadRSSIAndNoise(0);
 				}
 
 				if (powerSavingLevel >= LOW_SPEED_CLOCK_ECO_THRESHOLD)

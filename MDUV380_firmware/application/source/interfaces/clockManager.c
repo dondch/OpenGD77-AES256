@@ -34,7 +34,6 @@
 #include "usbd_def.h"
 
 extern USBD_HandleTypeDef hUsbDeviceFS;
-extern volatile bool usbIsResetting;
 
 volatile clockManagerSpeedSetting_t currentClockSpeedSetting = CLOCK_MANAGER_SPEED_UNDEF;
 
@@ -127,14 +126,6 @@ static bool clockManagerSetHSE(bool isEco)
 clockManagerSpeedSetting_t clockManagerGetRunMode(void)
 {
 	return currentClockSpeedSetting;
-}
-
-void clockManagerUsbRequired(void)
-{
-	if (usbIsResetting && (clockManagerGetRunMode() != CLOCK_MANAGER_SPEED_RUN))
-	{
-		clockManagerSetRunMode(kAPP_PowerModeRun, CLOCK_MANAGER_SPEED_RUN);
-	}
 }
 
 void clockManagerSetRunMode(uint8_t targetConfigIndex, clockManagerSpeedSetting_t clockSpeedSetting)

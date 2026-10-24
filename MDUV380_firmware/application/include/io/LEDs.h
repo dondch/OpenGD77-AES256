@@ -46,6 +46,11 @@ void LEDsInit(void);
 void torchToggle(void);
 #endif
 
+// The green LED's owner. See Leds.c for why it needed one.
+void ledsTick(void);
+bool ledsGreenShouldBeOn(void);
+uint32_t ledsGreenCorrectionCount(void);
+
 void LedWrite(LEDs_t theLED, uint8_t output);
 uint8_t LedRead(LEDs_t theLED);
 void LedWriteDirect(LEDs_t theLED, uint8_t output);
