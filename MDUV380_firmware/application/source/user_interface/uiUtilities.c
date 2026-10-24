@@ -2461,7 +2461,11 @@ void uiUtilityDisplayFrequency(uint8_t y, bool isTX, bool hasFocus, uint32_t fre
 #endif
 			yFont1 = yFont3 + FONT_SIZE_1_HEIGHT;
 		}
+#if defined(HAS_DUAL_WATCH_OPTIONS)
+		else if (isScanMode && displayVFOChannel && ((dualWatchVFO == 2U) || (dualWatchVFO == 3U))) /* DualWatch's second row: VFO B (2) or channel (3) */
+#else
 		else if (isScanMode && displayVFOChannel && (dualWatchVFO == 2U)) /* DualWatch's VFO B */
+#endif
 		{
 			yFont3 += (FONT_SIZE_3_HEIGHT / 2) +
 #if defined(PLATFORM_VARIANT_DM1701)
@@ -2494,7 +2498,27 @@ void uiUtilityDisplayFrequency(uint8_t y, bool isTX, bool hasFocus, uint32_t fre
 	// VFO
 	if (displayVFOChannel)
 	{
+#if defined(HAS_DUAL_WATCH_OPTIONS)
+		// dualWatchVFO: 0 normal screen, 1 row for VFO A, 2 row for VFO B, 3 row for the channel, 4 row for VFO B on top (with a channel below)
+		const char *letter = "B";
+
+		if (dualWatchVFO == 3U)
+		{
+			letter = "C";
+		}
+		else if (dualWatchVFO == 0U)
+		{
+			letter = (uiVFOModeDualWatchOnChannel() ? "C" : ((nonVolatileSettings.currentVFONumber == 0) ? "A" : "B"));
+		}
+		else if (dualWatchVFO == 1U)
+		{
+			letter = "A";
+		}
+
+		displayPrintAtDoubleHeight(16, (yFont1 + VFO_LETTER_Y_OFFSET), letter, FONT_SIZE_1, displayFocusAndDblHeight);
+#else
 		displayPrintAtDoubleHeight(16, (yFont1 + VFO_LETTER_Y_OFFSET), (((dualWatchVFO == 0) && (nonVolatileSettings.currentVFONumber == 0)) || (dualWatchVFO == 1)) ? "A" : "B", FONT_SIZE_1, displayFocusAndDblHeight);
+#endif
 	}
 
 	// Frequency

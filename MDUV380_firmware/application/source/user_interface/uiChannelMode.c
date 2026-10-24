@@ -29,6 +29,7 @@
 #include "functions/trx.h"
 #include "user_interface/menuSystem.h"
 #include "user_interface/uiUtilities.h"
+#include "user_interface/uiDualScreen.h"
 #include "user_interface/uiLocalisation.h"
 #include "functions/voicePrompts.h"
 #include "functions/rxPowerSaving.h"
@@ -228,6 +229,9 @@ static menuStatus_t uiChannelModeFirstRun(void)
 			GD77SParameters.dtmfListCount = codeplugDTMFContactsGetCount();
 		}
 #endif
+#if defined(HAS_DUAL_WATCH_OPTIONS)
+		uiDualScreenScreenEntered(true);
+#endif
 		uiChannelModeUpdateScreen(0);
 
 		if (uiDataGlobal.Scan.active == false)
@@ -273,6 +277,15 @@ menuStatus_t uiChannelMode(uiEvent_t *ev, bool isFirstRun)
 		if (aprsBeaconingForcedManualBeaconingTriggered() && aprsBeaconingIsTransmitting())
 		{
 			return menuChannelExitStatus;
+		}
+#endif
+
+#if defined(HAS_DUAL_WATCH_OPTIONS)
+		// Redraw the two rows when a signal starts / stops (frame around the active row)
+		if (uiDualScreenRxStateChanged() && (uiDataGlobal.displayQSOState == QSO_DISPLAY_IDLE) && (uiDataGlobal.Scan.active == false))
+		{
+			uiDataGlobal.displayQSOState = QSO_DISPLAY_DEFAULT_SCREEN;
+			uiChannelModeUpdateScreen(0);
 		}
 #endif
 
@@ -840,6 +853,16 @@ void uiChannelModeUpdateScreen(int txTimeSecs)
 			uiDataGlobal.isDisplayingQSOData = false;
 			uiDataGlobal.receivedPcId = 0x00;
 
+#if defined(HAS_DUAL_WATCH_OPTIONS)
+			if (uiDualScreenCanDraw() && (isTransmitting == false) && (directChannelNumber == 0) && (uiDataGlobal.Scan.active == false))
+			{
+				// Only the two rows: the stock channel / contact / zone drawing below would overlap them
+				uiDualScreenDraw();
+				displayRender();
+				break;
+			}
+#endif
+
 			if (isTransmitting)
 			{
 				int8_t yOverride =
@@ -1087,6 +1110,13 @@ static void handleEvent(uiEvent_t *ev)
 	handleEventForGD77S(ev);
 	return;
 #else
+
+#if defined(HAS_DUAL_WATCH_OPTIONS)
+	if (uiDualScreenHandleKey(ev, true, ((directChannelNumber > 0) || uiDataGlobal.displayChannelSettings)))
+	{
+		return;
+	}
+#endif
 
 	if (uiDataGlobal.Scan.active && (ev->events & KEY_EVENT))
 	{
