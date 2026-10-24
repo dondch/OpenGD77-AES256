@@ -425,8 +425,8 @@ bool settingsRestoreDefaultSettings(void)
 	nonVolatileSettings.currentChannelIndexInZone = 0;
 	nonVolatileSettings.currentChannelIndexInAllZone = 1;
 #else // These two has to be used on any platform but RD5R and MD-9600
-	nonVolatileSettings.UNUSED_1 = 0;
-	nonVolatileSettings.UNUSED_2 = 0;
+	nonVolatileSettings.dualWatchOptions = 0;
+	nonVolatileSettings.dualScreenSlot = 0;
 #endif
 
 #if !defined(PLATFORM_GD77S)
