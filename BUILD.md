@@ -63,6 +63,14 @@ small firmware stand-ins in `tests/stubs/` (each test's header carries its own g
 primitives, the late-entry MI and EMB codings, the RX bootstrap / PI seeding across call boundaries, the TX
 state at key-up, and the SMS receive path (unconfirmed and confirmed delivery, addressing, retransmissions).
 
+## Dual screen build
+`ENABLE_DUAL_SCREEN=1` adds the Anytone-style dual screen (two rows, A and B, each a VFO or a zone channel;
+Up/Down selects the other row, RED switches the active row between VFO and channel), a row watch that peeks at
+the other row every 1.5 s when the active one is quiet (analog rows), and a "DW Options" menu under Options
+(dual screen on/off, row watch, side B = VFO B or the zone channel, home side, speed, stay/switch on a
+signal). Ported from erenbozaci/md-uv390-firmware (Eren TA3BZC), same R20260131 base. State lives in the two
+previously unused settings fields, so older settings read as "all off".
+
 ## AES build
 `ENABLE_AES=1` compiles in DMRA (Motorola/Hytera-compatible) AES-256 encrypted voice — both **transmit and
 receive**, interoperable with a stock TYT MD-UV390 ("Universal" AES256). The default build is stock OpenGD77

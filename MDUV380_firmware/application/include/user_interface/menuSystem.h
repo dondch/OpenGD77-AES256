@@ -190,6 +190,10 @@ bool uiVFOModeIsTXFocused(void);
 void uiVFOModeStopScanning(void);
 bool uiVFOModeIsScanning(void);
 bool uiVFOModeDualWatchIsScanning(void);
+#if defined(HAS_DUAL_WATCH_OPTIONS)
+bool uiVFOModeDualWatchOnChannel(void);   // Dual Watch is currently tuned to its zone-channel side
+#endif
+bool uiVFOModeDualWatchOnChannel(void);
 bool uiVFOModeSweepScanning(bool includePaused);
 #if defined(ENABLE_FAST_SCAN)
 /* Total width of the sweep display in OpenGD77 10 Hz units, and whether it is marching
@@ -341,6 +345,9 @@ enum MENU_SCREENS
 #endif
 #if defined(ENABLE_AES) && defined(ENABLE_DMR_DATA)
 	MENU_MESSAGES,// encrypted-SMS messaging (index-matched to menuFunctions[])
+#endif
+#if defined(HAS_DUAL_WATCH_OPTIONS)
+	MENU_DUAL_WATCH,// dual screen / Dual Watch options (index-matched to menuFunctions[])
 #endif
 	// *** Add new menus to be accessed using quickkey (ID: 0..31) above this line ***
 	UI_MESSAGE_BOX,
@@ -502,6 +509,9 @@ menuStatus_t menuAESKeys(uiEvent_t *ev, bool isFirstRun);
 #endif
 #if defined(ENABLE_AES) && defined(ENABLE_DMR_DATA)
 menuStatus_t menuMessages(uiEvent_t *ev, bool isFirstRun);
+#if defined(HAS_DUAL_WATCH_OPTIONS)
+menuStatus_t menuDualWatchOptions(uiEvent_t *ev, bool isFirstRun);
+#endif
 #endif
 #if defined(HAS_COLOURS)
 menuStatus_t menuThemeOptions(uiEvent_t *ev, bool isFirstRun);
