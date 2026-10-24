@@ -279,6 +279,21 @@ static bool    vfoSweepAutoPrimed = false;
 static uint8_t vfoSweepAutoFloor = VFO_SWEEP_RSSI_NOISE_FLOOR_DEFAULT;
 static uint8_t vfoSweepAutoGain = VFO_SWEEP_GAIN_DEFAULT;
 
+// Where the noise stops, in counts, from the pass just measured: the level the loudest
+// column of an EMPTY band is not expected to reach. The peak marker and the listen park
+// test the pass peak against this plus their margins. They used to test against the
+// drawing floor, which auto-scale puts 4 counts UNDER the quiet-half noise mean so that
+// the noise keeps some texture; the loudest of 160 noise samples cleared floor + 6 (the
+// marker) and floor + 10 (the listen) on nearly every pass. MEASURED on the bench with no
+// carrier: the sweep parked 1.2 s on "433.1975" at the end of every narrow pass and on
+// "432.0475" in wide, inflating a 0.66 s pass to 1.86 s, and the marker always had a
+// frequency to name. The ceiling is the trace mean plus four times the mean's distance
+// above the quiet-half mean (a cheap stand-in for the noise spread, ~2 counts here) plus
+// 4: about mean + 12 on this radio, against a measured noise maximum of mean + 6 or 7 and
+// a carrier at +35. The auto floor and gain are unchanged by this.
+static uint8_t vfoSweepNoiseCeil = VFO_SWEEP_RSSI_NOISE_FLOOR_DEFAULT;
+#define VFO_SWEEP_PEAK_BASE  (vfoSweepAutoScale ? vfoSweepNoiseCeil : vfoSweepRssiNoiseFloor)
+
 // AT1846S rssi_ct_u (0x5A[11:9]) to hold while the sweep is running. The tracking
 // bandwidth is 1145 / 2^ct Hz, so the stock 3 is 144 Hz and this is 572 Hz.
 //
@@ -2921,13 +2936,25 @@ static void vfoSweepUpdateAutoScale(void)
 	// instead of being clipped flat against the baseline.
 	floorTarget = ((noise > VFO_SWEEP_AUTO_FLOOR_MARGIN) ? (noise - VFO_SWEEP_AUTO_FLOOR_MARGIN) : 0);
 
+	// The noise ceiling (see vfoSweepNoiseCeil): mean + 4 x (mean - quiet-half mean) + 4,
+	// from this pass, unslewed -- it judges this pass's own peak.
+	{
+		int32_t ceil = (int32_t)mean + (4 * ((int32_t)mean - (int32_t)noise)) + 4;
+		vfoSweepNoiseCeil = (uint8_t)((ceil > 255) ? 255 : ceil);
+	}
+
 	// Span that puts the strongest sample at VFO_SWEEP_AUTO_HEADROOM_PCT of full height.
 	span = ((int32_t)highest - (int32_t)floorTarget);
-	if (span < VFO_SWEEP_AUTO_MIN_SPAN)
 	{
 		// An empty band is all noise, and stretching it to full height turns a quiet
-		// display into a wall of grass that looks like signal everywhere.
-		span = VFO_SWEEP_AUTO_MIN_SPAN;
+		// display into a wall of grass that looks like signal everywhere. The fixed
+		// minimum was not enough on this radio: at the 4 ms step the noise spreads
+		// wider than 20 counts, and the bench framebuffer showed noise drawn at half to
+		// full height with columns clipping. Never span less than twice the distance
+		// from the floor to the noise ceiling, so the loudest noise sits below half height.
+		int32_t minSpan = 2 * ((int32_t)vfoSweepNoiseCeil - (int32_t)floorTarget);
+		if (minSpan < VFO_SWEEP_AUTO_MIN_SPAN) { minSpan = VFO_SWEEP_AUTO_MIN_SPAN; }
+		if (span < minSpan) { span = minSpan; }
 	}
 	span = ((span * 100) / VFO_SWEEP_AUTO_HEADROOM_PCT);
 	if (span > 255)
@@ -3004,7 +3031,7 @@ static void vfoSweepDrawPeakMarker(void)
 	// Nothing above the noise floor is not a peak, it is just the loudest noise. Saying
 	// so would be worse than saying nothing: it invites chasing a frequency that has
 	// nothing on it.
-	if (vfoSweepShownPeakLevel <= (VFO_SWEEP_FLOOR_ACTIVE + VFO_SWEEP_PEAK_MARGIN))
+	if (vfoSweepShownPeakLevel <= (VFO_SWEEP_PEAK_BASE + VFO_SWEEP_PEAK_MARGIN))
 	{
 		return;
 	}
@@ -4779,7 +4806,7 @@ static void sweepScanStep(void)
 
 			// Strong enough to be worth interrupting the sweep for? Park on it.
 			if ((vfoSweepShownPeakIndex >= 0) &&
-					(vfoSweepShownPeakLevel > (VFO_SWEEP_FLOOR_ACTIVE + VFO_SWEEP_LISTEN_MARGIN)))
+					(vfoSweepShownPeakLevel > (VFO_SWEEP_PEAK_BASE + VFO_SWEEP_LISTEN_MARGIN)))
 			{
 				vfoSweepListenFreq = vfoSweepFreqForSample(vfoSweepShownPeakIndex);
 				vfoSweepListening = true;
