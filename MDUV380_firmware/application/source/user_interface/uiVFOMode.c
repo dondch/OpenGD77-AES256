@@ -4793,7 +4793,8 @@ uint8_t uiVFOModeSweepDwellPasses(void)
 #endif
 
 /* Needs BOTH flags: the modes it drives are ENABLE_FAST_SCAN state, so an
- * ENABLE_SPECTRUM-only build (which build_spec.sh makes) would not compile without this.
+ * ENABLE_SPECTRUM-only build would not compile without this (test_build.sh builds the
+ * dev-prof profile, which is exactly that combination).
  * Caught by building that configuration, not by reading -- the two dev flags are usually
  * set together and the broken combination is the one nobody exercises. */
 #if defined(ENABLE_SPECTRUM) && defined(ENABLE_FAST_SCAN)

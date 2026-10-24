@@ -8,7 +8,11 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    name: build
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [release, full, dev-sweep, dev-prof, dev-aes, dev-gps]
+    name: build (PROFILE=${{ matrix.profile }})
     steps:
       - uses: actions/checkout@v4
       - name: Install ARM GNU toolchain
@@ -17,10 +21,7 @@ jobs:
           release: "14.2.Rel1"
       - name: Build
         working-directory: MDUV380_firmware
-        run: make -j$(nproc)
-      - name: Report size
-        working-directory: MDUV380_firmware
-        run: arm-none-eabi-size build/openuv380-10w.elf
+        run: make -j$(nproc) PROFILE=${{ matrix.profile }} REPRODUCIBLE=1
       - name: Assert codec-merge-capable size
         working-directory: MDUV380_firmware
         run: |
@@ -31,8 +32,21 @@ jobs:
           echo "OK: reserved codec region present, ready for flash-time merge."
       - uses: actions/upload-artifact@v4
         with:
-          name: openuv380-10w
+          name: openuv380-10w-${{ matrix.profile }}
           path: |
             MDUV380_firmware/build/*.bin
             MDUV380_firmware/build/*.hex
             MDUV380_firmware/build/*.elf
+
+  forbidden-combinations:
+    runs-on: ubuntu-latest
+    name: forbidden flag combinations are refused
+    steps:
+      - uses: actions/checkout@v4
+      - name: The Makefile must refuse these at parse time
+        working-directory: MDUV380_firmware
+        run: |
+          for bad in "ENABLE_SCAN_PROFILER=1" "DMR_AES_DIAG_PATTERN=1 DMR_AES_DIAG_ENCPAT=1" "PROFILE=no-such-profile"; do
+            if make -s flags $bad > /dev/null 2>&1; then echo "FAIL: 'make $bad' was accepted"; exit 1; fi
+            echo "ok: 'make $bad' refused"
+          done
