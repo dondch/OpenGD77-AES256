@@ -458,6 +458,12 @@ static int vfoSweepStepTime(void)
 // that needs the full receiver set-up (first sample of a pass after a scroll or rescale,
 // parking on a peak, leaving the sweep) goes through vfoSweepRetuneFull().
 static bool vfoSweepPllMoved = false;
+// The first measurement after the receiver was set up in full (a scroll, a rescale, the sweep's
+// start, the end of a park) waits the stock RSSI settle, not the 4 ms a bare retune needs. Bench
+// (fw_prof 47bbb86): after a retune at the wide span the sweep parked on column 0 on every pass,
+// 1.2 s each, because the column measured right after the park's full retune read high, became
+// the pass's peak, and was parked on again -- a loop only leaving the sweep broke.
+static bool vfoSweepSettleOwed = false;
 
 static void vfoSweepRetuneFull(uint32_t rxFreq)
 {
@@ -472,6 +478,7 @@ static void vfoSweepRetuneFull(uint32_t rxFreq)
 			(((currentChannelData->chMode == RADIO_MODE_DIGITAL) &&
 					codeplugChannelGetFlag(currentChannelData, CHANNEL_FLAG_FORCE_DMO))
 							? DMR_MODE_DMO : DMR_MODE_AUTO));
+	vfoSweepSettleOwed = true;
 }
 
 static void vfoSweepRetuneFast(uint32_t rxFreq)
@@ -3271,7 +3278,10 @@ static void vfoSweepStopListening(void)
 		trxTerminateCheckAnalogSquelch(RADIO_DEVICE_PRIMARY);
 		uiDataGlobal.Scan.state = SCAN_STATE_SCANNING;
 		// No retune needed here: the next sweepScanStep() recomputes scanSweepCurrentFreq
-		// from sweepSampleIndex and tunes there itself.
+		// from sweepSampleIndex and tunes there itself. It does owe the receiver a settle
+		// first: the squelch and audio path were just shut, and the one measurement taken
+		// straight after that was what re-parked the sweep on the bench.
+		vfoSweepSettleOwed = true;
 	}
 }
 
@@ -5107,6 +5117,16 @@ static void sweepScanStep(void)
 
 	if (ticksTimerHasExpired(&uiDataGlobal.Scan.timer))
 	{
+#if defined(ENABLE_FAST_SCAN)
+		if (vfoSweepSettleOwed)
+		{
+			// One step of the stock RSSI settle before the first measurement after a full
+			// receiver set-up -- see vfoSweepSettleOwed. Once per scroll, rescale or park.
+			vfoSweepSettleOwed = false;
+			ticksTimerStart(&uiDataGlobal.Scan.timer, RSSI_NOISE_SAMPLE_PERIOD_PIT);
+			return;
+		}
+#endif
 		ticksTimerStart(&uiDataGlobal.Scan.timer, VFO_SWEEP_STEP_TIME_ACTIVE);
 
 		if (uiDataGlobal.Scan.sweepSampleIndex < VFO_SWEEP_NUM_SAMPLES)
