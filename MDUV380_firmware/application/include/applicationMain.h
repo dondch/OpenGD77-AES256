@@ -39,9 +39,13 @@
 #define HAS_SOFT_VOLUME    1
 #endif
 #define HAS_GPS            1
-#define LOG_GPS_DATA       1
 #elif defined(PLATFORM_MD9600)
 #define HAS_GPS            1
+#endif
+
+// GPS NMEA logging to SPI flash is a dev-only feature: build with ENABLE_GPS_NMEA_LOG=1.
+// Off by default because its NMEARecordingBuffer costs 4 KB of SRAM (and 4 KB of flash image).
+#if defined(HAS_GPS) && defined(ENABLE_GPS_NMEA_LOG)
 #define LOG_GPS_DATA       1
 #endif
 
