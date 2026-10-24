@@ -71,6 +71,16 @@ the other row every 1.5 s when the active one is quiet (analog rows), and a "DW 
 signal). Ported from erenbozaci/md-uv390-firmware (Eren TA3BZC), same R20260131 base. State lives in the two
 previously unused settings fields, so older settings read as "all off".
 
+## TA2TWC screens build
+`ENABLE_TA2TWC_SCREENS=1` adds the redesigned screens of josephddt/OpenGD77-TA2TWC (same R20260131 base): a
+Channel home screen with large frequency, channel, zone and TX frequency, the S-meter with dBm, signal quality,
+noise, battery voltage, temperature and a scrolling signal history; a caller screen with the callsign large;
+a TX screen with the time-out bar; telemetry lines on the VFO screen; an analog needle S-meter on the RSSI
+screen; boot and shutdown animations with the radio's callsign and DMR ID; a dark default theme and compact
+9-line menus. "Main screen: Classic" in the Display options brings the stock Channel screen back. With
+`ENABLE_DUAL_SCREEN=1` as well, the dual screen takes the home screen over while its option is on. The fork's
+own spectrum module is not taken (this tree's sweep has its waterfall), nor its settings defaults.
+
 ## AES build
 `ENABLE_AES=1` compiles in DMRA (Motorola/Hytera-compatible) AES-256 encrypted voice — both **transmit and
 receive**, interoperable with a stock TYT MD-UV390 ("Universal" AES256). The default build is stock OpenGD77

@@ -206,10 +206,19 @@ void uiUtilityRenderHeader(bool isVFODualWatchScanning, bool isVFOSweepScanning,
 void uiUtilityRedrawHeaderOnly(bool isVFODualWatchScanning, bool isVFOSweepScanning, bool forceBatteryDisplay);
 LinkItem_t *lastHeardFindInList(uint32_t id);
 void lastHeardInitList(void);
+void lastHeardSetRssi(const LinkItem_t *item, int dBm);
+int lastHeardGetRssi(const LinkItem_t *item); // dBm, 0 if unknown
 void lastHeardClearWorkingTAData(void);
 bool lastHeardListUpdate(uint8_t *dmrDataBuffer, bool forceOnHotspot);
 void lastHeardClearLastID(void);
 void uiUtilityDrawRSSIBarGraph(void);
+bool uiUtilityDrawTelemetryRx(int16_t y, int16_t historyY, int16_t historyHeight);
+void uiUtilityDrawTelemetryTx(int txTimeSecs, bool showTxFrequency);
+void uiUtilityDrawTelemetryDmr(void);
+bool uiUtilityHomeScreenIsActive(void);
+void uiUtilityHomeScreenDraw(int txTimeSecs, bool showCall, const char *zoneText);
+void uiUtilityHomeScreenDrawStatusBar(void);
+void uiUtilityRenderLevelBarRows(void);
 void uiUtilityDrawFMMicLevelBarGraph(void);
 void uiUtilityDrawDMRMicLevelBarGraph(void);
 void setOverrideTGorPC(uint32_t tgOrPc, bool privateCall);

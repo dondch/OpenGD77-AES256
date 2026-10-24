@@ -29,6 +29,7 @@
 #include "user_interface/menuSystem.h"
 #include "user_interface/uiLocalisation.h"
 #include "user_interface/uiUtilities.h"
+#include "user_interface/uiTelemetry.h"
 
 
 enum
@@ -52,7 +53,10 @@ static const char *creditTexts[] =
 #endif
 		"Jason VK7ZJA (SK)",
 #if defined(HAS_DUAL_WATCH_OPTIONS)
-		"Eren TA3BZC"   // dual screen / dual watch options
+		"Eren TA3BZC",   // dual screen / dual watch options
+#endif
+#if defined(HAS_TELEMETRY)
+		"TA2TWC",   // home, caller and TX screens, meters, animations
 #endif
 };
 static const int maxCredits = (sizeof(creditTexts) / sizeof(creditTexts[0]));
