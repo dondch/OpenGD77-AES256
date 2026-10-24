@@ -69,8 +69,11 @@ acknowledgement, the network's short data, and the stock radio's "DMR format" te
 Up/Down selects the other row, RED switches the active row between VFO and channel), a row watch that peeks at
 the other row every 1.5 s when the active one is quiet, and a "DW Options" menu under Options (dual screen
 on/off, row watch, side B = VFO B or the zone channel, home side, speed, stay/switch on a signal). The row
-watch works while both rows are analog: it tunes to the other row, shows an "RX" badge on it while the signal
-lasts, and returns to the active row after the scan hang time; the active row does not change. "Home",
+watch looks at an analog other row (a DMR row cannot be judged in a short look); the active row may be analog or
+DMR. It tunes to the other row for 80 ms every 1.5 s while the active row is quiet (no audio, and on a DMR row no
+call up), shows an "RX" badge on it while a signal lasts, and returns to the active row after the scan hang time,
+re-initialising the DMR receiver so a call that started meanwhile is joined by late entry; the active row does
+not change. "Home",
 "Speed" and "On signal" (stay or switch) belong to the VFO dual-watch scan (the A/B alternating scan),
 not to the row watch. Ported from erenbozaci/md-uv390-firmware (Eren TA3BZC), same R20260131 base. State
 lives in the two previously unused settings fields, so older settings read as "all off". Verified on the

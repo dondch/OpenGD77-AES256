@@ -35,6 +35,7 @@
 #include "functions/trx.h"
 #include "functions/sound.h"
 #include "functions/rxPowerSaving.h"
+#include "hardware/HR-C6000.h"   // slotState: a DMR call in progress on the active row
 
 #if defined(ENABLE_DUAL_SCREEN)
 
@@ -151,8 +152,11 @@ static bool receiving(void)
 // With one receiver the other row can only be heard by tuning to it for a moment. Every WATCH_PEEK_INTERVAL_MS the radio
 // looks at the other row for WATCH_PEEK_DWELL_MS: no carrier, and it goes straight back. With a carrier it waits for audio
 // (it can be a carrier with the wrong tone) and then listens until the audio has been gone for the Scan delay, and returns.
-// The active row never changes, so PTT always goes where the user selected. Analog rows only for now (a DMR row needs its
-// colour code, slot and talkgroup set up to be heard): nothing is done while the active row is DMR, and DMR rows are skipped.
+// The active row never changes, so PTT always goes where the user selected. The row looked at must be analog (hearing a DMR
+// row would need its colour code, slot and talkgroup set up and a sync, far longer than a look); the active row may be either:
+// a DMR active row is left for the look only while no call is up on it (slotState idle), and comes back through the same
+// re-initialisation the channel screen uses (frequency, mode, colour code), so a call that started during the look is joined
+// by late entry. The look costs a DMR row about 80 ms in every 1.5 s of listening.
 #define WATCH_PEEK_INTERVAL_MS   1500U
 #define WATCH_QUIET_MS           3000U // no peek until the active row has been quiet this long (pauses in speech, squelch tail)
 #define WATCH_PEEK_DWELL_MS      80U
@@ -177,19 +181,37 @@ static int savedMode;
 static int savedDmrMode;
 static bool savedBw25;
 static uint16_t savedRxTone;
+static uint8_t savedCC;            // the colour code in effect on a DMR active row when it was left
 static bool lastListening;
 
+// Busy on the frequency the radio is on: audio open, or (DMR) a call being received or just ended
 static bool receivingNow(void)
 {
+	if ((trxGetMode() == RADIO_MODE_DIGITAL) && (slotState != DMR_STATE_IDLE))
+	{
+		return true;
+	}
+
 	return ((audioAmpGetStatus() & AUDIO_AMP_CHANNEL_RF) != 0);
 }
 
+// Back to the active row. Frequency first, while still in analog mode (cheap), then the mode: for a DMR row that is the
+// one HR-C6000 re-initialisation, at the right frequency, the same order uiChannelModeLoadChannelData() uses.
 static void watchRestoreRadio(void)
 {
 	trxSetSquelchOverride(false, 0, 0);
 	trxSetFrequency(savedRx, savedTx, savedDmrMode);
 	trxSetModeAndBandwidth(savedMode, savedBw25);
-	trxSetRxCSS(RADIO_DEVICE_PRIMARY, savedRxTone);
+
+	if (savedMode == RADIO_MODE_DIGITAL)
+	{
+		trxSetDMRColourCode(savedCC);
+		HRC6000ClearColorCodeSynchronisation();
+	}
+	else
+	{
+		trxSetRxCSS(RADIO_DEVICE_PRIMARY, savedRxTone);
+	}
 }
 
 static void watchGoIdle(uint32_t now)
@@ -235,7 +257,7 @@ static bool watchAllowed(void)
 			((menu == UI_VFO_MODE) || (menu == UI_CHANNEL_MODE)) &&
 			(uiDataGlobal.Scan.active == false) && (trxTransmissionEnabled == false) && (trxIsTransmitting == false) &&
 			(uiDataGlobal.FreqEnter.index == 0) && (uiDataGlobal.displayChannelSettings == false) &&
-			(trxGetMode() == RADIO_MODE_ANALOG) && rxPowerSavingIsRxOn() && (aprsBeaconingIsTransmitting() == false));
+			(trxGetMode() != RADIO_MODE_NONE) && rxPowerSavingIsRxOn() && (aprsBeaconingIsTransmitting() == false));
 }
 
 bool uiDualScreenWatchIsTunedAway(void)
@@ -298,11 +320,14 @@ void uiDualScreenWatchTick(void)
 					savedBw25 = trxGetBandwidthIs25kHz();
 					savedDmrMode = currentRadioDevice->trxDMRModeRx;
 					savedRxTone = currentChannelData->rxTone;
+					savedCC = trxGetDMRColourCode();
 
 					rxPowerSavingSetState(ECOPHASE_POWERSAVE_INACTIVE); // keep the receiver on while looking
 					trxSetSquelchOverride(true, other.sql, other.rxTone); // squelch and tone of the other row, not the active one's
-					trxSetFrequency(other.rxFreq, other.txFreq, DMR_MODE_AUTO);
+					// Mode before frequency: from a DMR row, retuning while still digital would re-initialise the
+					// HR-C6000 at the other row's frequency only to shut it down again for the analog look.
 					trxSetModeAndBandwidth(RADIO_MODE_ANALOG, (codeplugChannelGetFlag(&other, CHANNEL_FLAG_BW_25K) != 0));
+					trxSetFrequency(other.rxFreq, other.txFreq, DMR_MODE_AUTO);
 					trxSetRxCSS(RADIO_DEVICE_PRIMARY, other.rxTone);
 					watchState = WATCH_PEEK;
 				}
