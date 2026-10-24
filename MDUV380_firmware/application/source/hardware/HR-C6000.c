@@ -316,6 +316,9 @@ static bool hrc6000CallAcceptFilter(void);
 static void hrc6000SendPcOrTgLCHeader(void);
 #if defined(ENABLE_DMR_DATA)
 static void hrc6000DataTxStartBurst(void);
+#if defined(ENABLE_AES)
+static void hrc6000DataAckStart(const uint8_t *hdr12);
+#endif
 #endif
 #ifdef ENABLE_AES
 static uint32_t hrc6000AesRngSeed(void);
@@ -1111,6 +1114,18 @@ static inline void hrc6000SysReceivedDataInt(void)
 			if (SPI0ReadPageRegByteArray(0x02, 0x00, dataBurst, dataLen) == kStatus_Success)
 			{
 				dmrSmsRxBurst(rxDataType, dataBurst);
+				// A confirmed private SMS to us just completed: a stock sender expects the
+				// acknowledgement in the very next timeslot, so it is keyed from here, not
+				// from the main loop (bench: the stock receiver's ACK starts 0-1 ms after the
+				// sender's last burst ends, or the sender repeats the PDU up to four times).
+				// Not when relaying as a hotspot: the host handles data then.
+				{
+					uint8_t ackHdr[LC_DATA_LENGTH];
+					if (dmrSmsAckTake(ackHdr) && (settingsUsbMode != USB_MODE_HOTSPOT) && (slotState < DMR_STATE_TX_START_1))
+					{
+						hrc6000DataAckStart(ackHdr);
+					}
+				}
 			}
 		}
 	}
@@ -2064,6 +2079,17 @@ void hrc6000TimeslotInterruptHandler(void)
 #endif
 			break;
 
+#if defined(ENABLE_DMR_DATA) && defined(ENABLE_AES)
+		case DMR_STATE_TX_ACK_1: // the SMS acknowledgement header is going out in this timeslot
+			SPI0WritePageRegByte(0x04, 0x41, 0x00);   // and nothing in the next one
+			slotState = DMR_STATE_TX_ACK_2;
+			break;
+		case DMR_STATE_TX_ACK_2: // sent: back to receive, as the end of a DMO transmission does
+			addTimerCallback(hrc6000TxBurstCallback, 29, MENU_ANY, false);
+			HRC6000InitDigitalDmrRx();
+			slotState = DMR_STATE_TX_END_3_DMO;
+			break;
+#endif
 		case DMR_STATE_TX_END_3_DMO:
 			slotState = DMR_STATE_IDLE;
 			trxIsTransmitting = false;
@@ -2428,6 +2454,26 @@ static void hrc6000DataTxStartBurst(void)
 		SPI0WritePageRegByte(0x04, 0x50, 0x10);    // fallback: Voice-LC header
 	}
 }
+
+#if defined(ENABLE_AES)
+// Send one data-header burst in the NEXT timeslot, from the receive state, without the
+// data-call key-up (CSBK preamble, active timing, Voice LC). The chip keeps the passive
+// timing it locked to the sender, so the burst lands in the slot after the sender's last
+// one, where a stock radio puts its acknowledgement; the RF_TX interrupt keys the PA before
+// the burst exactly as it does for a repeater-timed transmission, and the timeslot
+// interrupt turns it off again (hrc6000RxInterruptHandler). TX_ACK_1/2 then return to
+// receive the way a DMO transmission ends. The UI is not told: nothing that short needs
+// a TX screen, and trxTransmissionEnabled stays false so the receive hooks keep their
+// state for the sender's possible Terminator.
+static void hrc6000DataAckStart(const uint8_t *hdr12)
+{
+	audioAmpDisable(AUDIO_AMP_CHANNEL_RF);
+	SPI0WritePageRegByteArray(0x02, 0x00, (uint8_t *)hdr12, LC_DATA_LENGTH);
+	SPI0WritePageRegByte(0x04, 0x50, 0x60);    // Data Header, Data, LCSS=00
+	SPI0WritePageRegByte(0x04, 0x41, 0x80);    // transmit during next timeslot
+	slotState = DMR_STATE_TX_ACK_1;
+}
+#endif
 #endif
 
 #ifdef ENABLE_AES

@@ -468,6 +468,66 @@ static void testCleartextPduReportsNoKeyId(void)
     check(dmrSmsRxLastPdu(out, sizeof out) >= 8 && out[2] == 0, "and reports key id 0, not the previous packet's");
 }
 
+/* Bench r3: a stock radio keeps retransmitting a confirmed private SMS (five copies, then a
+ * TMS-layer repeat) because this fork never acknowledged it. The stock receiver answers in
+ * the very next timeslot with a single Response PDU header and no CSBK preamble, so the
+ * reassembler builds the header the moment the last block completes and the HR-C6000 ISR
+ * takes it with dmrSmsAckTake(). The three ACKs in the recon captures, RADIO2 12342
+ * acknowledging RADIO3's N(S) 0, 1 and 4, are the expected bytes, CRC included. */
+static const uint8_t STOCK_ACK_NS0[12] = { 0x01,0x40,0x00,0x30,0x37,0x00,0x30,0x36,0x00,0x08,0x67,0x0B };
+static const uint8_t STOCK_ACK_NS1[12] = { 0x01,0x40,0x00,0x30,0x37,0x00,0x30,0x36,0x00,0x09,0x77,0x2A };
+static const uint8_t STOCK_ACK_NS4[12] = { 0x01,0x40,0x00,0x30,0x37,0x00,0x30,0x36,0x00,0x0C,0x27,0x8F };
+
+static void testConfirmedPrivateSmsIsAcknowledged(void)
+{
+    uint8_t ack[12];
+    fresh();
+    trxDMRID = 12342;
+    check(dmrSmsAckTake(ack) == 0, "nothing to acknowledge before a packet completes");
+    playReconPrivateHello(0);
+    check(dmrSmsCount(0) == 1, "the message is stored");
+    check((dmrSmsAckTake(ack) == 1) && (memcmp(ack, STOCK_ACK_NS0, 12) == 0), "the Response PDU for N(S)=0 is byte for byte what the stock radio sent");
+    check(dmrSmsAckTake(ack) == 0, "the ACK is taken once");
+
+    playReconPrivateHello(1);                       /* the sender's next packet */
+    check((dmrSmsAckTake(ack) == 1) && (memcmp(ack, STOCK_ACK_NS1, 12) == 0), "N(S)=1 is echoed in the status field");
+    playReconPrivateHello(4);                       /* a repeat of the same text, N(S)=4: not stored, still acknowledged */
+    check(dmrSmsCount(0) == 1 && (dmrSmsAckTake(ack) == 1) && (memcmp(ack, STOCK_ACK_NS4, 12) == 0), "a repeat that is not stored again is still acknowledged, with its own N(S)");
+
+    playReconCopy(3, 12343, 1, 0, 0x10);            /* a damaged copy never completes */
+    check(dmrSmsAckTake(ack) == 0, "an incomplete PDU is not acknowledged");
+
+    fresh();
+    trxDMRID = 12343;                               /* addressed to someone else */
+    playReconCopy(0, 12399, -1, 0, 0);
+    check(dmrSmsAckTake(ack) == 0, "a PDU for another radio is not acknowledged");
+    trxDMRID = 2345678;
+
+    /* encrypted under a key we do not hold: still acknowledged at the link layer */
+    stream_t s, c;
+    fresh();
+    sendAndCapture("secret", trxDMRID, 0, 1, &s);
+    toConfirmed(&s, plaintextLen("secret"), trxDMRID, &c);
+    dmrAesInit();                                   /* drop the keys */
+    playback(&c, 0);
+    check(dmrSmsCount(0) == 0 && (dmrSmsAckTake(ack) == 1) && ((ack[0] & 0x0F) == 0x01) && (ack[1] == 0x40) && (ack[8] == 0) && (ack[9] == 0x08),
+          "a confirmed PDU we cannot decrypt is still acknowledged");
+
+    /* confirmed but without the response-requested bit: no answer */
+    fresh();
+    sendAndCapture("quiet", trxDMRID, 0, 1, &s);
+    toConfirmed(&s, plaintextLen("quiet"), trxDMRID, &c);
+    for (int i = 0; i < c.nhdr; i++) { if ((c.hdr[i][0] & 0x0F) == 0x03) { c.hdr[i][0] &= (uint8_t)~0x40; } }
+    playback(&c, 0);
+    check(dmrSmsCount(0) == 1 && (dmrSmsAckTake(ack) == 0), "a confirmed PDU that does not ask for a response gets none");
+
+    /* unconfirmed group SMS: no response asked for, none sent */
+    fresh();
+    sendAndCapture("to all", 9, 1, 1, &s);
+    playback(&s, 0);
+    check(dmrSmsCount(0) == 1 && (dmrSmsAckTake(ack) == 0), "an unconfirmed group SMS is not acknowledged");
+}
+
 static void testEncHeaderWithGroupBit(void)
 {
     stream_t s;
@@ -512,6 +572,7 @@ int main(void)
     testRetransmissionIsNotASecondMessage();
     testDiagResetForgetsLastMessage();
     testCleartextPduReportsNoKeyId();
+    testConfirmedPrivateSmsIsAcknowledged();
     testEncHeaderWithGroupBit();
     testLostEncHeaderStillDecrypts();
     testWrongKeyIsDropped();
