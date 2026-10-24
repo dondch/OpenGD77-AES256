@@ -594,6 +594,14 @@ static uint16_t vfoSweepWaterfallPalette[32];   // level 0..31 -> native pixel, 
 static uint16_t vfoSweepBarPalette[32];         // the same hue at 150% brightness for the bar tips
 static bool     vfoSweepWaterfallOn = true;
 static uint32_t vfoSweepFreqForSample(int16_t index);
+static void vfoSweepDrawEdgeLabels(void);
+// The sweep cursor (two solid columns ahead of the sample) must not run through the history:
+// it is drawn in the frequency colour, black in the stock day theme, and nothing repaints
+// those rows afterwards -- so on the bench every pass painted the whole history black and only
+// the newest row came back. Over the bars only while the waterfall is on.
+#define VFO_SWEEP_CURSOR_HEIGHT  (vfoSweepWaterfallOn ? VFO_SWEEP_BARS_HEIGHT : VFO_SWEEP_TRACE_HEIGHT_Y)
+#else
+#define VFO_SWEEP_CURSOR_HEIGHT  VFO_SWEEP_TRACE_HEIGHT_Y
 #endif
 static uint8_t vfoSweepRssiNoiseFloor = VFO_SWEEP_RSSI_NOISE_FLOOR_DEFAULT;
 static uint8_t vfoSweepGain = VFO_SWEEP_GAIN_DEFAULT;
@@ -635,8 +643,8 @@ menuStatus_t uiVFOMode(uiEvent_t *ev, bool isFirstRun)
 					vfoSweepDrawSample(i);
 				}
 
-				displayDrawFastVLine((uiDataGlobal.Scan.sweepSampleIndex) % VFO_SWEEP_NUM_SAMPLES, VFO_SWEEP_TRACE_START_Y, VFO_SWEEP_TRACE_HEIGHT_Y, true);// draw solid line in the next location
-				displayDrawFastVLine((uiDataGlobal.Scan.sweepSampleIndex + uiDataGlobal.Scan.sweepSampleIndexIncrement) % VFO_SWEEP_NUM_SAMPLES, VFO_SWEEP_TRACE_START_Y, VFO_SWEEP_TRACE_HEIGHT_Y, true);// draw solid line in the next location
+				displayDrawFastVLine((uiDataGlobal.Scan.sweepSampleIndex) % VFO_SWEEP_NUM_SAMPLES, VFO_SWEEP_TRACE_START_Y, VFO_SWEEP_CURSOR_HEIGHT, true);// draw solid line in the next location
+				displayDrawFastVLine((uiDataGlobal.Scan.sweepSampleIndex + uiDataGlobal.Scan.sweepSampleIndexIncrement) % VFO_SWEEP_NUM_SAMPLES, VFO_SWEEP_TRACE_START_Y, VFO_SWEEP_CURSOR_HEIGHT, true);// draw solid line in the next location
 
 				displayRenderRows(1, ((8 + VFO_SWEEP_GRAPH_HEIGHT_Y) / 8) + 1);
 			}
@@ -1188,13 +1196,7 @@ void uiVFOModeUpdateScreen(int txTimeSecs)
 #if defined(VFO_SWEEP_WATERFALL)
 						if (screenOperationMode[nonVolatileSettings.currentVFONumber] == VFO_SCREEN_OPERATION_SWEEP)
 						{
-							// The span's edge frequencies, small, in the free band between the graph and the frequency line.
-							uint32_t fLo = vfoSweepFreqForSample(0);
-							uint32_t fHi = vfoSweepFreqForSample(VFO_SWEEP_NUM_SAMPLES - 1);
-							snprintf(buffer, SCREEN_LINE_BUFFER_SIZE, "%u.%03u", (unsigned)(fLo / 100000), (unsigned)((fLo % 100000) / 100));
-							displayPrintCore(2, (VFO_SWEEP_GRAPH_START_Y + VFO_SWEEP_GRAPH_HEIGHT_Y), buffer, FONT_SIZE_1, TEXT_ALIGN_LEFT, false);
-							snprintf(buffer, SCREEN_LINE_BUFFER_SIZE, "%u.%03u", (unsigned)(fHi / 100000), (unsigned)((fHi % 100000) / 100));
-							displayPrintCore(2, (VFO_SWEEP_GRAPH_START_Y + VFO_SWEEP_GRAPH_HEIGHT_Y), buffer, FONT_SIZE_1, TEXT_ALIGN_RIGHT, false);
+							vfoSweepDrawEdgeLabels();
 						}
 #endif
 					}
@@ -1738,6 +1740,29 @@ static void handleEvent(uiEvent_t *ev)
 
 	if (uiDataGlobal.Scan.active && (ev->events & KEY_EVENT))
 	{
+#if defined(VFO_SWEEP_WATERFALL)
+		// SK2 + STAR while sweeping: waterfall or full-height bars. Here, before the SK2-up
+		// branch below (where it first sat, unreachable: a check for SK2 held inside a branch
+		// that runs only with SK2 up; the compiler folded the flag to a constant). STAR passes
+		// the "any key stops the scan" barrier with or without SK2.
+		if ((ev->keys.key == KEY_STAR) && BUTTONCHECK_DOWN(ev, BUTTON_SK2) &&
+				(screenOperationMode[nonVolatileSettings.currentVFONumber] == VFO_SCREEN_OPERATION_SWEEP))
+		{
+			if (KEYCHECK_SHORTUP(ev->keys, KEY_STAR))
+			{
+				vfoSweepWaterfallOn = !vfoSweepWaterfallOn;
+				if (vfoSweepWaterfallOn)
+				{
+					vfoSweepWaterfallClear();   // stale full-height bar pixels sit where the history goes
+				}
+				uiDataGlobal.displayQSOState = QSO_DISPLAY_DEFAULT_SCREEN;
+				uiVFOModeUpdateScreen(0);
+				vfoSweepUpdateSamples(0, true, 0);   // every column repainted in the new layout
+				keyboardReset();
+			}
+			return;   // the DOWN half of SK2 + STAR: neither the scroll toggle nor the resume
+		}
+#endif
 		if (BUTTONCHECK_DOWN(ev, BUTTON_SK2) == 0)
 		{
 #if defined(ENABLE_FAST_SCAN)
@@ -1751,29 +1776,6 @@ static void handleEvent(uiEvent_t *ev)
 			// below and otherwise unused on this screen, so it needs no new exemption --
 			// and a control that stopped the sweep in order to configure the sweep would
 			// be useless here.
-#if defined(VFO_SWEEP_WATERFALL)
-			// SK2 + STAR while sweeping: waterfall or full-height bars. STAR passes the barrier
-			// below with or without SK2, so this comes before the two plain-STAR uses.
-			if ((ev->keys.key == KEY_STAR) && BUTTONCHECK_DOWN(ev, BUTTON_SK2) && KEYCHECK_SHORTUP(ev->keys, KEY_STAR) &&
-					(screenOperationMode[nonVolatileSettings.currentVFONumber] == VFO_SCREEN_OPERATION_SWEEP))
-			{
-				vfoSweepWaterfallOn = !vfoSweepWaterfallOn;
-				if (vfoSweepWaterfallOn)
-				{
-					vfoSweepWaterfallClear();   // stale full-height bar pixels sit where the history goes
-				}
-				uiDataGlobal.displayQSOState = QSO_DISPLAY_DEFAULT_SCREEN;
-				uiVFOModeUpdateScreen(0);
-				vfoSweepUpdateSamples(0, true, 0);   // every column repainted in the new layout
-				keyboardReset();
-				return;
-			}
-			if ((ev->keys.key == KEY_STAR) && BUTTONCHECK_DOWN(ev, BUTTON_SK2) &&
-					(screenOperationMode[nonVolatileSettings.currentVFONumber] == VFO_SCREEN_OPERATION_SWEEP))
-			{
-				return;   // the DOWN half of SK2 + STAR: neither the scroll toggle nor the resume
-			}
-#endif
 			if ((vfoSweepListening == false) && (ev->keys.key == KEY_STAR) &&
 					(screenOperationMode[nonVolatileSettings.currentVFONumber] == VFO_SCREEN_OPERATION_SWEEP))
 			{
@@ -3418,6 +3420,25 @@ static void vfoSweepWaterfallClear(void)
 			VFO_SWEEP_WATERFALL_HEIGHT * DISPLAY_SIZE_X * sizeof(uint16_t));
 }
 
+// The span's edge frequencies, small, in the free 8-pixel band between the graph and the
+// frequency line. Drawn by uiVFOModeUpdateScreen() and again at every pass end with the peak
+// marker, so a span change or a retune never leaves them stale for longer than one pass (on
+// the bench they were drawn at sweep entry only and read the old span after SK2 + rotary).
+static void vfoSweepDrawEdgeLabels(void)
+{
+	char buffer[SCREEN_LINE_BUFFER_SIZE];
+	uint32_t fLo = vfoSweepFreqForSample(0);
+	uint32_t fHi = vfoSweepFreqForSample(VFO_SWEEP_NUM_SAMPLES - 1);
+	const int16_t y = (VFO_SWEEP_GRAPH_START_Y + VFO_SWEEP_GRAPH_HEIGHT_Y);
+
+	displayThemeResetToDefault();
+	displayFillRect(0, y, DISPLAY_SIZE_X, 8, true);   // `true` clears, see vfoSweepDrawPeakMarker()
+	snprintf(buffer, SCREEN_LINE_BUFFER_SIZE, "%u.%03u", (unsigned)(fLo / 100000), (unsigned)((fLo % 100000) / 100));
+	displayPrintCore(2, y, buffer, FONT_SIZE_1, TEXT_ALIGN_LEFT, false);
+	snprintf(buffer, SCREEN_LINE_BUFFER_SIZE, "%u.%03u", (unsigned)(fHi / 100000), (unsigned)((fHi % 100000) / 100));
+	displayPrintCore(2, y, buffer, FONT_SIZE_1, TEXT_ALIGN_RIGHT, false);
+}
+
 static void vfoSweepDrawWaterfallSample(int offset)
 {
 	int rssi = MAX(vfoSweepSamples[offset] - VFO_SWEEP_FLOOR_ACTIVE, 0);
@@ -3808,6 +3829,15 @@ static void setSweepIncDecSetting(sweepSetting_t type, bool increment)
 
 	if (apply)
 	{
+#if defined(VFO_SWEEP_WATERFALL)
+		if (bandwidthRescaleDirection != 0)
+		{
+			// The span changed: the edge labels under the graph say the old one until the
+			// screen is redrawn (the update below repaints the bars, and clears the history).
+			uiDataGlobal.displayQSOState = QSO_DISPLAY_DEFAULT_SCREEN;
+			uiVFOModeUpdateScreen(0);
+		}
+#endif
 		vfoSweepUpdateSamples(0, true, bandwidthRescaleDirection);
 	}
 }
@@ -5143,8 +5173,8 @@ static void sweepScanStep(void)
 			uiDataGlobal.Scan.sweepSampleIndex += uiDataGlobal.Scan.sweepSampleIndexIncrement;
 
 			displayThemeApply(THEME_ITEM_FG_RX_FREQ, THEME_ITEM_BG);
-			displayDrawFastVLine((uiDataGlobal.Scan.sweepSampleIndex) % VFO_SWEEP_NUM_SAMPLES, VFO_SWEEP_TRACE_START_Y, VFO_SWEEP_TRACE_HEIGHT_Y, true);// draw solid line in the next location
-			displayDrawFastVLine((uiDataGlobal.Scan.sweepSampleIndex + uiDataGlobal.Scan.sweepSampleIndexIncrement) % VFO_SWEEP_NUM_SAMPLES, VFO_SWEEP_TRACE_START_Y, VFO_SWEEP_TRACE_HEIGHT_Y, true);// draw solid line in the next location
+			displayDrawFastVLine((uiDataGlobal.Scan.sweepSampleIndex) % VFO_SWEEP_NUM_SAMPLES, VFO_SWEEP_TRACE_START_Y, VFO_SWEEP_CURSOR_HEIGHT, true);// draw solid line in the next location
+			displayDrawFastVLine((uiDataGlobal.Scan.sweepSampleIndex + uiDataGlobal.Scan.sweepSampleIndexIncrement) % VFO_SWEEP_NUM_SAMPLES, VFO_SWEEP_TRACE_START_Y, VFO_SWEEP_CURSOR_HEIGHT, true);// draw solid line in the next location
 			displayThemeResetToDefault();
 
 			if (uiNotificationIsVisible())
@@ -5166,7 +5196,12 @@ static void sweepScanStep(void)
 					// in the strip. Repaint them and blit the lot -- once per pass.
 					vfoSweepPassComplete = false;
 					vfoSweepDrawPeakMarker();
+#if defined(VFO_SWEEP_WATERFALL)
+					vfoSweepDrawEdgeLabels();   // a span change or retune since the last pass is caught here
+					displayRenderRows(1, ((8 + VFO_SWEEP_GRAPH_HEIGHT_Y) / 8) + 2);   // one more 8-px row: the label band
+#else
 					displayRenderRows(1, ((8 + VFO_SWEEP_GRAPH_HEIGHT_Y) / 8) + 1);
+#endif
 					vfoSweepDirtyLo = vfoSweepDirtyHi = -1;   // the full blit covered everything
 				}
 				else
