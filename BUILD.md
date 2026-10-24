@@ -52,7 +52,7 @@ to inspect an over-full build). `make profiles` lists the profiles, `make flags 
 turns on, and `make REPRODUCIBLE=1` pins the compiled-in build time to the commit time so two builds of one
 commit are byte-identical.
 
-Main SRAM (128 KB) and CCM RAM (64 KB) are the binding constraints, not flash: the release build has 6,988 bytes
+Main SRAM (128 KB) and CCM RAM (64 KB) are the binding constraints, not flash: the release build has 9,004 bytes
 of SRAM and 3,192 bytes of CCM spare, and about 111 KB of flash before the fixed AMBE codec slot. Costs below are
 measured on this tree with arm-none-eabi-gcc 14.2.1 at -Os (2026-10-24) and are deltas against the release build.
 
@@ -89,15 +89,15 @@ The "about" figures for the three sweep-bench flags were measured on the pre-mer
 
 | Profile | Flags | SRAM spare | CCM spare |
 | --- | --- | --- | --- |
-| `release` (default) | none | 6,988 | 3,192 |
-| `full` | all four feature flags | 5,100 | 8 |
-| `dev-sweep` | `ENABLE_SPECTRUM ENABLE_FAST_SCAN ENABLE_KEY_INJECTION` | 6,492 | 3,192 |
-| `dev-prof` | `ENABLE_SPECTRUM ENABLE_SCAN_PROFILER ENABLE_KEY_INJECTION` | 6,156 | 3,192 |
-| `dev-aes` | `DMR_AES_DIAG_RX ENABLE_KEY_INJECTION` | 6,820 | 2,564 |
-| `dev-gps` | `ENABLE_GPS_NMEA_LOG` | 2,868 | 3,192 |
+| `release` (default) | none | 9,004 | 3,192 |
+| `full` | all four feature flags | 7,108 | 8 |
+| `dev-sweep` | `ENABLE_SPECTRUM ENABLE_FAST_SCAN ENABLE_KEY_INJECTION` | 8,508 | 3,192 |
+| `dev-prof` | `ENABLE_SPECTRUM ENABLE_SCAN_PROFILER ENABLE_KEY_INJECTION` | 8,180 | 3,192 |
+| `dev-aes` | `DMR_AES_DIAG_RX ENABLE_KEY_INJECTION` | 8,836 | 2,564 |
+| `dev-gps` | `ENABLE_GPS_NMEA_LOG` | 4,900 | 3,192 |
 
-`full` plus `ENABLE_SPECTRUM` and `ENABLE_KEY_INJECTION` links with 4,836 bytes of SRAM and 8 bytes of CCM spare,
-and every flag at once (adding `ENABLE_SCAN_PROFILER`) with 4,292 bytes of SRAM; adding `DMR_AES_DIAG_RX` to any
+`full` plus `ENABLE_SPECTRUM` and `ENABLE_KEY_INJECTION` links with 6,852 bytes of SRAM and 8 bytes of CCM spare,
+and every flag at once (adding `ENABLE_SCAN_PROFILER`) with 6,308 bytes of SRAM; adding `DMR_AES_DIAG_RX` to any
 `ENABLE_DMR_DATA` build overflows CCM. The CCM ceiling is the next thing the RAM work has to move.
 
 ## Manual flash
