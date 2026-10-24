@@ -446,7 +446,7 @@ void applicationMainTask(void)
 
 	HRC6000Init();
 
-	dmrAesInit(); // AES state lives in .ccmram which the startup does not init; zero it (no-op unless ENABLE_AES)
+	dmrAesInit(); // AES state lives in .ccmram which the startup does not init; zero it
 
 	radioPostinit();
 
@@ -551,12 +551,10 @@ void applicationMainTask(void)
 	aprsBeaconingInit();
 	aprsBeaconingStart();
 
-#if defined(ENABLE_AES)
 	dmrAesLoadKeys();   // eager thread-context key load at boot: the HR-C6000 RX/TX ISRs must
 	                    // never trigger the (blocking, mutex-less) SPI-flash key load themselves.
-#endif
 
-#if defined(ENABLE_DMR_DATA) && defined(ENABLE_AES)
+#if defined(ENABLE_DMR_DATA)
 	dmrSmsInit();   // load the encrypted-SMS store from flash
 #endif
 
@@ -1451,7 +1449,7 @@ void applicationMainTask(void)
 		uiDualScreenWatchTick();
 #endif
 		settingsSaveIfNeeded(false);
-#if defined(ENABLE_DMR_DATA) && defined(ENABLE_AES)
+#if defined(ENABLE_DMR_DATA)
 		dmrSmsRxTick();   // decrypt + store + notify any received encrypted SMS
 #endif
 

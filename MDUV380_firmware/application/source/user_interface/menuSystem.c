@@ -90,10 +90,8 @@ menuDataGlobal_t menuDataGlobal =
 #if !defined(PLATFORM_GD77S)
 				NULL,// APRS options
 #endif
-#if defined(ENABLE_AES)
 				NULL,// AES keys
-#endif
-#if defined(ENABLE_AES) && defined(ENABLE_DMR_DATA)
+#if defined(ENABLE_DMR_DATA)
 				NULL,// Messages
 #endif
 #if defined(ENABLE_DUAL_SCREEN)
@@ -157,10 +155,8 @@ static menuFunctionData_t menuFunctions[] =
 #if !defined(PLATFORM_GD77S)
 		{ menuAPRSOptions,          NULL, NULL, 0 },
 #endif
-#if defined(ENABLE_AES)
 		{ menuAESKeys,              NULL, NULL, 0 },
-#endif
-#if defined(ENABLE_AES) && defined(ENABLE_DMR_DATA)
+#if defined(ENABLE_DMR_DATA)
 		{ menuMessages,             NULL, NULL, 0 },
 #endif
 #if defined(ENABLE_DUAL_SCREEN)
@@ -715,11 +711,9 @@ static const menuItemNewData_t optionsMenuItems[] =
 #if defined(ENABLE_DUAL_SCREEN)
 	{ 143, MENU_DUAL_WATCH },// stringOffset 143 = .dual_watch field
 #endif
-#if defined(ENABLE_AES)
 	// stringOffset = the ordinal of stringsTable_t.aes_keys (computed, so it can't drift)
 	{ (int)(offsetof(stringsTable_t, aes_keys) / LANGUAGE_TEXTS_LENGTH), MENU_AES_KEYS },
-#endif
-#if defined(ENABLE_AES) && defined(ENABLE_DMR_DATA)
+#if defined(ENABLE_DMR_DATA)
 	{ (int)(offsetof(stringsTable_t, messages) / LANGUAGE_TEXTS_LENGTH), MENU_MESSAGES },
 #endif
 };

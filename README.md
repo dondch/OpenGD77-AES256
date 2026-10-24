@@ -7,8 +7,8 @@ upstream feature.
 
 It is built on the official OpenGD77 source release **R20260131**, target `MDUV380_10W_PLUS_FW`
 (`PLATFORM_MDUV380` + `PLATFORM_VARIANT_UV380_PLUS_10W`). All the normal OpenGD77 functionality
-(DMR/FM transmit + receive, hotspot, etc.) is unchanged — the AES code is compiled in behind
-`ENABLE_AES`, and the default `make` build is byte-for-byte stock OpenGD77.
+(DMR/FM transmit + receive, hotspot, etc.) is unchanged. AES-256 is always compiled in: every build of
+this fork is an AES build.
 
 ## ⚠️ Legal
 
@@ -48,7 +48,7 @@ DFU flashing. In short:
 
 ```sh
 cd MDUV380_firmware
-make ENABLE_AES=1 -j$(nproc)        # or plain `make` for a stock (no-AES) build
+make -j$(nproc)
 python3 tools/opengd77_stm32_firmware_loader.py -s <MD9600-V5-donor.bin> \
         -f build/openuv380-10w.bin -m MD-UV380
 ```
@@ -61,7 +61,7 @@ source/binary; the loader merges it from an **MD-9600 V5** donor at flash time (
 
 AES decrypt/keystream diagnostics are compiled in behind off-by-default flags (`DMR_AES_DIAG_RX` /
 `DMR_AES_DIAG_PATTERN` / `DMR_AES_DIAG_ENCPAT`) — they add nothing to the default build. Build e.g.
-`make ENABLE_AES=1 DMR_AES_DIAG_RX=1` and read over USB with `tools/rxdiag.py` / `tools/fragcap.py`.
+`make DMR_AES_DIAG_RX=1` and read over USB with `tools/rxdiag.py` / `tools/fragcap.py`.
 
 ## License
 
