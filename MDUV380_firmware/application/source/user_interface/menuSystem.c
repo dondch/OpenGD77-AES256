@@ -90,6 +90,15 @@ menuDataGlobal_t menuDataGlobal =
 #if !defined(PLATFORM_GD77S)
 				NULL,// APRS options
 #endif
+#if defined(ENABLE_AES)
+				NULL,// AES keys
+#endif
+#if defined(ENABLE_AES) && defined(ENABLE_DMR_DATA)
+				NULL,// Messages
+#endif
+#if defined(ENABLE_DUAL_SCREEN)
+				NULL,// Dual Watch options
+#endif
 				// *** Add new menus to be accessed using quickkey (ID: 0..31) above this line ***
 				NULL,// MessageBox
 				NULL,// hotspot mode
@@ -153,6 +162,9 @@ static menuFunctionData_t menuFunctions[] =
 #endif
 #if defined(ENABLE_AES) && defined(ENABLE_DMR_DATA)
 		{ menuMessages,             NULL, NULL, 0 },
+#endif
+#if defined(ENABLE_DUAL_SCREEN)
+		{ menuDualWatchOptions,     NULL, NULL, 0 },
 #endif
 		// *** Add new menus to be accessed using quickkey (ID: 0..31) above this line ***
 		{ uiMessageBox,             NULL, NULL, 0 },
@@ -700,6 +712,9 @@ static const menuItemNewData_t optionsMenuItems[] =
 #if !defined(PLATFORM_GD77S)
 	{ 257, MENU_APRS            },
 #endif
+#if defined(ENABLE_DUAL_SCREEN)
+	{ 143, MENU_DUAL_WATCH },// stringOffset 143 = .dual_watch field
+#endif
 #if defined(ENABLE_AES)
 	// stringOffset = the ordinal of stringsTable_t.aes_keys (computed, so it can't drift)
 	{ (int)(offsetof(stringsTable_t, aes_keys) / LANGUAGE_TEXTS_LENGTH), MENU_AES_KEYS },
@@ -745,11 +760,11 @@ void menuDisplayEntry(int loopOffset, int focusedItem, const char *entryText, in
 	if (focused)
 	{
 		displayThemeApply(THEME_ITEM_BG_MENU_ITEM_SELECTED, bgItem);
-		displayFillRoundRect(DISPLAY_X_POS_MENU_OFFSET, DISPLAY_Y_POS_MENU_ENTRY_HIGHLIGHT
+		displayFillRoundRect(DISPLAY_X_POS_MENU_OFFSET, MENU_LIST_Y_POS_HIGHLIGHT
 #if defined(PLATFORM_RD5R)
 				- 1 // Small V offset due to small font usage
 #endif
-				+ (loopOffset * MENU_ENTRY_HEIGHT), DISPLAY_SIZE_X - (DISPLAY_X_POS_MENU_OFFSET * 2), MENU_ENTRY_HEIGHT, 2, true);
+				+ (loopOffset * MENU_LIST_ENTRY_HEIGHT), DISPLAY_SIZE_X - (DISPLAY_X_POS_MENU_OFFSET * 2), MENU_LIST_ENTRY_HEIGHT, 2, true);
 	}
 
 	displayThemeApply(fgItem, bgItem);
@@ -765,17 +780,17 @@ void menuDisplayEntry(int loopOffset, int focusedItem, const char *entryText, in
 			displayThemeApply(fgOptItem, bgItem);
 		}
 
-		displayPrintCore(DISPLAY_X_POS_MENU_TEXT_OFFSET, DISPLAY_Y_POS_MENU_ENTRY_HIGHLIGHT + (loopOffset * MENU_ENTRY_HEIGHT), buffer, FONT_SIZE_3, TEXT_ALIGN_LEFT, focused);
+		displayPrintCore(DISPLAY_X_POS_MENU_TEXT_OFFSET, MENU_LIST_Y_POS_HIGHLIGHT + MENU_LIST_TEXT_Y_OFFSET + (loopOffset * MENU_LIST_ENTRY_HEIGHT), buffer, MENU_LIST_FONT, TEXT_ALIGN_LEFT, focused);
 
 		if (optStart > 0)
 		{
 			displayThemeApply(fgOptItem, bgItem);
-			displayPrintCore(DISPLAY_X_POS_MENU_TEXT_OFFSET + (optStart * 8), DISPLAY_Y_POS_MENU_ENTRY_HIGHLIGHT + (loopOffset * MENU_ENTRY_HEIGHT), (entryText + optStart), FONT_SIZE_3, TEXT_ALIGN_LEFT, focused);
+			displayPrintCore(DISPLAY_X_POS_MENU_TEXT_OFFSET + (optStart * 8), MENU_LIST_Y_POS_HIGHLIGHT + MENU_LIST_TEXT_Y_OFFSET + (loopOffset * MENU_LIST_ENTRY_HEIGHT), (entryText + optStart), MENU_LIST_FONT, TEXT_ALIGN_LEFT, focused);
 		}
 	}
 	else
 	{
-		displayPrintCore(DISPLAY_X_POS_MENU_TEXT_OFFSET, DISPLAY_Y_POS_MENU_ENTRY_HIGHLIGHT + (loopOffset * MENU_ENTRY_HEIGHT), entryText, FONT_SIZE_3, TEXT_ALIGN_LEFT, focused);
+		displayPrintCore(DISPLAY_X_POS_MENU_TEXT_OFFSET, MENU_LIST_Y_POS_HIGHLIGHT + MENU_LIST_TEXT_Y_OFFSET + (loopOffset * MENU_LIST_ENTRY_HEIGHT), entryText, MENU_LIST_FONT, TEXT_ALIGN_LEFT, focused);
 	}
 
 	displayThemeResetToDefault();
