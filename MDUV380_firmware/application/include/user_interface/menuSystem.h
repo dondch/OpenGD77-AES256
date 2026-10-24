@@ -358,10 +358,8 @@ enum MENU_SCREENS
 #if !defined(PLATFORM_GD77S)
 	MENU_APRS,
 #endif
-#if defined(ENABLE_AES)
 	MENU_AES_KEYS,// index-matched to menuFunctions[] (standard menu wiring)
-#endif
-#if defined(ENABLE_AES) && defined(ENABLE_DMR_DATA)
+#if defined(ENABLE_DMR_DATA)
 	MENU_MESSAGES,// encrypted-SMS messaging (index-matched to menuFunctions[])
 #endif
 #if defined(ENABLE_DUAL_SCREEN)
@@ -522,10 +520,8 @@ menuStatus_t menuCalibration(uiEvent_t *ev, bool isFirstRun);
 #if !defined(PLATFORM_GD77S)
 menuStatus_t menuAPRSOptions(uiEvent_t *ev, bool isFirstRun);
 #endif
-#if defined(ENABLE_AES)
 menuStatus_t menuAESKeys(uiEvent_t *ev, bool isFirstRun);
-#endif
-#if defined(ENABLE_AES) && defined(ENABLE_DMR_DATA)
+#if defined(ENABLE_DMR_DATA)
 menuStatus_t menuMessages(uiEvent_t *ev, bool isFirstRun);
 #endif
 #if defined(ENABLE_DUAL_SCREEN)
