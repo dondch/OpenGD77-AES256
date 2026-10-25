@@ -206,11 +206,15 @@ int dmr_ambe_is_ccr(const uint16_t *b) {
     return 1;
 }
 
-size_t dmr_aes_voice_frame(dmr_aes_ctx_t *c, uint16_t *b49, size_t bitpos) {
+void dmr_ambe_set_silence(uint16_t *b) {
+    for (int i = 0; i < 49; ++i) { b[i] = (uint16_t)((DMR_AMBE_SILENCE56 >> (55 - i)) & 1u); }
+}
+
+static size_t dmr_aes_voice_xor(dmr_aes_ctx_t *c, uint16_t *b49, size_t bitpos, int skipClear) {
     if (!c->have_key) { return bitpos + 56; }                 /* passthrough = clear */
-    /* silence and comfort-noise frames are transmitted UNENCRYPTED: skip the XOR
-     * but still account for the 56 bits so the absolute offset stays aligned. */
-    if (dmr_ambe_is_silence(b49) || dmr_ambe_is_ccr(b49)) { return bitpos + 56; }
+    /* RX: a silence or comfort-noise frame arriving as such was sent in the clear: skip
+     * the XOR but still account for the 56 bits so the absolute offset stays aligned. */
+    if (skipClear && (dmr_ambe_is_silence(b49) || dmr_ambe_is_ccr(b49))) { return bitpos + 56; }
 
     /* keystream = OFB(iv) with the first 16-byte block discarded, bits MSB-first.
      * Need bits [bitpos .. bitpos+48] → octets up to 16 + (bitpos+48)/8. */
@@ -237,6 +241,13 @@ size_t dmr_aes_voice_frame(dmr_aes_ctx_t *c, uint16_t *b49, size_t bitpos) {
         b49[i] ^= bit;
     }
     return bitpos + 56;
+}
+
+size_t dmr_aes_voice_frame(dmr_aes_ctx_t *c, uint16_t *b49, size_t bitpos) {
+    return dmr_aes_voice_xor(c, b49, bitpos, 1);
+}
+size_t dmr_aes_voice_frame_tx(dmr_aes_ctx_t *c, uint16_t *b49, size_t bitpos) {
+    return dmr_aes_voice_xor(c, b49, bitpos, 0);
 }
 
 /* ---- DMRA "Late Entry MI" conveyance ------------------------------------ *

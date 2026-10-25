@@ -92,15 +92,22 @@ size_t dmr_aes_crypt_frame(dmr_aes_ctx_t *c, uint8_t *voice, size_t n, size_t oc
  *     bits taken MSB-first;
  *   - each voice frame consumes 56 keystream bits (49 applied + 7 skipped),
  *     continuously across the superframe (bit offset is absolute);
- *   - silence / comfort-noise (CCR) frames are sent in the clear: skip the XOR
- *     but the absolute bit offset still accounts for them.
+ *   - a silence / comfort-noise (CCR) frame received as such was sent in the clear:
+ *     skip the XOR but the absolute bit offset still accounts for it.
  * `iv` must already be set (dmr_lfsr128d of this superframe's MI). `bitpos` is the
  * ABSOLUTE keystream bit offset for this frame = (vc * 56), vc = frame index in
  * the 18-frame superframe. Operates on b49[0..48] in place. Returns bitpos + 56. */
 size_t dmr_aes_voice_frame(dmr_aes_ctx_t *c, uint16_t *b49, size_t bitpos);
+/* TX: encrypt EVERY frame, silence included. The stock TYT XORs all three frames of
+ * every voice burst (S219.43 FUN_080629b4 / FUN_08085122, no silence test) and a stock
+ * call never carries a clear frame on air; a clear silence frame from us is decrypted
+ * into noise by a stock receiver. */
+size_t dmr_aes_voice_frame_tx(dmr_aes_ctx_t *c, uint16_t *b49, size_t bitpos);
 /* AMBE silence / comfort-noise detectors on the 49-bit decoded vector. */
 int dmr_ambe_is_silence(const uint16_t *b49);
 int dmr_ambe_is_ccr(const uint16_t *b49);
+/* Overwrite the 49-bit vector with the AMBE silence frame. */
+void dmr_ambe_set_silence(uint16_t *b49);
 
 /* ---- DMRA "Late Entry MI" conveyance (TX) ------------------------------- *
  * Build the Golay(24,12)+CRC4 fragment nibbles that carry the 32-bit MI in the

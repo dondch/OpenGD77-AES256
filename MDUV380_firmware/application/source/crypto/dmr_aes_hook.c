@@ -695,7 +695,13 @@ void dmrAesRxLateEntry(int seq, const uint8_t *ambe27)
  * OFB keystream to the 49-bit decoded voice vector in place. */
 void dmrAesRxCodecFrame(uint16_t *b49, int idxInBurst)
 {
-    if (!s_rxActive || !s_rxBurstEnc) { return; }
+    if (!s_rxActive || !s_rxBurstEnc)
+    {
+        /* The stream's LC says encrypted but we have no keystream yet (PI header missed,
+         * late entry not decoded): play silence, not the ciphertext as noise. */
+        if (!s_rxActive && s_rxLcSeen && s_rxLcPrivacy) { dmr_ambe_set_silence(b49); }
+        return;
+    }
 #ifdef DMR_AES_DIAG_RX
     /* Which way dmr_aes_voice_frame will go with this frame (issue #4: do the firmware's
      * inserted SILENCE_AUDIO frames get left alone?). Same tests, same order, as inside it. */
@@ -752,8 +758,9 @@ int dmrAesTxBuildPI(uint8_t *piOut7)   /* build PI header LC to emit at call sta
 /* Encrypt one encoded voice frame's 49 AMBE params in place, during codecEncodeBlock
  * (after AMBE_ENCODE, before AMBE_ENCODE_ECC). The encode order equals the transmit
  * order, so a free-running frame counter gives the superframe position: IV=lfsr(MI),
- * MI advances each 18-frame superframe, offset=(frame%18)*56, silence frames skipped —
- * exactly what the receiver (a stock TYT, or our own RX) expects. */
+ * MI advances each 18-frame superframe, offset=(frame%18)*56 — exactly what the receiver
+ * (a stock TYT, or our own RX) expects. Every frame is encrypted, silence included, as the
+ * stock TYT does (see dmr_aes_voice_frame_tx). */
 void dmrAesTxCodecFrame(uint16_t *b49)
 {
     if (!s_txActive) { return; }
@@ -777,7 +784,7 @@ void dmrAesTxCodecFrame(uint16_t *b49)
         dmr_lfsr128d(s_tx.mi, s_tx.iv, &s_txNextMi);
         dmr_le_mi_build(s_txNextMi, s_txFrag);   /* convey the NEXT superframe's MI (look-ahead, see above) */
     }
-    dmr_aes_voice_frame(&s_tx, b49, (size_t)(s_txFrameCnt % 18) * 56);
+    dmr_aes_voice_frame_tx(&s_tx, b49, (size_t)(s_txFrameCnt % 18) * 56);
     s_txFrameCnt++;
 }
 /* Stuff the DMRA "Late Entry MI" into the post-ECC AMBE codeword. Called in
