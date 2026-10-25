@@ -321,6 +321,8 @@ static void hrc6000DataAckStart(const uint8_t *hdr12);
 static uint32_t hrc6000AesRngSeed(void);
 static bool hrc6000SendAesPIHeader(void);
 static uint8_t hrc6000ResolveAesTxKeyId(void);
+static void hrc6000EncodeNextBlock(void);
+static bool hrc6000AesTxTailActive(void);
 #ifdef CPU_MK22FN512VLL12
 static inline void hrc6000SysInterruptHandler(void);
 static inline void hrc6000TimeslotInterruptHandler(void);
@@ -1961,7 +1963,9 @@ void hrc6000TimeslotInterruptHandler(void)
 				break;
 			}
 #endif
-			if (hrc.transmissionEnabled)
+			// An encrypted call's tail after PTT release goes out as encoded (encrypted) voice
+			// too: see hrc6000AesTxTailActive().
+			if (hrc.transmissionEnabled || hrc6000AesTxTailActive())
 			{
 				if (settingsUsbMode == USB_MODE_HOTSPOT)
 				{
@@ -2614,6 +2618,34 @@ static void hrc6000ManageCCHoldState(void)
 	}
 }
 
+// Once there are 2 buffers available they can be encoded into one AMBE block
+// The will happen  prior to the data being needed in the TS ISR, so that by the time tick_codec_encode encodes complete,
+// the data is ready to be used in the TS ISR
+static void hrc6000EncodeNextBlock(void)
+{
+	if (wavbuffer_count >= 2)
+	{
+		codecEncodeBlock((uint8_t *)hrc.deferredUpdateBufferInPtr);
+
+		hrc.deferredUpdateBufferInPtr += LENGTH_AMBE_BLOCK;
+
+		if (hrc.deferredUpdateBufferInPtr > DEFERRED_UPDATE_BUFFER_END)
+		{
+			hrc.deferredUpdateBufferInPtr = deferredUpdateBuffer;
+		}
+		hrc.ambeBufferCount++;
+	}
+}
+
+// PTT has been released during an encrypted call, which is still finishing its superframe
+// (TX_1 only ends the call at txSequence 0). The stock TYT sends that tail as encrypted voice;
+// clear silence there is decrypted into noise by the receiver.
+static bool hrc6000AesTxTailActive(void)
+{
+	return (dmrAesTxActive() && (settingsUsbMode != USB_MODE_HOTSPOT) &&
+			((slotState == DMR_STATE_TX_1) || (slotState == DMR_STATE_TX_2)));
+}
+
 static void hrc6000Tick(void)
 {
 	hrc6000ManageCCHoldState();
@@ -2821,20 +2853,15 @@ static void hrc6000Tick(void)
 				// Once there are 2 buffers available they can be encoded into one AMBE block
 				// The will happen  prior to the data being needed in the TS ISR, so that by the time tick_codec_encode encodes complete,
 				// the data is ready to be used in the TS ISR
-				if (wavbuffer_count >= 2)
-				{
-					codecEncodeBlock((uint8_t *)hrc.deferredUpdateBufferInPtr);
-
-					hrc.deferredUpdateBufferInPtr += LENGTH_AMBE_BLOCK;
-
-					if (hrc.deferredUpdateBufferInPtr > DEFERRED_UPDATE_BUFFER_END)
-					{
-						hrc.deferredUpdateBufferInPtr = deferredUpdateBuffer;
-					}
-					hrc.ambeBufferCount++;
-				}
+				hrc6000EncodeNextBlock();
 			}
 		}
+	}
+	else if (hrc6000AesTxTailActive())
+	{
+		// PTT released during an encrypted call: keep encoding until the superframe is
+		// complete, so the tail goes out as encrypted voice, not as clear silence.
+		hrc6000EncodeNextBlock();
 	}
 	else
 	{
