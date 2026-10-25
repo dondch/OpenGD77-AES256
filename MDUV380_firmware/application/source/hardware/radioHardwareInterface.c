@@ -387,12 +387,17 @@ void radioSetTx(uint8_t band)
 }
 
 //just enable or disable the RF output . doesn't change back to receive
+// Per-burst gating between the bursts of one DMR transmission: the PA enables only. The AT1846S
+// stays in Digital Tx from radioSetTx() until trxActivateRx() at the end of the transmission (the
+// receiver supplies are off throughout anyway). Switching it to RX and back on every burst cost an
+// I2C write (0.68 ms) in front of the PA, so the carrier reached full power 0.2-0.8 ms INTO each
+// burst and the first symbols went out on the ramp (HackRF, 2026-10-25); receivers then missed our
+// LC/PI headers. The stock TYT raises the PA straight from the HR-C6000 TX interrupt by GPIO
+// (S219.43 EXTI2 handler 0x080ea6fe) and its carrier is up before the burst.
 void radioFastTx(bool tx)
 {
 	if (tx)
 	{
-		radioWriteReg2byte(0x30, 0x60, 0xC6); // Digital Tx
-
 		HAL_GPIO_WritePin(PA_EN_1_GPIO_Port, PA_EN_1_Pin, GPIO_PIN_SET);
 		HAL_GPIO_WritePin(PA_EN_2_GPIO_Port, PA_EN_2_Pin, GPIO_PIN_SET);
 	}
@@ -402,17 +407,6 @@ void radioFastTx(bool tx)
 
 		HAL_GPIO_WritePin(PA_EN_1_GPIO_Port, PA_EN_1_Pin, GPIO_PIN_RESET);
 		HAL_GPIO_WritePin(PA_EN_2_GPIO_Port, PA_EN_2_Pin, GPIO_PIN_RESET);
-
-		if (currentRadioDevice->currentBandWidthIs25kHz)
-		{
-			// 25 kHz settings
-			radioWriteReg2byte(0x30, 0x70, 0x26); // RX on
-		}
-		else
-		{
-			// 12.5 kHz settings
-			radioWriteReg2byte(0x30, 0x60, 0x26); // RX on
-		}
 	}
 }
 
