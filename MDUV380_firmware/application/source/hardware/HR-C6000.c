@@ -1857,9 +1857,6 @@ void hrc6000TimeslotInterruptHandler(void)
 			}
 			else
 #endif
-			// For an encrypted call, send the PI Header here (delivers the MI before voice so
-			// the receiver decrypts from frame A). START_5 restores the group Voice LC.
-			if (!(dmrAesTxActive() && hrc6000SendAesPIHeader()))
 			{
 				SPI0WritePageRegByte(0x04, 0x50, 0x10); // Set Data Type to 0001 (Voice LC Header), Data, LCSS=00
 			}
@@ -1870,7 +1867,9 @@ void hrc6000TimeslotInterruptHandler(void)
 			SPI0WritePageRegByte(0x04, 0x41, 0x00); 	// Do nothing on the next TS
 			slotState = DMR_STATE_TX_START_5;
 
-			if (settingsUsbMode != USB_MODE_HOTSPOT)
+			// An encrypted call has one more preamble burst (the PI Header): start the audio
+			// in TX_START_6 instead, so voice still begins with the same buffering.
+			if ((settingsUsbMode != USB_MODE_HOTSPOT) && (dmrAesTxActive() == false))
 			{
 				hrc.ambeBufferCount = 0;
 				hrc.deferredUpdateBufferOutPtr = deferredUpdateBuffer;
@@ -1888,15 +1887,36 @@ void hrc6000TimeslotInterruptHandler(void)
 			}
 			else
 #endif
-			// Second PI Header burst, on this stable preamble slot (the first burst is the weak
-			// PTT ramp). Two PI bursts greatly improve the odds the receiver locks the MI before
-			// voice -> no startup garble even if one PI is lost. The group Voice LC is re-written
-			// at voice start (DMR_STATE_TX_2, txSequence==0) for the in-voice embedded LC.
-			if (!(dmrAesTxActive() && hrc6000SendAesPIHeader()))
 			{
 				SPI0WritePageRegByte(0x04, 0x50, 0x10);     // Set Data Type to 0001 (Voice LC Header), Data, LCSS=00
 			}
 			hrc.TAPhase = 0;
+			// Encrypted call: the stock TYT sends three Voice LC headers and then ONE PI Header,
+			// right before voice burst A (S219.43, 0x0805b04e..0x0805b1e2). Do the same.
+			slotState = dmrAesTxActive() ? DMR_STATE_TX_START_6 : DMR_STATE_TX_1;
+			break;
+
+		case DMR_STATE_TX_START_6: // Encrypted call: idle slot before the PI Header
+			SPI0WritePageRegByte(0x04, 0x41, 0x00); 	// Do nothing on the next TS
+			slotState = DMR_STATE_TX_START_7;
+
+			if (settingsUsbMode != USB_MODE_HOTSPOT)
+			{
+				hrc.ambeBufferCount = 0;
+				hrc.deferredUpdateBufferOutPtr = deferredUpdateBuffer;
+				hrc.deferredUpdateBufferInPtr = deferredUpdateBuffer;
+				soundReceiveData();
+			}
+			break;
+
+		case DMR_STATE_TX_START_7: // Encrypted call: PI Header, the last burst before voice
+			SPI0WritePageRegByte(0x04, 0x41, 0x80);     // Transmit during next Timeslot
+			// The group Voice LC is re-written at voice start (DMR_STATE_TX_2, txSequence==0)
+			// for the in-voice embedded LC.
+			if (hrc6000SendAesPIHeader() == false)
+			{
+				SPI0WritePageRegByte(0x04, 0x50, 0x10);     // Set Data Type to 0001 (Voice LC Header), Data, LCSS=00
+			}
 			slotState = DMR_STATE_TX_1;
 			break;
 
@@ -2406,7 +2426,9 @@ static void hrc6000SendPcOrTgLCHeader(void)
 	spi_tx[9] = 0x00;
 	spi_tx[10] = 0x00;
 	spi_tx[11] = 0x00;
-	SPI0WritePageRegByteArray(0x02, 0x00, spi_tx, LC_DATA_LENGTH);
+	// The stock TYT hands the chip the 9 LC bytes only and lets it add the check field
+	// (S219.43, 0x0805b05a/0x0805b274: len 9). Do the same on an encrypted call.
+	SPI0WritePageRegByteArray(0x02, 0x00, spi_tx, (dmrAesTxActive() ? 9 : LC_DATA_LENGTH));
 }
 
 #if defined(ENABLE_DMR_DATA)
