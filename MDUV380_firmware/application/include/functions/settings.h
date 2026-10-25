@@ -139,7 +139,11 @@ typedef enum
 	BIT_POWEROFF_SUSPEND            = (SETTINGS_BITS_BANK_0 | (1 << 8)),
 #endif
 	BIT_SATELLITE_MANUAL_AUTO       = (SETTINGS_BITS_BANK_0 | (1 << 9)),
+#if defined(HAS_SOFT_VOLUME)
+	BIT_VISUAL_VOLUME_HIDDEN        = (SETTINGS_BITS_BANK_0 | (1 << 10)), // was BIT_UNUSED_1. Set = knob popup hidden, so the popup is on by default whatever the old bit 18 held
+#else
 	BIT_UNUSED_1                    = (SETTINGS_BITS_BANK_0 | (1 << 10)),
+#endif
 #if defined(PLATFORM_MD9600)
 	BIT_SPEAKER_CLICK_SUPPRESS      = (SETTINGS_BITS_BANK_0 | (1 << 11)),
 #endif
@@ -150,7 +154,7 @@ typedef enum
 	BIT_AUTO_NIGHT_OVERRIDE         = (SETTINGS_BITS_BANK_0 | (1 << 16)),
 	BIT_AUTO_NIGHT_DAYTIME          = (SETTINGS_BITS_BANK_0 | (1 << 17)),
 #if defined(HAS_SOFT_VOLUME)
-	BIT_VISUAL_VOLUME_HIDDEN        = (SETTINGS_BITS_BANK_0 | (1 << 18)), // was BIT_VISUAL_VOLUME (set = shown). Inverted so the knob popup is on by default, also on radios with saved settings
+	BIT_UNUSED_4                    = (SETTINGS_BITS_BANK_0 | (1 << 18)), // was BIT_VISUAL_VOLUME (set = shown). Retired: radios that had turned it on would read it as hidden
 #endif
 	BIT_SECONDARY_LANGUAGE          = (SETTINGS_BITS_BANK_0 | (1 << 19)),
 	BIT_CLASSIC_MAIN_SCREEN         = (SETTINGS_BITS_BANK_0 | (1 << 20)), // was BIT_UNUSED_3. The redesigned main screen is used when it is NOT set
