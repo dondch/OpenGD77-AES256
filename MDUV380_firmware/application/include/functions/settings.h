@@ -150,7 +150,7 @@ typedef enum
 	BIT_AUTO_NIGHT_OVERRIDE         = (SETTINGS_BITS_BANK_0 | (1 << 16)),
 	BIT_AUTO_NIGHT_DAYTIME          = (SETTINGS_BITS_BANK_0 | (1 << 17)),
 #if defined(HAS_SOFT_VOLUME)
-	BIT_VISUAL_VOLUME               = (SETTINGS_BITS_BANK_0 | (1 << 18)),
+	BIT_VISUAL_VOLUME_HIDDEN        = (SETTINGS_BITS_BANK_0 | (1 << 18)), // was BIT_VISUAL_VOLUME (set = shown). Inverted so the knob popup is on by default, also on radios with saved settings
 #endif
 	BIT_SECONDARY_LANGUAGE          = (SETTINGS_BITS_BANK_0 | (1 << 19)),
 	BIT_CLASSIC_MAIN_SCREEN         = (SETTINGS_BITS_BANK_0 | (1 << 20)), // was BIT_UNUSED_3. The redesigned main screen is used when it is NOT set
