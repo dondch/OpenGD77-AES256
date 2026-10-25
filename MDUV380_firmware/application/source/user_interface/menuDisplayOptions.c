@@ -304,7 +304,7 @@ static void updateScreen(bool isFirstRun)
 #if defined(HAS_SOFT_VOLUME)
 				case DISPLAY_VISUAL_VOLUME:
 					leftSide = currentLanguage->volume;
-					rightSideConst = settingsIsOptionBitSet(BIT_VISUAL_VOLUME) ? currentLanguage->on : currentLanguage->off;
+					rightSideConst = settingsIsOptionBitSet(BIT_VISUAL_VOLUME_HIDDEN) ? currentLanguage->off : currentLanguage->on;
 					break;
 #endif
 
@@ -690,9 +690,9 @@ static void handleEvent(uiEvent_t *ev)
 
 #if defined(HAS_SOFT_VOLUME)
 				case DISPLAY_VISUAL_VOLUME:
-					if (settingsIsOptionBitSet(BIT_VISUAL_VOLUME) == false)
+					if (settingsIsOptionBitSet(BIT_VISUAL_VOLUME_HIDDEN))
 					{
-						settingsSetOptionBit(BIT_VISUAL_VOLUME, true);
+						settingsSetOptionBit(BIT_VISUAL_VOLUME_HIDDEN, false);
 					}
 					break;
 #endif
@@ -902,9 +902,9 @@ static void handleEvent(uiEvent_t *ev)
 
 #if defined(HAS_SOFT_VOLUME)
 				case DISPLAY_VISUAL_VOLUME:
-					if (settingsIsOptionBitSet(BIT_VISUAL_VOLUME))
+					if (settingsIsOptionBitSet(BIT_VISUAL_VOLUME_HIDDEN) == false)
 					{
-						settingsSetOptionBit(BIT_VISUAL_VOLUME, false);
+						settingsSetOptionBit(BIT_VISUAL_VOLUME_HIDDEN, true);
 					}
 					break;
 #endif
@@ -1143,7 +1143,7 @@ static void exitCallback(void *data)
 				BIT_BATTERY_VOLTAGE_IN_HEADER,
 #endif
 #if defined(HAS_SOFT_VOLUME)
-				BIT_VISUAL_VOLUME,
+				BIT_VISUAL_VOLUME_HIDDEN,
 #endif
 #if defined(HAS_COLOURS)
 				BIT_UI_USES_DOUBLE_HEIGHT,

@@ -310,7 +310,7 @@ static void updateVolumeGain(int menuScreen)
 	HRC6000SetDmrRxGain(lastVolume);
 
 #if defined(HAS_SOFT_VOLUME)
-	if (settingsIsOptionBitSet(BIT_VISUAL_VOLUME) &&
+	if ((settingsIsOptionBitSet(BIT_VISUAL_VOLUME_HIDDEN) == false) &&
 			(menuScreen != UI_SPLASH_SCREEN) && (menuScreen != UI_MESSAGE_BOX) && (menuScreen != UI_POWER_OFF))
 	{
 		lastDisplayedVolume = lastVolume;
