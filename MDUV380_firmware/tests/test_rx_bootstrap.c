@@ -32,6 +32,14 @@ static const uint8_t KEY1[32] = {
     0x93,0xa5,0xcf,0x3b,0xda,0xb5,0x58,0xbc, 0xf6,0x1e,0xca,0x57,0x32,0xa8,0x65,0x78,
     0x32,0x39,0x6f,0x67,0x81,0x50,0xe1,0x78, 0x11,0xea,0xa7,0x49,0x1f,0x94,0xb3,0xee };
 
+static const uint8_t KEY2[32] = {
+    0x1c,0x7e,0x02,0xb9,0x44,0x8d,0xf0,0x2a, 0x63,0xd1,0x9b,0x05,0xee,0x37,0xc8,0x41,
+    0xa9,0x5f,0x16,0xd4,0x7b,0x20,0xcc,0x8e, 0x02,0x93,0x6a,0xf5,0x58,0xb7,0x3d,0x11 };
+
+/* The channel's configured key, as HR-C6000.c would resolve it: overrides the hook's weak default. */
+static uint8_t s_keyHint = 0;
+uint8_t dmrAesRxKeyHint(void) { return s_keyHint; }
+
 static uint32_t rng = 0x12345678u;
 static uint32_t rnd(void) { rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5; return rng; }
 
@@ -60,6 +68,7 @@ static void startRx(void)
 {
     dmrAesInit();
     dmrAesSetKeyRam(1, KEY1);
+    dmrAesSetKeyRam(2, KEY2);
 }
 
 static int fails = 0;
@@ -88,10 +97,11 @@ static void testClearCallNeverDecrypts(void)
  * every frame with the keystream of the true MI. The late entry of superframe k conveys the
  * MI of k+1, so the first one decodes at the start of superframe 1 and a confirming one at 2.
  * With every odd superframe's late entry corrupted, valid ones decode at 1, 3, 5: lock by 3. */
-static void testEncryptedRapidCallBootstraps(const char *name, int corruptOddSuperframes, int lockBy)
+static void testEncryptedRapidCallBootstraps(const char *name, int corruptOddSuperframes, int lockBy, uint8_t keyId, uint8_t hint)
 {
     dmr_aes_ctx_t ref;
-    dmr_pi_t pi = { DMR_ALG_AES256, DMR_MFID_DMRA, 1, 0, 1 };
+    dmr_pi_t pi = { DMR_ALG_AES256, DMR_MFID_DMRA, keyId, 0, 1 };
+    s_keyHint = hint;
     uint8_t b27[27], frag[7][3], iv[16];
     uint32_t mi[12], next;
     int firstEngaged = -1, wrongFrames = 0;
@@ -127,6 +137,7 @@ static void testEncryptedRapidCallBootstraps(const char *name, int corruptOddSup
     printf("  %s %s: decrypting from superframe %d (limit %d), %d wrong frames after\n",
            ok ? "PASS" : "FAIL", name, firstEngaged, lockBy, wrongFrames);
     if (!ok) { fails++; }
+    s_keyHint = 0;
 }
 
 /* A clear call right after an encrypted one must not decrypt. The call boundary (Terminator,
@@ -175,8 +186,13 @@ int main(void)
 {
     testClearCallNeverDecrypts();
     testClearCallAfterEncryptedCall();
-    testEncryptedRapidCallBootstraps("encrypted rapid call", 0, 2);
-    testEncryptedRapidCallBootstraps("encrypted call, late entry lost every other superframe", 1, 3);
+    testEncryptedRapidCallBootstraps("encrypted rapid call", 0, 2, 1, 0);
+    testEncryptedRapidCallBootstraps("encrypted call, late entry lost every other superframe", 1, 3, 1, 0);
+    /* Issue #11: keys in slots 1 and 2, the channel on key 2, joined by late entry (no PI). The
+     * late entry carries no key id; the bootstrap must take the channel's key, not the lowest slot. */
+    testEncryptedRapidCallBootstraps("late entry on a key-2 channel (issue #11)", 0, 2, 2, 2);
+    testEncryptedRapidCallBootstraps("late entry on a key-1 channel with key 2 also loaded", 0, 2, 1, 1);
+    testEncryptedRapidCallBootstraps("late entry, no channel key, lowest slot fallback", 0, 2, 1, 0);
     printf("%s\n", fails ? "FAILED" : "ALL PASS");
     return fails ? 1 : 0;
 }
