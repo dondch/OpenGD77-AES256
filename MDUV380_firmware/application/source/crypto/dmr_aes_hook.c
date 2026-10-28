@@ -559,6 +559,12 @@ void dmrAesRxPI(const uint8_t *pi, int len)
         }
     }
 }
+/* Key id to try first when a call is bootstrapped from its late entry (which carries no key
+ * id). The firmware's definition (HR-C6000.c) resolves the current channel's encrypt byte,
+ * falling back to the global TX key selector; this weak default (host tests, no channel)
+ * says "no preference". 0 = none; ISR context, so it must not touch SPI flash. */
+__attribute__((weak)) uint8_t dmrAesRxKeyHint(void) { return 0; }
+
 /* Called per voice burst from the HR-C6000 ISR. seq is the 1..6 burst sequence
  * (A..F); each burst carries 3 AMBE frames, 6 bursts = one 18-frame superframe. */
 void dmrAesRxBurst(int seq)
@@ -627,15 +633,22 @@ void dmrAesRxBurst(int seq)
              * entry diverges and becomes the prediction, the next valid one activates. That wait
              * cost a second or more of noise at the start of every rapid call, and a whole call
              * when the bits kept failing (bench, 2026-10-24). Failed decodes in between keep
-             * self-advancing the prediction, so a noisy call still locks. Reuse the last call's
-             * keyId (rapid calls share the channel/key); fall back to any loaded key. */
+             * self-advancing the prediction, so a noisy call still locks. The key: the channel's
+             * configured key, else the last call's keyId, else any loaded key (see below). */
             int act = 0;
             if (leok && (s_rxLcSeen ? s_rxLcPrivacy : (!diverge && s_rxPredReal)))
             {
                 dmr_pi_t p;
                 p.alg_id = DMR_ALG_AES256; p.mfid = DMR_MFID_DMRA;
-                p.key_id = s_rxKeyId; p.mi = leMi; p.valid = 1;
-                act = (dmr_aes_rx_init(&s_rx, &p) == 0);   /* sets s_rx.mi = leMi + loads key */
+                p.mi = leMi; p.valid = 1;
+                /* The late entry carries no key id, and OFB gives no way to tell a wrong key
+                 * from a right one: whichever key engages here stays for the whole call. Try
+                 * the key the current channel is configured with FIRST (issue #11: a channel
+                 * on key 2 late-entered with key 1, the lowest slot, and stayed noise), then
+                 * the key of the last PI-seeded call, then any loaded key. */
+                uint8_t hint = dmrAesRxKeyHint();
+                if ((hint != 0) && (hint < DMR_AES_MAX_KEYS)) { p.key_id = hint; act = (dmr_aes_rx_init(&s_rx, &p) == 0); }
+                if (!act) { p.key_id = s_rxKeyId; act = (dmr_aes_rx_init(&s_rx, &p) == 0); }   /* sets s_rx.mi = leMi + loads key */
                 if (!act) { int fk = dmr_aes_first_keyid(); if (fk >= 0) { p.key_id = (uint8_t)fk; act = (dmr_aes_rx_init(&s_rx, &p) == 0); } }
                 if (act) { s_rxActive = 1; s_rxInitMi = leMi; s_rxKeyId = s_rx.key_id; s_rxPiSeeded = 0; }
             }

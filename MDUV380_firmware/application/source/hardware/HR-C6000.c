@@ -2509,6 +2509,15 @@ static uint8_t hrc6000ResolveAesTxKeyId(void)
 	return keyId;
 }
 
+// AES RX: the key to try first when a call is joined by late entry (no PI header seen, and the
+// in-voice late-entry MI carries no key id): the key this channel would transmit with. Without
+// it the bootstrap fell back to the lowest loaded key slot, so a channel on any other key stayed
+// noise for the whole call (issue #11). Called from the timeslot ISR: no SPI flash access here.
+uint8_t dmrAesRxKeyHint(void)
+{
+	return hrc6000ResolveAesTxKeyId();
+}
+
 // Seed the per-call Message Indicator from the STM32 on-chip TRNG (RNG @ 0x50060800).
 // Falls back to the millisecond tick if the RNG never produces a word, so TX can't hang.
 static uint32_t hrc6000AesRngSeed(void)

@@ -22,6 +22,9 @@ uint16_t dmrAesGetKeyMask(void);             /* bit k set => keyId k (1..15) has
 void dmrAesRxPI(const uint8_t *pi, int len);
 void dmrAesRxBurst(int seq);                       /* per voice burst (seq 1..6) */
 void dmrAesRxLateEntry(int seq, const uint8_t *ambe27); /* read Late-Entry MI bits from a burst */
+uint8_t dmrAesRxKeyHint(void);  /* key id to try first on a late-entry bootstrap (the current channel's
+                                 * key, else the global TX key), 0 = none; defined in HR-C6000.c, weak
+                                 * default in the hook returns 0 */
 void dmrAesRxCodecFrame(uint16_t *b49, int idxInBurst); /* per decoded AMBE frame (idx 0..2) */
 void dmrAesRxEnd(void);
 /* TX */
