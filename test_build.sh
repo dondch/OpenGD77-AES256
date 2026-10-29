@@ -17,7 +17,7 @@ for p in $(make -s profiles); do
   grep -E '^  (SRAM|CCM) ' "build-$p.log" | sed 's/^/    /'
 done
 echo ">> Forbidden combinations must be refused by the Makefile:"
-for bad in "ENABLE_SCAN_PROFILER=1" "DMR_AES_DIAG_PATTERN=1 DMR_AES_DIAG_ENCPAT=1" "PROFILE=no-such-profile"; do
+for bad in "ENABLE_SCAN_PROFILER=1" "DMR_AES_DIAG_PATTERN=1 DMR_AES_DIAG_ENCPAT=1" "ENABLE_REMOTE_PROVISION=1" "PROFILE=no-such-profile"; do
   # shellcheck disable=SC2086
   if make -s flags $bad > /dev/null 2>&1; then echo "   FAIL: 'make $bad' was accepted"; ok=0; else echo "   ok: 'make $bad' refused"; fi
 done

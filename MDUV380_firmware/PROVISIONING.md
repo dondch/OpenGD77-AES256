@@ -93,10 +93,14 @@ Data header (12 bytes, CRC mask 0xCCCC):
   [9] N(S) << 4      S = 0, N(S) = seq & 7, FSN = 0
 Blocks: DBSN(7) | CRC-9(9) | 10 payload bytes.  PDU = frame || zero padding || CRC32 (DMR).
 ```
-The CRC-9 is computed per ETSI TS 102 361-1 B.3.11 (polynomial x^9+x^6+x^4+x^3+1 over the 80
-data bits then the 7 DBSN bits, mask 0x0F0). **Not verified on air**: our own receiver ignores it
-(the HR-C6000 burst CRC already gates the block), so a wrong convention costs nothing but a
-DSD-FME warning; the bench check is in §10.
+The CRC-9 follows ETSI TS 102 361-1 B.3.11 in the form DSD-FME checks it (`dmr_dburst.c`,
+`ComputeCrc9Bit`): the register (polynomial x^9+x^6+x^4+x^3+1, initial 0) runs over the 80 data bits
+then the 7 DBSN bits, MSB first; DSD-FME compares the field XOR the rate-1/2 mask 0x0F0 with the
+inverted register, so the field on the air is the register XOR 0x10F (`dmrProvCrc9()` and
+`prov_packet.crc9()` agree byte for byte). **Not verified against a real radio** (DSD-FME's own source
+says "need to find a sample to confirm this"): our receiver ignores the CRC-9 (the HR-C6000 burst
+CRC already gates the block), so a wrong convention costs nothing but a DSD-FME warning; the bench
+check is in §10 and both implementations are one function to change.
 
 ### 3.2 The provisioning frame (the PDU payload)
 
@@ -182,10 +186,13 @@ with the CRC of the image it sent), 0 when nothing was committed since boot. Res
   lasts 136 years, so this is a guard, not an expected event.
 * A desynchronised master (its counter below what the slave has stored: a master restored from an
   old flash image, or two masters with the same DMR ID) has every PDU rejected with no reply.
-  Recovery is **re-keying over USB**: writing a new pairing key with `provision.py` zeroes the
-  counters on both sides (the tool refuses to write the same key again without `--reset-seq`,
-  which is the explicit "I know this reopens the old traffic to replay" switch). Alternatively
-  `provision.py --master-id M --seq N` raises a slave's stored counter for master M.
+  Recovery is **re-keying over USB** with `provision.py pair`. The tool reads the radio's stored
+  counters first (`show` data, no key bytes) and writes them back unchanged with the new key, so
+  re-pairing never lowers a counter by accident; `--reset-seq` zeroes them and is only safe together
+  with a new key (it reopens the old traffic to replay under the old key, which is then gone);
+  `--seq M N` sets the stored counter for master M and `--own-seq N` the radio's own reservation,
+  for the deliberately desynchronised master (set its reservation above the slaves' stored values,
+  or just re-key everybody).
 
 ## 5. Transaction state machine (slave)
 
@@ -252,21 +259,31 @@ with `uiNotificationShow()` ("Prov 2345678: sent 17/17, OK, crc match") and are 
 
 ## 8. RAM budget
 
-Static state (all in `dmr_prov.c`; measured figures are in BUILD.md after the builds):
+Measured with xPack arm-none-eabi-gcc 14.2.1 at -Os (2026-10-29), `objdump -h` section sizes:
+
+| build | .text | .rodata | .data | .ccmram | .bss | SRAM spare | CCM spare |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| stock (`make`, byte-identical to the tree before this work) | 0x4113C | 0xCE78 | 0x325C | 0xD890 | 0x18374 | 17,452 | 10,096 |
+| fw_sms (`ENABLE_DMR_DATA ENABLE_KEY_INJECTION`) | 0x4430C | 0xD030 | 0x32CC | 0xE500 | 0x1893C | 15,860 | 6,912 |
+| fw_sms + `ENABLE_REMOTE_PROVISION` (= `PROFILE=dev-prov`) | 0x46204 | 0xD100 | 0x32CC | 0xE6BC | 0x1893C | 15,860 | 6,468 |
+
+The flag costs 8,136 bytes of code, **0 bytes of main SRAM** (`.bss` and `.data` are unchanged: the two SAP
+bytes in `dmr_sms.c` fit in alignment padding) and 444 bytes of CCM, all of it the module's static state
+(`dmr_prov.c`: 417 bytes):
 
 | item | bytes | where |
 | --- | --- | --- |
 | derived keys K_enc, K_mac | 64 | CCM |
 | `PROV` block copy (key, masters, counters) | 96 | CCM |
-| slave state (txn, lastSeen x4, timers, counters, hold-off) | ~48 | SRAM |
-| cached STATUS reply (header + body + tag, padded PDU) | 64 | SRAM |
-| master state (phase, item cursor, tries, timers, last ACK, last STATUS fields) | ~64 | SRAM |
-| staging image / job | 0 | feature arena (11,904 B, shared) |
-| frame assembly | 0 | stack of the main-loop tick (<= 400 B) and the 520-byte burst-queue scratch already static in `dmr_sms.c`, exported as `dmrSmsBurstQueueScratch()` |
+| cached STATUS reply PDU | 80 | CCM |
+| slave state (txn, lastSeq/lastSeen x4, timers, counters, hold-off) | ~80 | CCM |
+| master state (phase, cursor, tries, timers, last ACK, last STATUS body) | ~70 | CCM |
+| staging image / job | 0 | feature arena (11,904 B, shared with the satellite screen and the sweep) |
+| frame assembly | 0 | the master builds its PDU at the top of the arena; the slave decrypts in place in `dmrSmsRxTick`'s stack copy; bursts go through the 520-byte queue scratch already static in `dmr_sms.c` (`dmrSmsBurstQueueScratch()`) |
 
-No new large buffers: the PDU arrives in the SMS reassembler's existing CCM buffer and is
-decrypted in place in `dmrSmsRxTick`'s stack copy, the staging image and the job use the arena,
-and the outgoing bursts use the SMS burst-queue scratch and `dmr_data.c`'s queue.
+No new large buffers: the PDU arrives in the SMS reassembler's existing CCM buffer, the staging
+image and the job use the arena, and the outgoing bursts use the SMS burst-queue scratch and
+`dmr_data.c`'s queue. CCM is not zeroed at boot; `dmrProvInit` sets every field.
 
 ## 9. Threat model
 
@@ -308,18 +325,35 @@ Host (`sh tests/run_all.sh`, plain gcc):
     the SMS inbox.
 * `test_sms_rx` and the seven other programs keep passing unchanged.
 
+* `test_sms_rx_prov`: the whole SMS receive test again with the provisioning hooks compiled into
+  `dmr_sms.c` and an unpaired radio (the hooks must change nothing).
+* The Python builder is checked against the C builder byte for byte (same key, IDs, seq, txn and
+  body give the same 16 bursts, CRC-9 and header CRCs included), and `prov_packet.py decode` reads
+  the C builder's blocks back.
+
 Bench (one fork radio, one stock TYT, HackRF + DSD-FME), see BUILD.md "Remote provisioning":
 
-1. Flash `fw_sms` + `ENABLE_REMOTE_PROVISION` + `ENABLE_KEY_INJECTION`; load a pairing key and
-   master ID with `provision.py --pair-key`; `--show` reads the block back (no key bytes).
-2. Slave path without RF: `prov_packet.py replay` builds a transaction on the host with the same
-   key and injects the bursts over USB (`0x9B` sub-command 2 → `dmrSmsRxBurst`), then polls
-   `0x9B` for the result; verify the channel with the CPS read (`R` command) and `--show` for the
-   stored seq.
-3. Master path: queue a job with `provision.py job --slave <id>`, capture with the HackRF, decode
-   with DSD-FME, and feed the payload bytes to `prov_packet.py decode --key ...`: it must print
-   the operations the job contained, and DSD-FME's CRC-9 verdict on the confirmed blocks tells us
-   whether the B.3.11 convention is right. The stock TYT on the same channel must show nothing.
-4. Replay the master's own capture back into the same radio (as a slave) with `prov_packet.py
-   replay --from-capture`: rejected (its own ID is not a configured master) and with the master ID
-   configured: accepted once, replay rejected.
+1. Flash `PROFILE=dev-prov` (`ENABLE_DMR_DATA ENABLE_REMOTE_PROVISION ENABLE_KEY_INJECTION`); load a
+   pairing key and master ID with `provision.py pair --gen-key --master-id <M>` (USB `0x9B/5`, the
+   block goes through `codeplugSetOpenGD77CustomData` in the main task); `provision.py show` reads
+   the masters, counters and job state back (no key bytes). Report: the `show` output.
+2. Slave path without RF: `prov_packet.py replay --key ... --master <M> --slave <this ID> --seq 1
+   --txn 7 --chan 5 ... --commit` builds the transaction on the host with the same key and injects
+   its bursts over USB (`0x9B/2` → `dmrSmsRxBurst`, `0x9B/3` → terminator); it prints the slave's
+   counters after every PDU. Report: staged count after each item, `commits 1` after COMMIT,
+   `provision.py show` (stored lastSeq = the COMMIT's seq), the channel read back with the CPS
+   (`R` command, channel 5 in EEPROM at 0x3790 + 4 x 56), and whether the radio keyed a reply
+   (red LED / HackRF: a 6 CSBK + header + 6 block data call to the master ID, `decode --reply`).
+   Then run the same command again: every PDU must be rejected (`rejSeq`), nothing re-committed.
+3. Master path: `provision.py job --slave <S> --txn 7 --chan 5 ... --wait`, HackRF capture, DSD-FME.
+   Report: DSD-FME's view of the data call (CSBK preamble, "Confirmed" header, SAP 9, the block
+   count, and its CRC-9 verdict on each block: that verdict is the one open question), the block
+   bytes fed to `prov_packet.py decode` (must print WRITE_CHANNEL 5 ... then COMMIT), the master's
+   `--wait` outcome (with no slave on the air: `failed (TIMEOUT)` after 3 sends of seq 0, about 7 s
+   each), and whether the stock TYT showed anything (it must not).
+4. Loopback on the one radio: the capture of step 3 replayed into the same radio with
+   `prov_packet.py replay` under its own ID is rejected (`rejAddr`: its own ID is not a configured
+   master); with its own ID paired as a master it is accepted once and rejected on replay.
+5. Hold-off: inject a PDU with a flipped ciphertext byte four times (`replay` with `--seq` reused,
+   or any garbage frame with the right magic): `failedMacs 4`, `ackInhibit 1`, no red LED for the
+   next good PDU within 10 s, ACKs again after.
