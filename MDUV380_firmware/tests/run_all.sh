@@ -5,6 +5,7 @@ cd "$(dirname "$0")/.." || exit 1
 OUT=${TMPDIR:-/tmp}/opengd77-tests
 mkdir -p "$OUT"
 CRYPTO="application/source/crypto/dmr_aes.c"
+CMAC="application/source/crypto/dmr_cmac.c"
 HOOK="application/source/crypto/dmr_aes_hook.c"
 fails=0
 run() {
@@ -24,5 +25,8 @@ run test_rx_stale_pi  -Itests/stubs -Iapplication/include tests/test_rx_stale_pi
 run test_tx_state     -Itests/stubs -Iapplication/include tests/test_tx_state.c $HOOK $CRYPTO
 run test_sms_rx       -DENABLE_DMR_DATA -Itests/stubs -Iapplication/include tests/test_sms_rx.c application/source/functions/dmr_sms.c $HOOK $CRYPTO
 run test_scanreject   -DENABLE_FAST_SCAN -Iapplication/include tests/test_scanreject.c application/source/functions/scanreject.c
+run test_prov_crypto  -DENABLE_REMOTE_PROVISION -Iapplication/include -Iapplication/include/crypto tests/test_prov_crypto.c $CMAC $CRYPTO
+run test_prov_rx      -DENABLE_DMR_DATA -DENABLE_REMOTE_PROVISION -Itests/stubs -Iapplication/include tests/test_prov_rx.c application/source/functions/dmr_prov.c application/source/functions/dmr_sms.c $HOOK $CRYPTO $CMAC
+run test_sms_rx_prov  -DENABLE_DMR_DATA -DENABLE_REMOTE_PROVISION -Itests/stubs -Iapplication/include tests/test_sms_rx.c tests/stubs/prov_stubs.c application/source/functions/dmr_sms.c application/source/functions/dmr_prov.c $HOOK $CRYPTO $CMAC
 echo "$fails failing test program(s)"
 exit $fails

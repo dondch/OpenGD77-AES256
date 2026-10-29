@@ -127,5 +127,15 @@ int  dmrSmsSend(const char *text, uint32_t dst, int group, uint8_t keyId);
  * The menu path never sets this; it is toggled only around the 0x97 handler call. */
 void dmrSmsDiagSetSkipStore(int skip);
 
+#if defined(ENABLE_REMOTE_PROVISION)
+/* ---- shared with the remote-provisioning sender (dmr_prov.c) ------------- *
+ * The 520-byte burst-queue scratch dmrSmsSend builds into (only live inside the building
+ * call: dmrDataTxLoad copies it), and the on-air CRCs, so a provisioning PDU is framed
+ * exactly like an SMS without a second copy of either. */
+uint8_t *dmrSmsBurstQueueScratch(void);
+uint32_t dmrSmsCrc32(const uint8_t *pdu, int len);
+void     dmrSmsHdrCrc(const uint8_t *h, int len, uint16_t mask, uint8_t out2[2]);
+#endif
+
 #endif /* ENABLE_DMR_DATA */
 #endif /* _OPENGD77_DMR_SMS_H_ */

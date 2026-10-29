@@ -88,6 +88,9 @@ enum CPS_ACCESS_AREA
 #include "crypto/dmr_aes_hook.h"
 #include "functions/dmr_data.h"
 #include "functions/dmr_sms.h"
+#if defined(ENABLE_REMOTE_PROVISION)
+#include "functions/dmr_prov.h"
+#endif
 static void handleCPSRequest(void);
 
 volatile int com_request = 0;
@@ -1933,6 +1936,78 @@ static void cpsHandleCommand(void)
 				hasToReply = true;
 				replyLength = 2;
 				return; // bypass the trailing generic '-' reply
+			}
+#endif
+#if defined(ENABLE_REMOTE_PROVISION)
+		case 0x9A: // PROV: queue a provisioning job on the master: [2..3]=len BE, [4..]=job
+			   // (slaveId LE32, txn, flags, items op/len16LE/args...; see dmr_prov.h). The
+			   // job is copied into the feature arena; dmrProvTick sends it from the main
+			   // loop. Reply: [cmd, 0x9A, int8 result (0 = queued)].
+			{
+				int len = (com_requestbuffer[2] << 8) | com_requestbuffer[3];
+				int r = (len + 4 <= COM_REQUESTBUFFER_SIZE) ? dmrProvJobLoad((const uint8_t *)&com_requestbuffer[4], len) : -4;
+				usbComSendBuf[0] = com_requestbuffer[0];
+				usbComSendBuf[1] = 0x9A;
+				usbComSendBuf[2] = (uint8_t)(int8_t)r;
+				hasToReply = true;
+				replyLength = 3;
+				return;
+			}
+		case 0x9B: // PROV: [2]=sub. 0: diagnostics + job status -> [cmd, len_hi, len_lo, dmrProvDiag
+			   // bytes, dmrProvJobStatus bytes] (never key bytes). 1: reload the PROV block
+			   // from flash. 2: inject a data burst into the RX path as the ISR would:
+			   // [3]=type (6 header, 7 rate 1/2, 8 rate 3/4), [4..]=12 or 18 bytes (the
+			   // bench's replay of a provisioning capture into a slave without RF).
+			   // 3: terminator (dmrSmsRxReset). 4: cancel the master job. 5: write the PROV
+			   // block: [3..98]=96 bytes (the USB key tool), then reload.
+			{
+				uint8_t sub = com_requestbuffer[2];
+				int n = 0;
+				usbComSendBuf[0] = com_requestbuffer[0];
+				usbComSendBuf[1] = 0x9B;
+				switch (sub)
+				{
+					case 0:
+						n = dmrProvDiag((uint8_t *)&usbComSendBuf[3], COM_BUFFER_SIZE - 3);
+						n += dmrProvJobStatus((uint8_t *)&usbComSendBuf[3 + n], COM_BUFFER_SIZE - 3 - n);
+						usbComSendBuf[1] = (uint8_t)((n >> 8) & 0xFF);
+						usbComSendBuf[2] = (uint8_t)(n & 0xFF);
+						hasToReply = true;
+						replyLength = n + 3;
+						return;
+					case 1:
+						TASK_UNLOCK_WRITE();   // SPI-flash read needs interrupts on
+						dmrProvReload();
+						TASK_LOCK_WRITE();
+						break;
+					case 2:
+						dmrSmsRxBurst(com_requestbuffer[3], (const uint8_t *)&com_requestbuffer[4]);
+						break;
+					case 3:
+						dmrSmsRxReset();
+						break;
+					case 4:
+						dmrProvJobCancel();
+						break;
+					case 5:
+					{
+						int ok;
+						TASK_UNLOCK_WRITE();   // flash write (osDelay), like 0x80
+						ok = dmrProvApplyBlockWrite((const uint8_t *)&com_requestbuffer[3]);
+						dmrProvReload();
+						TASK_LOCK_WRITE();
+						usbComSendBuf[2] = (uint8_t)(ok ? 1 : 0);
+						hasToReply = true;
+						replyLength = 3;
+						return;
+					}
+					default:
+						break;
+				}
+				usbComSendBuf[2] = 1;
+				hasToReply = true;
+				replyLength = 3;
+				return;
 			}
 #endif
 		case 0:

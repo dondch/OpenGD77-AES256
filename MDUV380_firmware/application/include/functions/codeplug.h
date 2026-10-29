@@ -356,6 +356,7 @@ typedef enum
 	CODEPLUG_CUSTOM_DATA_TYPE_AES_KEYS,
 	CODEPLUG_CUSTOM_DATA_TYPE_MESSAGES,   /* OpenGD77-AES on-radio SMS store (see dmr_sms.c) */
 	CODEPLUG_CUSTOM_DATA_TYPE_MSG_CONFIG, /* SMS config: quick-text presets + default recipient (CHIRP-set) */
+	CODEPLUG_CUSTOM_DATA_TYPE_PROVISION,  /* remote provisioning: pairing key, master IDs, sequence counters (dmr_prov.c) */
 } CodeplugCustomDataType_t;
 
 
@@ -419,6 +420,14 @@ void codeplugSetVFO_ChannelData(CodeplugChannel_t *vfoBuf, Channel_t VFONumber);
 bool codeplugAllChannelsIndexIsInUse(int index);
 void codeplugAllChannelsIndexSetUsed(int index);
 bool codeplugChannelSaveDataForIndex(int index, CodeplugChannel_t *channelBuf);
+#if defined(ENABLE_REMOTE_PROVISION)
+/* Raw codeplug records (no BCD / CSS conversion), as the CPS writes them: for remote
+ * provisioning (dmr_prov_apply.c). Zone records are name(16) + channels(2 x channelsPerZone);
+ * a 16-channel codeplug takes the first 16 entries of an 80-entry record. */
+bool codeplugChannelSaveRawDataForIndex(int index, const uint8_t *record);
+bool codeplugZoneSaveRawDataForIndex(int zoneIndex, const uint8_t *record);
+int  codeplugZoneGetRawDataForIndex(int zoneIndex, uint8_t *out, int max);
+#endif
 CodeplugCSSTypes_t codeplugGetCSSType(uint16_t tone);
 void codeplugConvertChannelInternalToCodeplug(CodeplugChannel_t *codeplugChannel, CodeplugChannel_t *internalChannel);
 
