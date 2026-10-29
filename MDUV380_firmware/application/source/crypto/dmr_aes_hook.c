@@ -167,6 +167,8 @@ static uint16_t  s_rxdMisc[3] DMR_AES_CCM;  /* [0]=LC reads, [1]=valid PI parses
 static uint32_t  s_rxdLastPiMi DMR_AES_CCM; /* PI dedup: last logged PI MI */
 static uint16_t  s_rxdFrames[3] DMR_AES_CCM;  /* decoded frames while decrypting: [0] left alone as
                                                * silence, [1] left alone as comfort noise, [2] XORed */
+static uint8_t   s_rxdEmbN DMR_AES_CCM;       /* EMBSB events logged this call (the undecodable ones are capped) */
+static uint8_t   s_rxdSync0N DMR_AES_CCM;     /* SYNC0 events logged this call (capped) */
 /* Raw-burst capture state (crack the RX late-entry bit layout — see dmrAesGetCapData). */
 #define CAP_BURSTS 6
 static uint8_t   s_capState DMR_AES_CCM;     /* 0 idle, 1 armed, 2 capturing, 3 done */
@@ -198,10 +200,21 @@ void dmrAesDiagLateEntry(uint8_t slotState, uint8_t gatePassed)
     rxd_log(8 /*LATEENTRY*/, (uint8_t)((gatePassed ? 1 : 0) | (s_rxActive ? 2 : 0)),
             (int)slotState, s_rxLastSeq, s_rx.mi, s_rxInitMi);
 }
+/* Called from HR-C6000.c hrc6000SysReceivedDataInt for every received-data interrupt whose
+ * reg 0x51 SyncClass is 0 ("Sync Header"; the chip's comment says the burst-F EMB parsing
+ * completion is reported this way). seq = the raw reg 0x51, so the bench can see when, and
+ * with which data type, such interrupts come. Capped per call so they cannot flood the ring. */
+void dmrAesDiagSyncClass0(uint8_t reg51)
+{
+    if (s_rxdSync0N >= 4) { return; }
+    s_rxdSync0N++;
+    rxd_log(12 /*SYNC0*/, (uint8_t)(s_rxActive ? 1 : 0), (int)reg51, s_rxLastSeq, s_rx.mi, s_rxInitMi);
+}
 void dmrAesResetRxDiag(void)
 {
     memset(s_rxd, 0, sizeof s_rxd);
     s_rxdW = 0; s_rxdLastPiMi = 0;
+    s_rxdEmbN = s_rxdSync0N = 0;
     memset(s_rxdCnt, 0, sizeof s_rxdCnt);
     memset(s_rxdLe, 0, sizeof s_rxdLe);
     memset(s_rxdMisc, 0, sizeof s_rxdMisc);
@@ -647,12 +660,17 @@ void dmrAesRxBurst(int seq)
                 p.alg_id = DMR_ALG_AES256; p.mfid = DMR_MFID_DMRA;
                 p.mi = leMi; p.valid = 1;
                 /* The late entry carries no key id, and OFB gives no way to tell a wrong key
-                 * from a right one: whichever key engages here stays for the whole call. Try
-                 * the key the current channel is configured with FIRST (issue #11: a channel
-                 * on key 2 late-entered with key 1, the lowest slot, and stayed noise), then
-                 * the key of the last PI-seeded call, then any loaded key. */
+                 * from a right one: whichever key engages here stays for the whole call. The
+                 * transmitter does announce its key: the burst-F EMB Late Entry Single Block,
+                 * read by dmrAesRxEmbSb and kept in s_rxEmbKey for this stream. Try that FIRST
+                 * (issue #11: the channel's key is wrong when the radio sits on another
+                 * channel, or on one with no key), then the key the current channel is
+                 * configured with (a channel on key 2 late-entered with key 1, the lowest
+                 * slot, and stayed noise), then the key of the last call, then any loaded key.
+                 * An announced slot that holds no key falls through to the chain. */
                 uint8_t hint = dmrAesRxKeyHint();
-                if ((hint != 0) && (hint < DMR_AES_MAX_KEYS)) { p.key_id = hint; act = (dmr_aes_rx_init(&s_rx, &p) == 0); }
+                if (s_rxEmbKey != 0) { p.key_id = s_rxEmbKey; act = (dmr_aes_rx_init(&s_rx, &p) == 0); }
+                if (!act && (hint != 0) && (hint < DMR_AES_MAX_KEYS)) { p.key_id = hint; act = (dmr_aes_rx_init(&s_rx, &p) == 0); }
                 if (!act) { p.key_id = s_rxKeyId; act = (dmr_aes_rx_init(&s_rx, &p) == 0); }   /* sets s_rx.mi = leMi + loads key */
                 if (!act) { int fk = dmr_aes_first_keyid(); if (fk >= 0) { p.key_id = (uint8_t)fk; act = (dmr_aes_rx_init(&s_rx, &p) == 0); } }
                 if (act) { s_rxActive = 1; s_rxInitMi = leMi; s_rxKeyId = s_rx.key_id; s_rxPiSeeded = 0; }
@@ -662,7 +680,7 @@ void dmrAesRxBurst(int seq)
             s_rxPredReal = s_rxPredReal || leok;   /* when leok, s_rx.mi == leMi */
             s_rxIvReady = 1;
 #ifdef DMR_AES_DIAG_RX
-            rxd_log(6, (uint8_t)((leok ? 0x01 : 0) | (diverge ? 0x08 : 0) | (act ? 0x10 : 0) | (s_rxLcSeen ? 0x20 : 0) | (s_rxLcPrivacy ? 0x40 : 0)),
+            rxd_log(6, (uint8_t)((leok ? 0x01 : 0) | (diverge ? 0x08 : 0) | (act ? 0x10 : 0) | (s_rxLcSeen ? 0x20 : 0) | (s_rxLcPrivacy ? 0x40 : 0) | (s_rxEmbKey ? 0x80 : 0)),
                     seq, s_rxLastSeq, s_rx.mi, leMi);
 #endif
         }
@@ -737,7 +755,20 @@ void dmrAesRxEmbSb(const uint8_t sb4[4], uint8_t src)
             rekeyed = 1;
         }
     }
-    (void)src; (void)rekeyed;   /* reported by the DMR_AES_DIAG_RX event ring */
+#ifdef DMR_AES_DIAG_RX
+    /* EMBSB: mi = the raw 4 octets (big-endian), aux = key | alg << 8 when decodable, seq = src.
+     * Every usable block is logged (one per call); the others are capped per call. */
+    if (usable || (s_rxdEmbN < 3))
+    {
+        s_rxdEmbN++;
+        rxd_log(11 /*EMBSB*/, (uint8_t)((ok ? 0x01 : 0) | (usable ? 0x02 : 0) | (rekeyed ? 0x04 : 0) | (s_rxActive ? 0x10 : 0) | (s_rxPiSeeded ? 0x20 : 0)),
+                (int)src, s_rxLastSeq,
+                ((uint32_t)sb4[0] << 24) | ((uint32_t)sb4[1] << 16) | ((uint32_t)sb4[2] << 8) | sb4[3],
+                ok ? ((uint32_t)key | ((uint32_t)alg << 8)) : 0);
+    }
+#else
+    (void)src; (void)rekeyed;
+#endif
 }
 /* Whether HR-C6000.c should read the burst-F EMB block for this stream: only while the
  * announcement is still unknown and could matter (no decrypt running, or one bootstrapped
@@ -776,6 +807,7 @@ void dmrAesRxEnd(void)
     memset(s_rxFrag, 0, sizeof s_rxFrag);
     s_rxEmbKey = 0;      /* the ended stream's key announcement must not seed the next */
 #ifdef DMR_AES_DIAG_RX
+    s_rxdEmbN = s_rxdSync0N = 0;
 #endif
     s_rxLcSeen = 0;      /* the next stream's LC decides for the next stream */
     s_rxLcPrivacy = 0;
