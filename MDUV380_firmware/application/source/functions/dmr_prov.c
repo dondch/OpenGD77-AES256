@@ -34,6 +34,9 @@
 #define PROV_HOLDOFF_MS          10000u
 #define PROV_TX_SETTLE_MS        400u    /* a loaded data call keys ~100 ms later; wait before polling "done" */
 #define PROV_REPLY_PDU_MAX       80      /* STATUS reply: 10 + 24 + 16 = 50 -> 60 with CRC and padding */
+#define PROV_REPLY_RESEND_MAX    2       /* the cached reply goes out again at most this often ... */
+#define PROV_REPLY_RESEND_MS     30000u  /* ... and only this long after the first transmission (the master's
+                                          * retries fit in 3 x 6 s); a replayed COMMIT/STATUS is otherwise silent */
 #define PROV_BLK_PAYLOAD         10      /* confirmed rate-1/2 block payload */
 #define PROV_PREAMBLE            6
 #define PROV_PDU_SCRATCH         384     /* master: PDU assembly at the top of the arena */
@@ -81,6 +84,8 @@ static uint32_t s_replyDst DMR_AES_CCM;
 static uint32_t s_replySeq DMR_AES_CCM;
 static uint8_t  s_replyPending DMR_AES_CCM;      /* queued for transmission */
 static uint32_t s_replyLoadedMs DMR_AES_CCM;
+static uint32_t s_replyFirstMs DMR_AES_CCM;      /* when the cached reply was first queued */
+static uint8_t  s_replyResends DMR_AES_CCM;      /* re-sends of the cached reply so far */
 static uint8_t  s_rebootPending DMR_AES_CCM;     /* after the reply has gone out */
 static uint16_t s_failedMacs DMR_AES_CCM;
 static uint8_t  s_failStreak DMR_AES_CCM;
@@ -212,6 +217,7 @@ void dmrProvInit(void)
     stageDiscard();
     masterReset();
     s_replyLen = 0; s_replyPending = 0; s_rebootPending = 0; s_replyDst = 0; s_replySeq = 0; s_replyLoadedMs = 0;
+    s_replyFirstMs = 0; s_replyResends = 0;
     s_lastCommitSeq = 0; s_lastCommitMaster = 0; s_lastCodeplugCrc = 0;
     s_failedMacs = 0; s_failStreak = 0; s_holdoffUntil = 0; s_ackInhibit = 0;
     s_rejSeq = s_rejAddr = s_rejFrame = s_commits = s_stagedTotal = 0;
@@ -411,6 +417,8 @@ static void replyStatus(int mIdx, uint32_t seq, uint8_t txn, uint8_t result)
     s_replySeq = seq;
     s_lastCommitMaster = (uint8_t)mIdx;
     s_lastCommitSeq = seq;
+    s_replyFirstMs = ticksGetMillis();
+    s_replyResends = 0;
     s_replyPending = 1;
 }
 
@@ -496,8 +504,15 @@ int dmrProvRxPdu(uint8_t *pdu, int len, uint32_t src, uint32_t dst)
     s_failStreak = 0;
     if ((seq == 0xFFFFFFFFu) || (seq <= s_lastSeen[mIdx]))
     {
-        /* the master's retry of the request we already answered: the cached reply, as is */
-        if (s_replyLen && (seq == s_lastCommitSeq) && (mIdx == s_lastCommitMaster) && (s_replyDst == src)) { s_replyPending = 1; }
+        /* the master's retry of the request we already answered: the cached reply, as is, but
+         * only a bounded number of times inside the master's retry window, so a captured
+         * COMMIT or STATUS replayed later does not make this radio transmit on demand */
+        if (s_replyLen && (seq == s_lastCommitSeq) && (mIdx == s_lastCommitMaster) && (s_replyDst == src) &&
+                (s_replyResends < PROV_REPLY_RESEND_MAX) && ((uint32_t)(ticksGetMillis() - s_replyFirstMs) < PROV_REPLY_RESEND_MS))
+        {
+            s_replyResends++;
+            s_replyPending = 1;
+        }
         else { s_rejSeq++; }
         return 1;
     }
