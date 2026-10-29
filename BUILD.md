@@ -92,11 +92,11 @@ The "about" figures for the three sweep-bench flags were measured on the pre-mer
 
 | Profile | Flags | SRAM spare | CCM spare |
 | --- | --- | --- | --- |
-| `release` (default) | none | 17,452 | 10,104 |
-| `full` | all four feature flags | 15,556 | 6,920 |
+| `release` (default) | none | 17,452 | 10,096 |
+| `full` | all four feature flags | 15,556 | 6,912 |
 | `dev-sweep` | `ENABLE_SPECTRUM ENABLE_FAST_SCAN ENABLE_KEY_INJECTION` | 16,956 | 10,104 |
 | `dev-prof` | `ENABLE_SPECTRUM ENABLE_SCAN_PROFILER ENABLE_KEY_INJECTION` | 16,628 | 10,104 |
-| `dev-aes` | `DMR_AES_DIAG_RX ENABLE_KEY_INJECTION` | 17,284 | 9,476 |
+| `dev-aes` | `DMR_AES_DIAG_RX ENABLE_KEY_INJECTION` | 17,284 | 9,468 |
 | `dev-gps` | `ENABLE_GPS_NMEA_LOG` | 13,348 | 10,104 |
 
 `full` plus `ENABLE_SPECTRUM` and `ENABLE_KEY_INJECTION` links with 15,300 bytes of SRAM and 6,920 bytes of CCM
@@ -167,7 +167,21 @@ only byte-identical when `SOURCE_DATE_EPOCH` is set in the environment (the buil
 into the firmware-info screen) and `GITVERSION=<hash>` is passed to `make` when the trees differ in commit.
 Crypto lives in `application/source/crypto/` (host-unit-tested: FIPS-197 AES,
 LFSR128d, OFB keystream, Golay(24,12) late-entry MI, EMB BPTC single block); the HR-C6000 and codec hooks are
-in `HR-C6000.c` and `dmr_codec/codec_interface.c`. Optional, off-by-default diagnostics are gated behind
+in `HR-C6000.c` and `dmr_codec/codec_interface.c`.
+
+**Late entry.** A call joined after its PI header (the radio was off, on another channel, or the sender
+re-pressed PTT quickly) is bootstrapped from the Late-Entry MI the sender stuffs into the AMBE bits, which
+carries the 32-bit MI but no key id. The key comes from, in this order: the key id the sender announces in
+the burst-F EMB "Late Entry Single Block" (every DMRA encrypted call carries it; the firmware reads it back
+from the HR-C6000 page-0x02 registers 0x29..0x2C on burst F, accepts it only when it decodes cleanly, says
+AES-256 and names a loaded slot, and forgets it at the end of the call); then the key the current channel
+is configured with; then the key of the previous call; then the lowest loaded slot. A call that started
+on a guessed key switches to the announced one as soon as a block decodes, so a lost block costs one
+superframe. A PI-seeded call takes its key from the PI and ignores the block. Issue #11 describes the
+scenarios: a channel on key 2 joined while the radio sat on a channel keyed with key 1 is decrypted with
+key 2 once the block has been read. Whether the chip presents the received block in those registers is
+still to be confirmed on a radio (the `dev-aes` build logs the raw word as an `EMBSB` event in
+`tools/rxdiag.py`); if it does not, the chain starts at the channel's key as before. Optional, off-by-default diagnostics are gated behind
 `DMR_AES_DIAG_RX` / `DMR_AES_DIAG_PATTERN` / `DMR_AES_DIAG_ENCPAT` (e.g. `make DMR_AES_DIAG_RX=1`,
 read with `tools/rxdiag.py` / `tools/fragcap.py`). Encrypted voice is for licensed commercial/PMR use only; it
 is not legal on amateur bands in most countries.
