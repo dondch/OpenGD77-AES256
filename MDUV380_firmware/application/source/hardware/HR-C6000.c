@@ -331,6 +331,7 @@ static inline void hrc6000TxInterruptHandler(void);
 static inline void hrc6000RxInterruptHandler(void);
 static void hrc6000TransitionToTx(void);
 static void hrc6000InitDigitalState(void);
+static void hrc6000AesEmbSbClear(void);
 static void hrc6000TriggerPrivateCallQSODataDisplay(void);
 
 static HRC6000_Tone1Config_t savedTone1Config = { .Mode = 0, .Dev = 0, .D1 = 0 };
@@ -1049,6 +1050,7 @@ static inline void hrc6000SysReceivedDataInt(void)
 		dmrAesDiagRxMark(3); // LCRESET: Voice LC Header new-call reset
 #endif
 		dmrAesRxEnd();
+		hrc6000AesEmbSbClear();
 	}
 
 	// Note only detect terminator frames in Active mode, because in passive we can see our own terminators echoed back which can be a problem
@@ -1062,6 +1064,7 @@ static inline void hrc6000SysReceivedDataInt(void)
 			dmrAesDiagRxMark(4); // RXEND: CRC-valid Terminator
 #endif
 			dmrAesRxEnd(); // AES: call ended
+			hrc6000AesEmbSbClear();
 #if defined(ENABLE_DMR_DATA)
 			dmrSmsRxReset(); // drop any partial SMS data-PDU reassembly
 #endif
@@ -1254,6 +1257,19 @@ static inline void hrc6000SysReceivedDataInt(void)
 				SPI1ReadPageRegByteArray(0x03, 0x00, DMR_frame_buffer + LC_DATA_LENGTH, AMBE_AUDIO_LENGTH);
 				dmrAesRxBurst(rxDataType & 0x07); // AES: advance superframe/keystream offset (decrypt happens in codecDecode)
 				dmrAesRxLateEntry(rxDataType & 0x07, (const uint8_t *)(DMR_frame_buffer + LC_DATA_LENGTH)); // AES: read Late-Entry MI direct from AMBE bits (fast new-call lock)
+				// AES: burst F carries the DMRA Late Entry Single Block (alg + key id) in its EMB, which
+				// is what the in-AMBE late entry lacks (issue #11). Read the received copy back from the
+				// registers the TX side writes it to (page 0x02, 0x29..0x2C; the chip emits them raw)
+				// while this call could still be bootstrapped from its late entry: a PI-seeded call
+				// knows its key already, and one announcement per call is enough.
+				if ((sequenceNumber == 6) && dmrAesRxWantEmbSb())
+				{
+					uint8_t embSb[4];
+					if (SPI0ReadPageRegByteArray(0x02, 0x29, embSb, 4) == kStatus_Success)
+					{
+						dmrAesRxEmbSb(embSb, (uint8_t)rxSyncClass);
+					}
+				}
 
 				if (settingsUsbMode == USB_MODE_HOTSPOT)
 				{
@@ -2049,6 +2065,7 @@ void hrc6000TimeslotInterruptHandler(void)
 
 		case DMR_STATE_TX_END_1: // Stop TX (first step)
 			dmrAesTxEnd(); // end encrypted call (next key-up draws a fresh MI)
+			hrc6000AesEmbSbClear(); // our own burst-F announcement must not be read back as a received one
 			if (getCurrentTATxFlag() != TA_TX_OFF)
 			{
 				hrc6000SendPcOrTgLCHeader();
@@ -2186,6 +2203,7 @@ void hrc6000TimeslotInterruptHandler(void)
 			dmrAesDiagRxMark(9); // IDLE: RX end-tick timeout
 #endif
 			dmrAesRxEnd();
+			hrc6000AesEmbSbClear();
 			audioAmpDisable(AUDIO_AMP_CHANNEL_RF);
 			if ((voicePromptsIsPlaying() == false) && (soundMelodyIsPlaying() == false))
 			{
@@ -2268,6 +2286,7 @@ static void hrc6000InitDigitalState(void)
 	// into the following clear call (bench: 51 of 54 clear frames decrypted). A gap shorter
 	// than INTERRUPT_TIMEOUT with both boundaries lost still is not caught here.
 	dmrAesRxEnd();
+	hrc6000AesEmbSbClear();
 	hrc.tickCount = 0;
 	hrc.skipCount = 0;
 	hrc.tsAgreed = 0;
@@ -2507,6 +2526,20 @@ static uint8_t hrc6000ResolveAesTxKeyId(void)
 	}
 
 	return keyId;
+}
+
+// AES RX: the burst-F EMB Late Entry Single Block (alg + key id) a DMRA transmitter sends on every
+// superframe lands in page-0x02 regs 0x29..0x2C, the registers our TX side writes it to (the chip
+// emits them raw into the burst-F EMB). Between calls they keep whatever was last there: our own
+// TX announcement, or the previous call's. Park an undecodable word (FF 00 FF 00 fails the
+// even-parity duplicate check; all ones and all zeros would decode) at every call boundary, so
+// a stale announcement can never be read as the next call's, and a chip that does not update
+// them on RX simply yields nothing (the bootstrap then falls back to the channel's key as
+// before). test_emb_sb.c asserts the decoder rejects this word.
+static void hrc6000AesEmbSbClear(void)
+{
+	static const uint8_t none[4] = { 0xFF, 0x00, 0xFF, 0x00 };
+	SPI0WritePageRegByteArray(0x02, 0x29, none, 4);
 }
 
 // AES RX: the key to try first when a call is joined by late entry (no PI header seen, and the
