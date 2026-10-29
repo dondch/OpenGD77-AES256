@@ -335,6 +335,19 @@ static void testTransactionCommits(void)
     play(q, request(q, MASTER_ID, SLAVE_ID, commitSeq, 7, body, n));
     check(s_txLoads == 1 && s_qn == keepN && memcmp(keep, s_q, (size_t)keepN * 13) == 0 && s_nWritten == 0 && s_blockWrites == 1,
           "a retried COMMIT gets the identical cached reply, nothing written again");
+    /* ... at most twice: a captured COMMIT replayed later must not make the radio transmit */
+    play(q, request(q, MASTER_ID, SLAVE_ID, commitSeq, 7, body, n));
+    check(s_txLoads == 2, "the second retry still gets the cached reply");
+    int rej = diag().rejSeq;
+    play(q, request(q, MASTER_ID, SLAVE_ID, commitSeq, 7, body, n));
+    check(s_txLoads == 2 && diag().rejSeq == rej + 1, "a third replay of the COMMIT is rejected without a transmission");
+    /* a STATUS request: its retry is answered inside the window only */
+    body[0] = DMR_PROV_OP_STATUS;
+    s_txLoads = 0;
+    play(q, request(q, MASTER_ID, SLAVE_ID, commitSeq + 1, 7, body, 1));
+    clockAdvance(31000);
+    play(q, request(q, MASTER_ID, SLAVE_ID, commitSeq + 1, 7, body, 1));
+    check(s_txLoads == 1 && diag().rejSeq == rej + 2, "a STATUS replayed 30 s after its reply is rejected without a transmission");
 }
 
 static void testReplayAndReorder(void)

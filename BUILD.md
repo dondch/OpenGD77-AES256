@@ -165,7 +165,7 @@ this is for licensed commercial/PMR use, like the AES voice.
 | injection / modification / redirect | yes | 128-bit CMAC over IDs, header and body |
 | replay / reorder, old transactions | yes | per-master monotonic sequence, persisted on commit |
 | spliced or half-delivered transactions | yes | txn id in the MAC, COMMIT count + CRC32, staging in RAM only |
-| replayed STATUS request | once per power cycle | not persisted (flash wear) |
+| replayed STATUS request or COMMIT | once per power cycle, plus at most 2 cached re-sends within 30 s | not persisted (flash wear); the re-send is bounded |
 | forged PDU under a master ID | ACK burst only | hold-off after 4 MAC failures |
 | key extraction with physical access | **no** | key is in the codeplug region |
 | insider holding the fleet key | **no** | per-slave keys are the mitigation |

@@ -180,7 +180,10 @@ with the CRC of the image it sent), 0 when nothing was committed since boot. Res
   transmission to the master ID. Documented in the threat model.
 * A stale COMMIT (seq == the last committed seq, i.e. the master's retry after it missed the
   STATUS reply) is answered with the **cached** STATUS reply, byte for byte; no new encryption,
-  no new nonce, no flash access.
+  no new nonce, no flash access. That re-send is bounded: at most 2 times, and only within 30 s
+  of the first reply (the master's three 6 s tries fit inside), so a captured COMMIT or STATUS
+  replayed later gets nothing (bench 2026-10-29 found the unbounded version made the slave
+  transmit its reply on every replay).
 * Rollover: the master refuses to send once its counter reaches `0xFFFFFF00` and shows
   "Prov: re-key needed". The slave never accepts `0xFFFFFFFF`. At one PDU per second a counter
   lasts 136 years, so this is a guard, not an expected event.
@@ -292,7 +295,8 @@ image and the job use the arena, and the outgoing bursts use the SMS burst-queue
 | Passive listener (HackRF, DSD-FME) | sees every burst | yes | bodies are AES-256-CTR; the listener learns sizes, IDs, seq and that provisioning is happening |
 | Active, no key | injects, modifies, replays, re-addresses PDUs | yes | 128-bit CMAC over IDs, header and body; seq > last seen; nothing is staged or written before the MAC passes |
 | Active, no key | replays an old transaction | yes | monotonic seq persisted on commit; the slave answers a stale COMMIT only with the cached reply |
-| Active, no key | replays a captured STATUS request | partly | accepted at most once per slave power cycle (not persisted); the only effect is one STATUS transmission to the master ID |
+| Active, no key | replays a captured STATUS request or COMMIT | partly | a STATUS request is accepted at most once per slave power cycle (not persisted); the cached reply to the last answered request is re-sent at most twice within 30 s of it; the only effect is a STATUS transmission to the master ID |
+| Active, no key | sends garbage under a master ID to provoke transmissions | partly | the hold-off stops the ISR ACK; a valid PDU (real master) during the hold-off is still processed and answered |
 | Active, no key | spoofs the master ID to make the slave transmit | partly | the slave sends the one-burst link ACK to any well-formed SAP 9 PDU from a configured master ID (the ISR cannot verify a MAC); after 4 failed MACs in a row the slave stops acknowledging for 10 s; it never sends a STATUS |
 | Active, no key | spoofs the slave's link ACK / STATUS to the master | ACK: no, STATUS: yes | a forged ACK only makes the master move on (the slave then rejects or ignores the later PDUs; the STATUS at COMMIT is signed and tells the truth); a forged STATUS fails its MAC |
 | Active, no key | floods the slave with bad PDUs | partly | each costs one CMAC (~30 µs); the hold-off stops ACKs; the SMS reassembler is shared, so a flood also delays SMS. Denial of service on the channel itself is not addressable by any protocol |
