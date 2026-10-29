@@ -11,7 +11,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        profile: [release, full, dev-sweep, dev-prof, dev-aes, dev-gps]
+        profile: [release, full, dev-sweep, dev-prof, dev-aes, dev-gps, dev-prov]
     name: build (PROFILE=${{ matrix.profile }})
     steps:
       - uses: actions/checkout@v4
@@ -46,7 +46,7 @@ jobs:
       - name: The Makefile must refuse these at parse time
         working-directory: MDUV380_firmware
         run: |
-          for bad in "ENABLE_SCAN_PROFILER=1" "DMR_AES_DIAG_PATTERN=1 DMR_AES_DIAG_ENCPAT=1" "PROFILE=no-such-profile"; do
+          for bad in "ENABLE_SCAN_PROFILER=1" "DMR_AES_DIAG_PATTERN=1 DMR_AES_DIAG_ENCPAT=1" "ENABLE_REMOTE_PROVISION=1" "PROFILE=no-such-profile"; do
             if make -s flags $bad > /dev/null 2>&1; then echo "FAIL: 'make $bad' was accepted"; exit 1; fi
             echo "ok: 'make $bad' refused"
           done
