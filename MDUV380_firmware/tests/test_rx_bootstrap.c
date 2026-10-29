@@ -6,8 +6,10 @@
  * must never engage on that. A real encrypted call with no PI header (rapid re-PTT)
  * must still bootstrap from the in-band late entry and decrypt with the right MI.
  *
- * Drives the real dmrAesRxBurst / dmrAesRxLateEntry / dmrAesRxCodecFrame, in the
- * order HR-C6000.c and codecDecode call them.
+ * Drives the real dmrAesRxBurst / dmrAesRxLateEntry / dmrAesRxEmbSb / dmrAesRxCodecFrame, in
+ * the order HR-C6000.c and codecDecode call them. The scenarios at the end cover the key the
+ * late-entry bootstrap picks (issue #11): the transmitter's burst-F EMB announcement first,
+ * then the channel's key, the last call's key and the lowest loaded slot.
  *
  * Build: gcc -O2 -Itests/stubs -Iapplication/include -o /tmp/test_rx_bootstrap \
  *          tests/test_rx_bootstrap.c application/source/crypto/dmr_aes_hook.c \
@@ -93,23 +95,67 @@ static void testClearCallNeverDecrypts(void)
     if (engaged) { fails++; }
 }
 
-/* An encrypted call with no PI header must bootstrap from the late entry and then decrypt
- * every frame with the keystream of the true MI. The late entry of superframe k conveys the
- * MI of k+1, so the first one decodes at the start of superframe 1 and a confirming one at 2.
- * With every odd superframe's late entry corrupted, valid ones decode at 1, 3, 5: lock by 3. */
-static void testEncryptedRapidCallBootstraps(const char *name, int corruptOddSuperframes, int lockBy, uint8_t keyId, uint8_t hint)
+/* One encrypted call as the firmware sees it, with no PI header unless piSeeded: it must
+ * bootstrap from the late entry and then decrypt every frame with the keystream of the true MI
+ * under the transmitter's key. The late entry of superframe k conveys the MI of k+1, so the
+ * first one decodes at the start of superframe 1 and, with no LC seen, the confirming one that
+ * activates decryption at 2. With every odd superframe's late entry corrupted, valid ones decode
+ * at 1, 3, 5: lock at 3. The block of burst F reaches the hook a burst before each wrap, so the
+ * announced key is known from the end of superframe 0, ahead of the bootstrap.
+ *
+ * The transmitter's burst-F EMB Late Entry Single Block (alg + key id) is fed on every burst F
+ * the way HR-C6000.c does, through dmrAesRxEmbSb with the raw 4 octets, so a damaged block
+ * goes through the real decoder. The key the bootstrap picks is not observable directly: a
+ * frame decrypts correctly only under the transmitter's key, so the first correct frame (and
+ * none wrong after it) tells which key engaged and when. */
+typedef struct
+{
+    const char *name;
+    int corruptOddSuperframes;   /* late entry lost every other superframe */
+    uint8_t keyId;               /* the transmitter's key (1 or 2 are loaded, 5 is not) */
+    uint8_t hint;                /* the channel's key, dmrAesRxKeyHint(); 0 = none */
+    uint8_t lastKey;             /* key of a PI-seeded call that preceded this one; 0 = none */
+    uint8_t embKey, embAlg;      /* the burst-F EMB announcement; embKey 0 = no block sent */
+    int embFrom;                 /* first superframe whose block arrives undamaged (earlier ones carry a flipped bit) */
+    int piSeeded;                /* the call's PI header (under keyId) was seen before the voice */
+    int expectSf, expectSeq;     /* first correctly decrypted frame (superframe, burst); expectSf -1 = never */
+} scenario_t;
+
+/* A PI-seeded call under keyId, then its Terminator and the next call's Voice LC Header: leaves
+ * the hook remembering keyId as "the last call's key". */
+static void primeLastCall(uint8_t keyId)
+{
+    uint8_t lc[12], b27[27];
+    memset(lc, 0, sizeof lc);
+    dmr_pi_build(DMR_ALG_AES256, keyId, 0x5A5A1234u, lc);
+    dmrAesRxPI(lc, 12);
+    randomBurst(b27);
+    feedBurst(1, b27);
+    dmrAesRxEnd();
+    dmrAesRxEnd();
+}
+
+static void runScenario(const scenario_t *sc)
 {
     dmr_aes_ctx_t ref;
-    dmr_pi_t pi = { DMR_ALG_AES256, DMR_MFID_DMRA, keyId, 0, 1 };
-    s_keyHint = hint;
-    uint8_t b27[27], frag[7][3], iv[16];
+    dmr_pi_t pi = { DMR_ALG_AES256, DMR_MFID_DMRA, sc->keyId, 0, 1 };
+    s_keyHint = sc->hint;
+    uint8_t b27[27], frag[7][3], iv[16], sb[4];
     uint32_t mi[12], next;
-    int firstEngaged = -1, wrongFrames = 0;
+    int firstSf = -1, firstSeq = -1, wrongFrames = 0;
 
     mi[0] = 0x332BE4F8u;
     for (int k = 1; k < 12; k++) { dmr_lfsr128d(mi[k - 1], iv, &next); mi[k] = next; }
 
     startRx();
+    if (sc->lastKey) { primeLastCall(sc->lastKey); }
+    if (sc->piSeeded)
+    {
+        uint8_t lc[12];
+        memset(lc, 0, sizeof lc);
+        dmr_pi_build(DMR_ALG_AES256, sc->keyId, mi[0], lc);
+        dmrAesRxPI(lc, 12);
+    }
     for (int sf = 0; sf < 11; sf++)
     {
         dmr_le_mi_build(mi[sf + 1], frag);   /* superframe k conveys MI k+1 (look-ahead) */
@@ -120,22 +166,116 @@ static void testEncryptedRapidCallBootstraps(const char *name, int corruptOddSup
         {
             uint16_t got[49], want[49];
             randomBurst(b27);
-            if (!(corruptOddSuperframes && (sf & 1)))   /* a corrupted superframe keeps random bits */
+            if (!(sc->corruptOddSuperframes && (sf & 1)))   /* a corrupted superframe keeps random bits */
             {
                 for (int cw = 0; cw < 3; cw++) { stuffNibble(b27, cw, frag[seq][cw]); }
             }
             dmrAesRxBurst(seq);
             dmrAesRxLateEntry(seq, b27);
+            if ((seq == 6) && sc->embKey)
+            {
+                dmr_emb_sb_build(sc->embKey, sc->embAlg, sb);
+                if (sf < sc->embFrom) { sb[1] ^= 0x08; }   /* one flipped bit: syndrome != 0 */
+                dmrAesRxEmbSb(sb, 1);
+            }
             for (int i = 0; i < 49; i++) { got[i] = want[i] = (uint16_t)(rnd() & 1); }
             dmrAesRxCodecFrame(got, 1);
             dmr_aes_voice_frame(&ref, want, (size_t)(seq - 1) * 168 + 56);
-            if (memcmp(got, want, sizeof got) == 0 && firstEngaged < 0) { firstEngaged = sf; }
-            if (firstEngaged >= 0 && memcmp(got, want, sizeof got) != 0) { wrongFrames++; }
+            int right = (memcmp(got, want, sizeof got) == 0);
+            if (right && firstSf < 0) { firstSf = sf; firstSeq = seq; }
+            if (firstSf >= 0 && !right) { wrongFrames++; }
         }
     }
-    int ok = (firstEngaged >= 1) && (firstEngaged <= lockBy) && (wrongFrames == 0);
-    printf("  %s %s: decrypting from superframe %d (limit %d), %d wrong frames after\n",
-           ok ? "PASS" : "FAIL", name, firstEngaged, lockBy, wrongFrames);
+    int ok = (firstSf == sc->expectSf) && ((sc->expectSf < 0) || (firstSeq == sc->expectSeq)) && (wrongFrames == 0);
+    if (firstSf < 0)
+    {
+        printf("  %s %s: never decrypted (expected %s)\n", ok ? "PASS" : "FAIL", sc->name,
+               (sc->expectSf < 0) ? "never" : "a lock");
+    }
+    else
+    {
+        printf("  %s %s: decrypting from superframe %d burst %d (expected %d/%d), %d wrong frames after\n",
+               ok ? "PASS" : "FAIL", sc->name, firstSf, firstSeq, sc->expectSf, sc->expectSeq, wrongFrames);
+    }
+    if (!ok) { fails++; }
+    s_keyHint = 0;
+}
+
+/* The burst-F EMB announcement decides the late-entry key (issue #11). */
+static const scenario_t scenarios[] = {
+    /* The pre-EMB chain, unchanged when no block is received. */
+    { "encrypted rapid call",                                        0, 1, 0, 0, 0, 0, 0, 0, 2, 1 },
+    { "encrypted call, late entry lost every other superframe",      1, 1, 0, 0, 0, 0, 0, 0, 3, 1 },
+    /* keys in slots 1 and 2, the channel on key 2, joined by late entry (no PI): the late entry
+     * carries no key id; without a block the bootstrap takes the channel's key, not the lowest slot. */
+    { "late entry on a key-2 channel, no EMB block",                 0, 2, 2, 0, 0, 0, 0, 0, 2, 1 },
+    { "late entry on a key-1 channel with key 2 also loaded",        0, 1, 1, 0, 0, 0, 0, 0, 2, 1 },
+    { "late entry, no channel key, lowest slot fallback",            0, 1, 0, 0, 0, 0, 0, 0, 2, 1 },
+    /* The EMB announces key 2 while the channel says key 1 and the last call used key 1 (the radio
+     * sits on channel 2 while A transmits on channel 3): the announced key wins. */
+    { "EMB key 2, channel key 1, last call key 1",                   0, 2, 1, 1, 2, 5, 0, 0, 2, 1 },
+    { "EMB key 2, no channel key, last call key 1",                  0, 2, 0, 1, 2, 5, 0, 0, 2, 1 },
+    /* Without the block the same call locks onto key 1 and stays noise: the control. */
+    { "no EMB block, channel key 1, last call key 1, sender key 2",  0, 2, 1, 1, 0, 0, 0, 0, -1, 0 },
+    /* AES-128 announced: not ours, ignored, the chain picks the channel's key. */
+    { "EMB announces alg 4 (AES-128): ignored, channel key used",    0, 1, 1, 1, 2, 4, 0, 0, 2, 1 },
+    /* An unloaded slot announced: the chain picks the channel's key. */
+    { "EMB announces unloaded slot 5: ignored, channel key used",    0, 1, 1, 1, 5, 5, 0, 0, 2, 1 },
+    /* Every block damaged (one flipped bit): dropped, the chain picks the channel's key. */
+    { "corrupted EMB block every superframe: dropped",               0, 1, 1, 1, 2, 5, 99, 0, 2, 1 },
+    { "corrupted EMB block every superframe, sender on key 2: noise", 0, 2, 1, 1, 2, 5, 99, 0, -1, 0 },
+    /* The blocks of superframes 0 and 1 are lost: the bootstrap guesses the channel's key 1 at
+     * superframe 2, the block of its burst F announces key 2 and the stream switches at once:
+     * right from burst 6 of superframe 2, one superframe of noise instead of a whole call. */
+    { "first EMB blocks lost, bootstrap on key 1, rekeyed at burst F", 0, 2, 1, 1, 2, 5, 2, 0, 2, 6 },
+    /* A PI-seeded call knows its key: an announcement of another key is ignored. */
+    { "PI-seeded on key 1, EMB announces key 2: PI wins",            0, 1, 0, 0, 2, 5, 0, 1, 0, 1 },
+};
+
+/* The announcement of one call must not seed the next: call 1 announces key 2 (and is decrypted
+ * with it), call 2 sends no block and is on key 1 with the channel on key 1. If the stale key 2
+ * survived the call boundary it would be tried first and call 2 would be noise. */
+static void testEmbDoesNotOutliveItsCall(void)
+{
+    scenario_t call1 = { "call 1 announces key 2", 0, 2, 0, 0, 2, 5, 0, 0, 2, 1 };
+    scenario_t call2 = { "call 2, no block, key 1 on a key-1 channel (stale EMB key 2 must not seed it)", 0, 1, 1, 0, 0, 0, 0, 0, 2, 1 };
+    runScenario(&call1);
+    /* Terminator, then the next call's Voice LC Header, without re-initialising the hook. */
+    dmrAesRxEnd();
+    dmrAesRxEnd();
+    /* runScenario re-initialises; drive call 2 by hand on the live state instead. */
+    dmr_aes_ctx_t ref;
+    dmr_pi_t pi = { DMR_ALG_AES256, DMR_MFID_DMRA, call2.keyId, 0, 1 };
+    s_keyHint = call2.hint;
+    uint8_t b27[27], frag[7][3], iv[16];
+    uint32_t mi[12], next;
+    int firstSf = -1, firstSeq = -1, wrongFrames = 0;
+    mi[0] = 0x7B1D9C02u;
+    for (int k = 1; k < 12; k++) { dmr_lfsr128d(mi[k - 1], iv, &next); mi[k] = next; }
+    for (int sf = 0; sf < 6; sf++)
+    {
+        dmr_le_mi_build(mi[sf + 1], frag);
+        pi.mi = mi[sf];
+        dmr_aes_rx_init(&ref, &pi);
+        dmr_lfsr128d(mi[sf], ref.iv, &next);
+        for (int seq = 1; seq <= 6; seq++)
+        {
+            uint16_t got[49], want[49];
+            randomBurst(b27);
+            for (int cw = 0; cw < 3; cw++) { stuffNibble(b27, cw, frag[seq][cw]); }
+            dmrAesRxBurst(seq);
+            dmrAesRxLateEntry(seq, b27);
+            for (int i = 0; i < 49; i++) { got[i] = want[i] = (uint16_t)(rnd() & 1); }
+            dmrAesRxCodecFrame(got, 1);
+            dmr_aes_voice_frame(&ref, want, (size_t)(seq - 1) * 168 + 56);
+            int right = (memcmp(got, want, sizeof got) == 0);
+            if (right && firstSf < 0) { firstSf = sf; firstSeq = seq; }
+            if (firstSf >= 0 && !right) { wrongFrames++; }
+        }
+    }
+    int ok = (firstSf == call2.expectSf) && (firstSeq == call2.expectSeq) && (wrongFrames == 0);
+    printf("  %s %s: decrypting from superframe %d burst %d (expected %d/%d), %d wrong frames after\n",
+           ok ? "PASS" : "FAIL", call2.name, firstSf, firstSeq, call2.expectSf, call2.expectSeq, wrongFrames);
     if (!ok) { fails++; }
     s_keyHint = 0;
 }
@@ -186,13 +326,8 @@ int main(void)
 {
     testClearCallNeverDecrypts();
     testClearCallAfterEncryptedCall();
-    testEncryptedRapidCallBootstraps("encrypted rapid call", 0, 2, 1, 0);
-    testEncryptedRapidCallBootstraps("encrypted call, late entry lost every other superframe", 1, 3, 1, 0);
-    /* Issue #11: keys in slots 1 and 2, the channel on key 2, joined by late entry (no PI). The
-     * late entry carries no key id; the bootstrap must take the channel's key, not the lowest slot. */
-    testEncryptedRapidCallBootstraps("late entry on a key-2 channel (issue #11)", 0, 2, 2, 2);
-    testEncryptedRapidCallBootstraps("late entry on a key-1 channel with key 2 also loaded", 0, 2, 1, 1);
-    testEncryptedRapidCallBootstraps("late entry, no channel key, lowest slot fallback", 0, 2, 1, 0);
+    for (unsigned i = 0; i < sizeof scenarios / sizeof scenarios[0]; i++) { runScenario(&scenarios[i]); }
+    testEmbDoesNotOutliveItsCall();
     printf("%s\n", fails ? "FAILED" : "ALL PASS");
     return fails ? 1 : 0;
 }
