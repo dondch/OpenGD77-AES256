@@ -995,6 +995,14 @@ static inline void hrc6000SysReceivedDataInt(void)
 	hrc.rxCRCisValid = (((reg_0x51 >> 2) & 0x01) == 0);// CRC is OK if its 0
 	rxPrivacyIndicator = (reg_0x51 >> 3) & 0x01;
 	rxPrivacyIndicator = 0; // AES build: route encrypted voice to decrypt instead of dropping
+#ifdef DMR_AES_DIAG_RX
+	// AES diag: the chip's comment above says the burst-F EMB parsing completion is reported as a
+	// received-data interrupt with SyncClass 0. Record when such interrupts come, and with what.
+	if (rxSyncClass == SYNC_CLASS_HEADER)
+	{
+		dmrAesDiagSyncClass0(reg_0x51);
+	}
+#endif
 
 	if (SPI0ReadPageRegByte(0x04, 0x5f, &reg_0x5F) != kStatus_Success)
 	{

@@ -11,6 +11,14 @@ Firmware records, in the HR-C6000 ISR, a small CCM ring of decrypt events:
   RXEND   CRC-valid Terminator (dmrAesRxEnd)
   LATENT  chip Late-Entry interrupt (reg 0x82 bit4) fired: slotState it fired in + whether
           OpenGD77's IDLE gate let it act (gate) and whether stale AES was still active (act)
+  LCCLR   a late-entry bootstrap dropped because the stream's own LC says clear
+  EMBSB   burst-F EMB Late Entry Single Block read back from page 0x02 regs 0x29..0x2C (issue
+          #11): the raw 4 octets (mi column), and when they decode, the announced key id and
+          alg (5 = AES-256); RECORDED = tried first by the next bootstrap, REKEYED = a call
+          already running on a guessed key switched to it. seq = the chip's SyncClass of the
+          interrupt it was read on. A raw FF00FF00 is the parked value (nothing received).
+  SYNC0   a received-data interrupt with reg 0x51 SyncClass 0 (seq = the raw reg 0x51), capped
+          at 4 per call: when the chip reports the burst-F EMB parsing completion, if it does
 
 Usage (Windows, the CDC enumerates as COM4):
   python rxdiag.py --reset            # clear the ring before a test run
@@ -26,7 +34,8 @@ except ImportError:
 
 AES_VID, AES_PID = 0x1FC9, 0x0094
 TYPE = {1: "PI    ", 2: "WRAP  ", 3: "LCRSET", 4: "RXEND ", 5: "IVGEN ", 6: "BOOT  ", 7: "RESEED", 8: "LATENT",
-        9: "IDLE  "}   # 9: RX ended by silence (end-tick or interrupt timeout) -> dmrAesRxEnd
+        9: "IDLE  ",   # 9: RX ended by silence (end-tick or interrupt timeout) -> dmrAesRxEnd
+        10: "LCCLR ", 11: "EMBSB ", 12: "SYNC0 "}
 SLOTSTATE = {0: "IDLE", 1: "RX_1", 2: "RX_2", 3: "RX_END",
              4: "TXS1", 5: "TXS2", 6: "TXS3", 7: "TXS4", 8: "TXS5"}
 
@@ -113,6 +122,15 @@ def main():
             fs = ("LE-OK" if (fl & 1) else "LE-FAIL") + (" confirmed" if (fl & 8) else "")
         elif t == 6:   # BOOTSTRAP (idle -> active from late entry)
             fs = ("LE-OK" if (fl & 1) else "LE-FAIL") + (" confirmed" if (fl & 8) else "") + (" ACTIVATED" if (fl & 0x10) else " (no-seed)")
+            fs += " emb-key" if (fl & 0x80) else " no-emb-key"   # an EMB-announced key id was known at this bootstrap
+        elif t == 11:  # EMBSB: raw word in mi, key | alg<<8 in aux when it decoded
+            if fl & 1:
+                fs = f"key={aux & 0xFF} alg={(aux >> 8) & 7}" + (" RECORDED" if (fl & 2) else " ignored") + (" REKEYED" if (fl & 4) else "")
+            else:
+                fs = "parked (nothing received)" if mi == 0xFF00FF00 else "undecodable"
+            fs += f" sync={seq}" + (" active" if (fl & 0x10) else " idle") + (" pi-seeded" if (fl & 0x20) else "")
+        elif t == 12:  # SYNC0: seq = raw reg 0x51
+            fs = f"reg51=0x{seq:02X} dataType={(seq >> 4) & 0xF} crc={'bad' if (seq & 4) else 'ok'}" + (" active" if (fl & 1) else " idle")
         elif t == 7:   # RESEED (active track switch on diverging confirmed late entry)
             fs = "SWITCHED-TRACK" + (" confirmed" if (fl & 8) else "")
         elif t in (3, 4, 9):
