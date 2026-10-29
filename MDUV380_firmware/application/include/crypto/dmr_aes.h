@@ -124,6 +124,10 @@ int  dmr_le_mi_decode(const uint8_t frag[7][3], uint32_t *mi_out);
  * BPTC(16x2) single-burst codeword for the burst-F EMB. 11-bit payload =
  * key_id<<3 | alg (alg 5 = AES256, 4 = AES128). out4 = page-0x02 regs 0x29..0x2C. */
 void dmr_emb_sb_build(uint8_t key_id, uint8_t alg, uint8_t out4[4]);
+/* RX: inverse of dmr_emb_sb_build on the 4 octets the chip received in the burst-F EMB.
+ * Returns 1 + *key_id / *alg only when the Hamming(16,11,4) syndrome and the even-parity
+ * duplicate both check (no correction); 0 otherwise. */
+int  dmr_emb_sb_decode(const uint8_t in4[4], uint8_t *key_id, uint8_t *alg);
 
 /* ---- low-level (exposed for unit tests) --------------------------------- */
 void dmr_lfsr128d(uint32_t mi, uint8_t iv_out[16], uint32_t *next_mi_out);
