@@ -72,6 +72,9 @@ void dmr_pi_build(uint8_t alg_id, uint8_t key_id, uint32_t mi, uint8_t *pi_out7)
 int  dmr_aes_rx_init(dmr_aes_ctx_t *c, const dmr_pi_t *pi);
 /* TX: start a new encrypted call. mi_seed should be random (e.g. STM32 RNG). */
 int  dmr_aes_tx_init(dmr_aes_ctx_t *c, uint8_t alg_id, uint8_t key_id, uint32_t mi_seed);
+/* Swap the key of a running stream (MI/IV kept). Returns 0 on success, -1 (context
+ * unchanged) when the slot holds no key. */
+int  dmr_aes_ctx_set_key(dmr_aes_ctx_t *c, uint8_t key_id);
 
 /* Call once per voice SUPERFRAME (before processing its frames): regenerates the
  * 128-bit IV from the current MI, then advances MI for the next superframe.

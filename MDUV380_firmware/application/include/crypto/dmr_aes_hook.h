@@ -25,6 +25,10 @@ void dmrAesRxLateEntry(int seq, const uint8_t *ambe27); /* read Late-Entry MI bi
 uint8_t dmrAesRxKeyHint(void);  /* key id to try first on a late-entry bootstrap (the current channel's
                                  * key, else the global TX key), 0 = none; defined in HR-C6000.c, weak
                                  * default in the hook returns 0 */
+void dmrAesRxEmbSb(const uint8_t sb4[4], uint8_t src); /* burst-F EMB Late Entry Single Block as received
+                                                         * (page 0x02 regs 0x29..0x2C): the announced alg + key
+                                                         * id, tried first by the late-entry bootstrap */
+int  dmrAesRxWantEmbSb(void);                      /* 1 while the block is still worth reading for this stream */
 void dmrAesRxCodecFrame(uint16_t *b49, int idxInBurst); /* per decoded AMBE frame (idx 0..2) */
 void dmrAesRxEnd(void);
 /* TX */

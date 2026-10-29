@@ -73,6 +73,10 @@ static int           s_rxPredReal DMR_AES_CCM;   /* 1 = s_rxNextMi descends from
 static uint32_t      s_rxInitMi DMR_AES_CCM;     /* the current call's CONSTANT initial MI (from its PI) */
 static uint8_t       s_rxFrag[7][3] DMR_AES_CCM; /* Late-Entry MI fragment nibbles read from the AMBE bits */
 static uint8_t       s_rxKeyId DMR_AES_CCM;      /* keyId of the last successful seed (late-entry bootstrap fallback) */
+static uint8_t       s_rxEmbKey DMR_AES_CCM;     /* AES-256 key id the current stream announces in its burst-F EMB
+                                                  * Late Entry Single Block (dmrAesRxEmbSb), 0 = none received yet;
+                                                  * tried first by the late-entry bootstrap; cleared at every call
+                                                  * boundary (dmrAesRxEnd) so it never seeds the next call */
 static int           s_rxPiSeeded DMR_AES_CCM;   /* 1 = call seeded from the chip PI-LC (use pure self-advance,
                                                   * stable & RF-independent); 0 = late-entry-bootstrapped rapid call
                                                   * (adopt diverging late entries so a wrong bootstrap self-corrects) */
@@ -269,6 +273,7 @@ void dmrAesInit(void)
     s_rxInitMi = 0;
     memset(s_rxFrag, 0, sizeof s_rxFrag);
     s_rxKeyId = 0;
+    s_rxEmbKey = 0;
     s_rxPiSeeded = 0;
     s_rxLastPiMi = s_rxStaleMi = 0;
     s_rxLastPiValid = s_rxStaleValid = 0;
@@ -704,6 +709,43 @@ void dmrAesRxLateEntry(int seq, const uint8_t *ambe27)
     if (s_capState == 2 && s_capN < CAP_BURSTS) { memcpy(s_capBuf[s_capN], ambe27, 27); s_capSeq[s_capN] = (uint8_t)seq; s_capN++; }
 #endif
 }
+/* The burst-F EMB of every DMRA encrypted call carries the "Late Entry Single Block": a
+ * BPTC(16x2) codeword announcing the algorithm and key id, which is exactly what the in-AMBE
+ * late-entry MI lacks. HR-C6000.c reads the 4 octets the chip received back from page 0x02
+ * regs 0x29..0x2C (the registers our TX side writes the block to; the chip emits them raw)
+ * on burst F and hands them here while dmrAesRxWantEmbSb says a bootstrap may still need
+ * them. Called from the ISR: the decode is ~100 bit operations, no flash, no AES. A clean
+ * AES-256 announcement of a key slot 1..15 is remembered for the stream (s_rxEmbKey) and
+ * tried first by the late-entry bootstrap in dmrAesRxBurst. A stream already bootstrapped on
+ * a guessed key (its first announcement was lost) switches to the announced key at once, MI
+ * track untouched, so a wrong guess costs at most one superframe. A PI-seeded stream knows
+ * its key from the PI and ignores the block. Other algorithms, key id 0 and a damaged block
+ * (syndrome or parity) leave the state untouched, and the next burst F is read again.
+ * src is a diagnostic tag only (the chip's reg 0x51 SyncClass of the interrupt it came on). */
+void dmrAesRxEmbSb(const uint8_t sb4[4], uint8_t src)
+{
+    uint8_t key = 0, alg = 0;
+    int ok = dmr_emb_sb_decode(sb4, &key, &alg);
+    int usable = ok && (alg == (DMR_ALG_AES256 & 0x07)) && (key != 0) && (key < DMR_AES_MAX_KEYS);
+    int rekeyed = 0;
+    if (usable && (s_rxEmbKey == 0))
+    {
+        s_rxEmbKey = key;
+        if (s_rxActive && !s_rxPiSeeded && (s_rx.key_id != key) && (dmr_aes_ctx_set_key(&s_rx, key) == 0))
+        {
+            s_rxKeyId = key;
+            rekeyed = 1;
+        }
+    }
+    (void)src; (void)rekeyed;   /* reported by the DMR_AES_DIAG_RX event ring */
+}
+/* Whether HR-C6000.c should read the burst-F EMB block for this stream: only while the
+ * announcement is still unknown and could matter (no decrypt running, or one bootstrapped
+ * from the late entry on a guessed key). A PI-seeded call never needs it. */
+int dmrAesRxWantEmbSb(void)
+{
+    return (s_rxEmbKey == 0) && (!s_rxActive || !s_rxPiSeeded);
+}
 /* Called per decoded AMBE frame from codecDecode (idxInBurst 0..2). Applies the
  * OFB keystream to the 49-bit decoded voice vector in place. */
 void dmrAesRxCodecFrame(uint16_t *b49, int idxInBurst)
@@ -732,6 +774,9 @@ void dmrAesRxEnd(void)
     s_rxBurstEnc = 0;
     s_rxLastSeq = -1;
     memset(s_rxFrag, 0, sizeof s_rxFrag);
+    s_rxEmbKey = 0;      /* the ended stream's key announcement must not seed the next */
+#ifdef DMR_AES_DIAG_RX
+#endif
     s_rxLcSeen = 0;      /* the next stream's LC decides for the next stream */
     s_rxLcPrivacy = 0;
     /* The PI the chip handed us during this stream is now stale (see dmrAesRxPI). Only the

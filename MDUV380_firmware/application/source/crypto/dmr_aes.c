@@ -150,6 +150,12 @@ static int ctx_load_key(dmr_aes_ctx_t *c, uint8_t key_id) {
     }
     c->have_key=0; return -1;
 }
+/* Swap the key of a running stream, MI and IV untouched (the keystream is regenerated from
+ * IV + key per frame). Leaves the context as it was when the slot holds no key. */
+int dmr_aes_ctx_set_key(dmr_aes_ctx_t *c, uint8_t key_id) {
+    if (key_id < DMR_AES_MAX_KEYS && s_have[key_id]) { return ctx_load_key(c, key_id); }
+    return -1;
+}
 int dmr_aes_rx_init(dmr_aes_ctx_t *c, const dmr_pi_t *pi) {
     memset(c,0,sizeof *c);
     c->alg_id=pi->alg_id; c->mi=pi->mi;
