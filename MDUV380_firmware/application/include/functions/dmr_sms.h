@@ -81,8 +81,9 @@ int  dmrSmsAckTake(uint8_t out[12]);
  * burst the chip delivers (any type, any CRC). dmrSmsRxDiag() fills out[7]:
  *   [0]=all data bursts, [1]=hdr CRC-ok, [2]=hdr CRC-bad, [3]=blk CRC-ok,
  *   [4]=blk CRC-bad, [5]=PDUs reassembled, [6]=messages decoded. */
-void dmrSmsRxDiagBurst(int rxDataType, int crcOk);
+void dmrSmsRxDiagBurst(int rxDataType, int crcOk, int ampOpen);   /* ampOpen: the RF audio amp at this burst */
 void dmrSmsRxDiag(uint32_t out[7]);
+int  dmrSmsRxDiagAmpSeen(void);   /* 1 once the RF audio amp was open at a data burst since the last reset */
 /* Zero the counters and trace, and forget the last stored message (the retransmission filter)
  * and any kept copy, so the same capture can be replayed without a reboot. */
 void dmrSmsRxDiagReset(void);

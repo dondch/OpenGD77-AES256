@@ -1101,7 +1101,14 @@ static inline void hrc6000SysReceivedDataInt(void)
 	if ((hrc.transmissionEnabled == false) && (rxSyncClass == SYNC_CLASS_DATA))
 	{
 		int crcOk = hrc6000CrcIsValid() ? 1 : 0;
-		dmrSmsRxDiagBurst(rxDataType, crcOk);   // log every data-sync burst (any type/CRC)
+		dmrSmsRxDiagBurst(rxDataType, crcOk, (audioAmpGetStatus() & AUDIO_AMP_CHANNEL_RF) != 0);   // log every data-sync burst (any type/CRC)
+		// A data call (SMS, provisioning): CSBK preamble, data headers and blocks, never a
+		// Voice LC header or a voice frame. It makes no sound: the timeslot handler raises the
+		// RX carrier beep only for a reception that is not one, and a voice frame clears this.
+		if (crcOk && ((rxDataType == 3) || (rxDataType == 6) || (rxDataType == 7) || (rxDataType == 8)))
+		{
+			hrc.dataCall = true;
+		}
 		if (crcOk && ((rxDataType == 6) || (rxDataType == 7) || (rxDataType == 8)))
 		{
 			uint8_t dataBurst[18];

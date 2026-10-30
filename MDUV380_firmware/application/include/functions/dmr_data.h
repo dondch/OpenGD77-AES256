@@ -44,6 +44,7 @@ void dmrDataTxLoad(const uint8_t *bursts, uint8_t count);
 int  dmrDataTxActive(void);
 int  dmrDataTxNextBurst(uint8_t *dataTypeOut, uint8_t *payload12Out);
 void dmrDataTxEnd(void);   /* clear the data-call state (queue drained / TX ended) */
+int  dmrDataTxDiag(uint8_t out[4]);   /* bench: loaded, sent, endedBy, ampOpen of the last data call */
 
 #endif // ENABLE_DMR_DATA
 #endif // _OPENGD77_DMR_DATA_H_

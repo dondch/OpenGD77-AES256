@@ -625,10 +625,22 @@ void applicationMainTask(void)
 			uint32_t injButtons;
 			if (usbKeyInjectTick(&injEvent, &injKey, &injButtons))
 			{
-				keys.event = injEvent;
-				keys.key = injKey;
-				key_event = EVENT_KEY_CHANGE;
-				buttons |= injButtons;   // SK2 reported as held with this key only (flags bit2)
+				// A side button instead of a key (0xF1 = SK1, 0xF2 = SK2, 0xF3 = ORANGE): the
+				// button driver's events (down, LONG_DOWN = bit << 2, SHORT_UP = bit << 1, release).
+				uint32_t injBtn = ((uint8_t)injKey == 0xF1) ? BUTTON_SK1 : (((uint8_t)injKey == 0xF2) ? BUTTON_SK2 : (((uint8_t)injKey == 0xF3) ? BUTTON_ORANGE : 0));
+				if (injBtn != 0)
+				{
+					if (injEvent & KEY_MOD_UP) { buttons |= ((injEvent & KEY_MOD_LONG) ? 0 : (injBtn << 1)); }
+					else { buttons |= (injBtn | ((injEvent & KEY_MOD_LONG) ? (injBtn << 2) : 0)); }
+					button_event = EVENT_BUTTON_CHANGE;
+				}
+				else
+				{
+					keys.event = injEvent;
+					keys.key = injKey;
+					key_event = EVENT_KEY_CHANGE;
+					buttons |= injButtons;   // SK2 reported as held with this key only (flags bit2)
+				}
 			}
 		}
 #endif
