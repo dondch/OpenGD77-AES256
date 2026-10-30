@@ -10,3 +10,11 @@ MDUV380_firmware/build-*.log
 arm-tc/
 *.tar.xz
 __pycache__/
+
+# Private fleet configuration (family names, DMR IDs, keys, channel plans, codeplug backups): never committed.
+# Keep it in private/ (any level) or name it *.fleet.json / *.key; see BUILD.md "Remote provisioning".
+private/
+**/private/
+*.fleet.json
+*.key
+*.codeplug.bin
