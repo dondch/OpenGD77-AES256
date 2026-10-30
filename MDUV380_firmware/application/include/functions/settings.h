@@ -172,6 +172,9 @@ typedef enum
 #endif
 	BIT_CHANNELS_ARE_READ_ONLY      = (SETTINGS_BITS_BANK_0 | (1 << 27)),
 	BIT_UI_USES_DOUBLE_HEIGHT       = (SETTINGS_BITS_BANK_0 | (1 << 28)),
+#if defined(ENABLE_SIMPLE_MODE)
+	BIT_SIMPLE_MODE                 = (SETTINGS_BITS_BANK_0 | (1 << 29)), // the "dumb radio" rules (uiSimpleMode.c); set over USB or by SET_SETTING
+#endif
 
 	// Last usable bit is 29
 	//BIT_xxxxxxx_xxxxxxxxxxxx      = (SETTINGS_BITS_BANK_1 | (1 << 0)),
@@ -273,6 +276,14 @@ typedef struct
 	uint8_t				gpsModeAndBaudsIndex;
 #endif
 	uint8_t				lastTalkerOnScreenTimer; // in seconds, 0..30
+#if defined(ENABLE_SIMPLE_MODE)
+	// Appended, so every member above keeps its offset whether or not the flag is built; a radio
+	// coming from a build without it reads EEPROM bytes here, hence simpleValid (uiSimpleMode.c).
+	uint16_t			simpleHomeZone;    // zone of the home channel
+	uint16_t			simpleHomeChannel; // codeplug channel index (1..1024) of the home channel, 0 = the zone's first
+	uint8_t				simpleIdleMinutes; // minutes away from the home channel before the radio returns to it, 0 = never
+	uint8_t				simpleValid;       // SIMPLE_SETTINGS_VALID once the three fields above were written by this firmware
+#endif
 } settingsStruct_t;
 
 #if defined(ENABLE_DUAL_SCREEN) && !(defined(PLATFORM_RD5R) || defined(PLATFORM_MD9600))

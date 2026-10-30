@@ -29,6 +29,9 @@
 #include "user_interface/menuSystem.h"
 #include "user_interface/uiLocalisation.h"
 #include "user_interface/uiUtilities.h"
+#if defined(ENABLE_SIMPLE_MODE)
+#include "user_interface/uiSimpleMode.h"
+#endif
 
 menuDataGlobal_t menuDataGlobal =
 {
@@ -276,6 +279,13 @@ void menuSystemRegisterExitCallback(menuExitCallback_t f, void *data)
 
 void menuSystemPushNewMenu(int menuNumber)
 {
+#if defined(ENABLE_SIMPLE_MODE)
+	menuNumber = simpleModeMenuGate(menuNumber);   // the PIN box instead, or nothing for the VFO
+	if (menuNumber == MENU_EMPTY)
+	{
+		return;
+	}
+#endif
 	if (menuDataGlobal.controlData.stackPosition < 15)
 	{
 		keyboardReset();
@@ -344,6 +354,9 @@ void menuSystemPopAllAndDisplayRootMenu(void)
 
 void menuSystemPopAllAndDisplaySpecificRootMenu(int newRootMenu, bool resetKeyboard)
 {
+#if defined(ENABLE_SIMPLE_MODE)
+	newRootMenu = simpleModeRootGate(newRootMenu);
+#endif
 	if (resetKeyboard)
 	{
 		keyboardReset();
@@ -366,6 +379,9 @@ void menuSystemPopAllAndDisplaySpecificRootMenu(int newRootMenu, bool resetKeybo
 
 void menuSystemSetCurrentMenu(int menuNumber)
 {
+#if defined(ENABLE_SIMPLE_MODE)
+	menuNumber = simpleModeRootGate(menuNumber);
+#endif
 	keyboardReset();
 	menuDataGlobal.controlData.stack[menuDataGlobal.controlData.stackPosition] = menuNumber;
 	menuSystemPushMenuFirstRun();

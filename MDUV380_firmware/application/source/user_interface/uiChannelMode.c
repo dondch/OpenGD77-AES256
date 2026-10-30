@@ -33,6 +33,9 @@
 #include "user_interface/uiLocalisation.h"
 #include "user_interface/uiTelemetry.h"
 #include "user_interface/uiHomeScreen.h"
+#if defined(ENABLE_SIMPLE_MODE)
+#include "user_interface/uiSimpleMode.h"
+#endif
 #include "functions/voicePrompts.h"
 #include "functions/rxPowerSaving.h"
 #if defined(PLATFORM_MD9600) || defined(PLATFORM_MD380) || defined(PLATFORM_MDUV380) || defined(PLATFORM_RT84_DM1701) || defined(PLATFORM_MD2017)
@@ -1207,12 +1210,66 @@ void uiChannelModeUpdateScreen(int txTimeSecs)
 	uiDataGlobal.displayQSOState = QSO_DISPLAY_IDLE;
 }
 
+#if defined(ENABLE_SIMPLE_MODE)
+/* The channel screen under the simple-mode rules: true when the event was ours. */
+static bool simpleModeHandleEvent(uiEvent_t *ev)
+{
+	switch (simpleModeRouteUiEvent(ev))
+	{
+		case SM_PASS:
+			return false;
+		case SM_CHANNEL_UP:      // SK2 is not held here: a channel step within the zone
+			uiDataGlobal.talkaround = false;
+			handleUpKey(ev);
+			return true;
+		case SM_CHANNEL_DOWN:
+			uiDataGlobal.talkaround = false;
+			handleDownKey(ev);
+			return true;
+		case SM_CONTACTS:        // the private-call picker: GREEN there sets the call override, as SK2 + # does
+			if (trxGetMode() == RADIO_MODE_DIGITAL) { menuSystemPushNewMenu(MENU_CONTACT_QUICKLIST); }
+			else { soundSetMelody(MELODY_ERROR_BEEP); }   // an analog channel: no one to call by ID
+			return true;
+		case SM_PIN_MENU:        // the gate in menuSystemPushNewMenu asks for the PIN first
+			menuSystemPushNewMenu(MENU_MAIN_MENU);
+			return true;
+#if defined(ENABLE_DMR_DATA)
+		case SM_PRESETS:
+			if (trxGetMode() == RADIO_MODE_DIGITAL) { menuMessagesOpenPresets(); }
+			else { soundSetMelody(MELODY_ERROR_BEEP); }   // messages are DMR data
+			return true;
+		case SM_INBOX:
+			menuMessagesOpenInbox();
+			return true;
+#endif
+		case SM_CANCEL_PRIVATE_CALL:
+			if (uiDataGlobal.tgBeforePcMode != 0)
+			{
+				settingsSet(nonVolatileSettings.overrideTG, uiDataGlobal.tgBeforePcMode);
+				menuPrivateCallClear();
+				updateTrxID();
+				uiDataGlobal.displayQSOState = QSO_DISPLAY_DEFAULT_SCREEN;
+				uiChannelModeUpdateScreen(0);
+			}
+			return true;
+		default:                 // SM_BLOCK
+			return true;
+	}
+}
+#endif
+
 static void handleEvent(uiEvent_t *ev)
 {
 #if defined(PLATFORM_GD77S)
 	handleEventForGD77S(ev);
 	return;
 #else
+#if defined(ENABLE_SIMPLE_MODE)
+	if (simpleModeHandleEvent(ev))
+	{
+		return;
+	}
+#endif
 
 #if defined(ENABLE_DUAL_SCREEN)
 	if (uiDualScreenHandleKey(ev, true, ((directChannelNumber > 0) || uiDataGlobal.displayChannelSettings)))

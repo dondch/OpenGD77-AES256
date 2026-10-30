@@ -27,6 +27,9 @@
 #include "user_interface/uiGlobals.h"
 #include "interfaces/batteryAndPowerManagement.h"
 #include "user_interface/menuSystem.h"
+#if defined(ENABLE_SIMPLE_MODE)
+#include "user_interface/uiSimpleMode.h"
+#endif
 #include <string.h>
 #include <stddef.h>
 
@@ -53,9 +56,12 @@ int dmrProvApplyVfo(uint8_t vfo, const uint8_t *record56)
 }
 
 /* The settings fields a master may set, by index (PROVISIONING.md §6; tools/provision.py
- * mirrors the names). Offsets come from the real struct, so a layout change cannot break it. */
-typedef struct { uint16_t off; uint8_t width; } provField_t;
-#define F(name, w) { (uint16_t)offsetof(settingsStruct_t, name), (w) }
+ * mirrors the names). Offsets come from the real struct, so a layout change cannot break it.
+ * width 0 is a single option bit: off holds the bitfieldOptions_t value, the setting is 0 or 1
+ * (a bit must not travel as a whole bank: the write would clobber every other option). */
+typedef struct { uint32_t off; uint8_t width; } provField_t;
+#define F(name, w) { (uint32_t)offsetof(settingsStruct_t, name), (w) }
+#define B(bit)     { (uint32_t)(bit), 0 }
 static const provField_t s_fields[] =
 {
     F(txPowerLevel, 1), F(backlightMode, 1), F(backLightTimeout, 1), F(displayContrast, 1),
@@ -63,8 +69,12 @@ static const provField_t s_fields[] =
     F(dmrCcTsFilter, 1), F(privateCalls, 1), F(txTimeoutBeepX5Secs, 1), F(micGainDMR, 1),
     F(micGainFM, 1), F(ecoLevel, 1), F(apo, 1), F(autolockTimer, 1), F(currentZone, 2),
     F(beepVolumeDivider, 1), F(bitfieldOptions[0], 4), F(bitfieldOptions[1], 4),
+#if defined(ENABLE_SIMPLE_MODE)
+    B(BIT_SIMPLE_MODE), F(simpleHomeZone, 2), F(simpleHomeChannel, 2), F(simpleIdleMinutes, 1),
+#endif
 };
 #undef F
+#undef B
 #define PROV_NUM_FIELDS ((int)(sizeof s_fields / sizeof s_fields[0]))
 
 int dmrProvApplySetting(uint8_t field, uint32_t value)
@@ -73,15 +83,22 @@ int dmrProvApplySetting(uint8_t field, uint32_t value)
     uint8_t *p = (uint8_t *)&nonVolatileSettings + s_fields[field].off;
     switch (s_fields[field].width)
     {
+        case 0: settingsSetOptionBit((bitfieldOptions_t)s_fields[field].off, value != 0); break;
         case 1: { uint8_t v = (uint8_t)value; memcpy(p, &v, 1); break; }
         case 2: { uint16_t v = (uint16_t)value; memcpy(p, &v, 2); break; }
         default: { memcpy(p, &value, 4); break; }
     }
+#if defined(ENABLE_SIMPLE_MODE)
+    nonVolatileSettings.simpleValid = SIMPLE_SETTINGS_VALID;
+#endif
     return 1;
 }
 
 int dmrProvApplySettingsSave(void)
 {
+#if defined(ENABLE_SIMPLE_MODE)
+    simpleModeSettingsChanged();   /* a new home or a freshly set bit applies on the next main-loop tick */
+#endif
     return settingsSaveSettings(true) ? 1 : 0;
 }
 
@@ -154,6 +171,7 @@ int dmrProvApplyReadBack(uint8_t op, const uint8_t *body, int bodyLen, uint8_t *
             return CODEPLUG_CHANNEL_DATA_STRUCT_SIZE;
         case DMR_PROV_OP_SET_SETTING:
             if ((body[0] >= PROV_NUM_FIELDS) || (max < 4)) { return 0; }
+            if (s_fields[body[0]].width == 0) { out[0] = settingsIsOptionBitSet((bitfieldOptions_t)s_fields[body[0]].off) ? 1 : 0; return 1; }
             memcpy(out, (uint8_t *)&nonVolatileSettings + s_fields[body[0]].off, s_fields[body[0]].width);
             return s_fields[body[0]].width;
         case DMR_PROV_OP_WRITE_CONTACT:

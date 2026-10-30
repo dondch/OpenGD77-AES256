@@ -42,6 +42,9 @@
 #include "interfaces/gps.h"
 #endif
 #include "user_interface/uiUtilities.h"
+#if defined(ENABLE_SIMPLE_MODE)
+#include "user_interface/uiSimpleMode.h"
+#endif
 
 
 #define STORAGE_MAGIC_NUMBER          0x4780 // NOTE: never use 0xDEADBEEF, it's reserved value
@@ -52,7 +55,11 @@
 // 2026-10-24 when LOG_GPS_DATA became optional: every member after gpsLogMemOffset moved by
 // 4 bytes and an upgraded radio came up with scrambled settings). Bump the magic number, which
 // resets every user's settings, or keep the member, but never let the size drift silently.
+#if defined(ENABLE_SIMPLE_MODE)
+_Static_assert(sizeof(settingsStruct_t) == 0x78, "settingsStruct_t layout changed: saved settings would be misread");
+#else
 _Static_assert(sizeof(settingsStruct_t) == 0x74, "settingsStruct_t layout changed: saved settings would be misread");
+#endif
 #endif
 // 0x4780: voxTailUnits member change, [1..11] (0.001s AKA no Vox Tail, 0.5 up to 5.0 seconds, 500ms steps)
 // 0x477F: new gpsModeAndBaudsIndex and lastTalkerOnScreenTimer members, need to ensure lastTalkerOnScreenTimer equal to zero
@@ -143,6 +150,9 @@ bool settingsLoadSettings(bool reset)
 	// Force Hotspot mode to off for existing RD-5R users.
 #if defined(PLATFORM_RD5R)
 	nonVolatileSettings.hotspotType = HOTSPOT_TYPE_OFF;
+#endif
+#if defined(ENABLE_SIMPLE_MODE)
+	simpleModeSettingsSanitize();
 #endif
 
 	codeplugGetVFO_ChannelData(&settingsVFOChannel[CHANNEL_VFO_A], CHANNEL_VFO_A);
@@ -293,6 +303,12 @@ bool settingsRestoreDefaultSettings(void)
 	nonVolatileSettings.currentIndexInTRxGroupList[SETTINGS_VFO_A_MODE] = 0;
 	nonVolatileSettings.currentIndexInTRxGroupList[SETTINGS_VFO_B_MODE] = 0;
 	nonVolatileSettings.currentZone = 0;
+#if defined(ENABLE_SIMPLE_MODE)
+	nonVolatileSettings.simpleHomeZone = 0;
+	nonVolatileSettings.simpleHomeChannel = 0;
+	nonVolatileSettings.simpleIdleMinutes = 0;
+	nonVolatileSettings.simpleValid = SIMPLE_SETTINGS_VALID;
+#endif
 	nonVolatileSettings.backlightMode =
 #if defined(PLATFORM_GD77S)
 			BACKLIGHT_MODE_NONE;

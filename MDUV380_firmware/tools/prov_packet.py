@@ -132,7 +132,9 @@ def callsign_bytes(callsign):
 SETTING_FIELDS = ["txPowerLevel", "backlightMode", "backLightTimeout", "displayContrast", "scanDelay",
                   "scanModePause", "scanStepTime", "dmrDestinationFilter", "dmrCcTsFilter", "privateCalls",
                   "txTimeoutBeepX5Secs", "micGainDMR", "micGainFM", "ecoLevel", "apo", "autolockTimer",
-                  "currentZone", "beepVolumeDivider", "bitfieldOptions0", "bitfieldOptions1"]
+                  "currentZone", "beepVolumeDivider", "bitfieldOptions0", "bitfieldOptions1",
+                  # ENABLE_SIMPLE_MODE builds only (a build without it answers WRITE_FAILED):
+                  "simpleMode", "simpleHomeZone", "simpleHomeChannel", "simpleIdleMinutes"]
 
 # ---------------- items and jobs ----------------
 def item_channel(index, record56):
