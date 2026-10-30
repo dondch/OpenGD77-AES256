@@ -265,10 +265,15 @@ the HR-C6000 is put back into receive in the same interrupt, the RF chip from th
 that re-initialises the RF chip, and never un-keys once the next call has been loaded (the master
 loads the next PDU ~60 ms after the Response, inside that window; the first on-air build broke
 every second PDU that way). Repeater mode keeps the terminator. This also applies to the SMS
-sender, which shares the harness. Verified on the air 2026-10-30, two fork radios: jobs complete
-in both directions, the signed STATUS verifies, the codeplug is written. The link ACK path sets
-the PA drive for the TX frequency itself (a radio that had not transmitted since boot sent its
-ACK about 31 dB down before that). Progress and the final STATUS (result, codeplug CRC match, battery, git hash) are shown
+sender, which shares the harness. Verified on the air 2026-10-30 at 4bf9714, two fork radios,
+HackRF + DSD-FME: a four-PDU job (channel, zone, setting, COMMIT) completes in about 6 s in both
+directions with every PDU accepted on its first try, PDUs 180 ms apart, the signed STATUS
+verifying and the codeplug written; no terminator bursts on the air; the slave's link ACK 60 ms
+after the start of the master's last block, at full power from boot (the ACK path sets the PA
+drive for the TX frequency itself; before that a radio that had not transmitted since boot
+answered about 31 dB down). A stock TYT on the channel showed nothing and did not beep. A HackRF
+replay of a captured job was rejected outright, and a forged-key job silenced the ACKs after four
+MAC failures. Progress and the final STATUS (result, codeplug CRC match, battery, git hash) are shown
 with `uiNotificationShow()` ("Prov 2345678: sent 17/17, OK, crc match") and are readable over USB
 (`0x9B`) so the bench runs hands-free. The master never writes anything to its own codeplug.
 
