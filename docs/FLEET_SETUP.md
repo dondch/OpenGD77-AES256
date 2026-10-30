@@ -127,6 +127,20 @@ new DMR ID, and, with the bit set, goes to the home channel on the next main-loo
 Order of a mixed job: the handhelds first, then each master provisioned by the other master
 (the base by radio4, radio4 by the base; a radio never writes its own codeplug over the air).
 
+**Over USB instead (the first provisioning, or a master).** The same job can be injected into the
+radio on the bench PC without any RF: it goes through the slave's own receive path under one of its
+configured master IDs, so no VFO bootstrap and no second radio are needed:
+
+```sh
+python3 tools/prov_packet.py replay --key <the pairing key> --master 2345678 --slave <this radio's current ID> \
+        --seq 1 --txn 1 --from-json private/fleet.json --radio radio2 --commit
+```
+
+`--slave` is the ID the radio has *now* (it changes with the identity in the job; the next replay
+uses the new one and a higher `--seq`), `--master` one of `fleet.masters`. The tool prints the slave's
+counters after every PDU (`staged N`, then `commits 1`), and `provision.py show` has the committed
+sequence number. The bench masters were set up this way (2026-10-30).
+
 ## 6. Verify
 
 On the handheld (power-cycle it once; it should come up on the home channel):
