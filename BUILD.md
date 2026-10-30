@@ -70,6 +70,7 @@ blob addresses through the pointer in r1.
 | Flag | What it adds | Code | SRAM | CCM |
 | --- | --- | --- | --- | --- |
 | `ENABLE_DMR_DATA` | Encrypted DMR SMS (Messages menu, store, confirmed delivery) and the raw data-frame TX harness (`tools/dmr_data_tx.py`) | +11,328 | +1,424 | +3,184 |
+| `ENABLE_REMOTE_PROVISION` | Secure remote provisioning over DMR data (see "Remote provisioning"); needs `ENABLE_DMR_DATA` (Makefile error otherwise) | +8,136 | 0 (staging and jobs live in the feature arena) | +444 |
 | `ENABLE_FAST_SCAN` | Sub-30 ms analog scan steps (20/15/10/6 ms) in the "Scan dwell time" setting, also via CHIRP | +4,912 | +240 (the sweep traces live in the feature arena) | 0 |
 | `ENABLE_DUAL_SCREEN` | Anytone-style dual screen, row watch, Dual Watch options menu (see "Dual screen build") | +5,080 | +152 | 0 |
 | `ENABLE_TA2TWC_SCREENS` | The TA2TWC redesigned screens, animations and theme (see "TA2TWC screens build") | +14,412 | +96 | 0 |
@@ -98,6 +99,7 @@ The "about" figures for the three sweep-bench flags were measured on the pre-mer
 | `dev-prof` | `ENABLE_SPECTRUM ENABLE_SCAN_PROFILER ENABLE_KEY_INJECTION` | 16,628 | 10,104 |
 | `dev-aes` | `DMR_AES_DIAG_RX ENABLE_KEY_INJECTION` | 17,284 | 9,476 |
 | `dev-gps` | `ENABLE_GPS_NMEA_LOG` | 13,348 | 10,104 |
+| `dev-prov` | `ENABLE_DMR_DATA ENABLE_REMOTE_PROVISION ENABLE_KEY_INJECTION` | 15,860 | 6,468 |
 
 `full` plus `ENABLE_SPECTRUM` and `ENABLE_KEY_INJECTION` links with 15,300 bytes of SRAM and 6,920 bytes of CCM
 spare, every flag at once (adding `ENABLE_SCAN_PROFILER`) with 14,756 bytes of SRAM, and `ENABLE_DMR_DATA` with
@@ -125,8 +127,83 @@ cd MDUV380_firmware && sh tests/run_all.sh
 Builds and runs every `tests/test_*.c` against the real `crypto/` and `functions/dmr_sms.c` sources with the
 small firmware stand-ins in `tests/stubs/` (each test's header carries its own gcc line). Covers the AES
 primitives, the late-entry MI and EMB codings, the RX bootstrap / PI seeding across call boundaries, the TX
-state at key-up, and the SMS receive path (unconfirmed and confirmed delivery, addressing, retransmissions, the
-acknowledgement, the network's short data, and the stock radio's "DMR format" text, from captured PDUs).
+state at key-up, the SMS receive path (unconfirmed and confirmed delivery, addressing, retransmissions, the
+acknowledgement, the network's short data, and the stock radio's "DMR format" text, from captured PDUs), the
+remote-provisioning crypto against the RFC 4493, SP 800-38B and FIPS-197 vectors and the Python reference, the
+provisioning slave and master through the real SMS reassembler, and the SMS path again with the provisioning
+hooks compiled in (twelve programs).
+
+## Remote provisioning (`ENABLE_REMOTE_PROVISION`)
+A **master** radio running this firmware pushes codeplug writes to **slave** radios running it, over the DMR
+data path, and nothing else on the channel can read, forge, replay or redirect them. The design (PDU layout,
+keys, sequence rules, transaction state machine, flash write path, RAM budget, threat model, test plan) is in
+`MDUV380_firmware/PROVISIONING.md`; this is the summary and the bench procedure.
+
+**What it protects against.** Every PDU is AES-256-CTR encrypted and carries a full 128-bit AES-CMAC over the
+master and slave IDs, the sequence number, the transaction id and the body, under keys derived (SP 800-108)
+from a 256-bit **pairing key** that is loaded into each radio over USB and never travels on the air. A slave
+acts only on PDUs addressed to its own DMR ID from a configured master ID, with a valid MAC and a sequence
+number above the last one it committed (persisted in flash on COMMIT and REBOOT), so a listener learns only
+sizes and IDs, and an active attacker cannot inject, modify, replay, reorder or re-address anything: nothing is
+staged or written before the MAC and sequence checks pass, and a multi-PDU transaction reaches flash only after
+a COMMIT whose item count and CRC32 match the staged image. The slave transmits nothing but the one-burst
+link-layer ACK (to a configured master ID, suspended for 10 s after four MAC failures in a row) and the signed
+STATUS reply to COMMIT, STATUS and REBOOT.
+
+**What it does not protect against.** Anyone with physical access to a paired radio can read the pairing key
+from the codeplug region (CPS, DFU, chip-off): a lost radio is a key compromise, re-key the fleet. One key per
+fleet means any paired radio can act as the master. The link-layer ACK is not authenticated (the ISR cannot run
+AES), so a forged PDU under a configured master ID makes the slave send one ACK burst and nothing else. A
+captured STATUS request can be replayed once per slave power cycle (STATUS does not persist the sequence; the
+only effect is one reply transmission). Jamming is a channel problem, not a protocol one. Two masters sharing a
+pairing key must not share a DMR ID. And DMR data on amateur bands may not be encrypted in many countries:
+this is for licensed commercial/PMR use, like the AES voice.
+
+| Threat | Covered | By |
+| --- | --- | --- |
+| passive listener | yes | AES-256-CTR bodies, derived keys |
+| injection / modification / redirect | yes | 128-bit CMAC over IDs, header and body |
+| replay / reorder, old transactions | yes | per-master monotonic sequence, persisted on commit |
+| spliced or half-delivered transactions | yes | txn id in the MAC, COMMIT count + CRC32, staging in RAM only |
+| replayed STATUS request or COMMIT | once per power cycle, plus at most 2 cached re-sends within 30 s | not persisted (flash wear); the re-send is bounded |
+| forged PDU under a master ID | ACK burst only | hold-off after 4 MAC failures |
+| key extraction with physical access | **no** | key is in the codeplug region |
+| insider holding the fleet key | **no** | per-slave keys are the mitigation |
+
+**Operations (v1).** Write channel N (raw 56-byte record), write zone, set VFO A/B, set a whitelisted
+settings field, store a voice AES key into slot 1..15 (the only way key bytes travel, encrypted like
+everything else), reboot, request STATUS (result, CRC32 of the committed records read back from flash,
+firmware git hash, battery). The pairing key, the master list and the sequence counters cannot be changed
+from the air.
+
+**Bench procedure (one fork radio, one stock TYT, HackRF + DSD-FME).**
+```sh
+cd MDUV380_firmware && make PROFILE=dev-prov          # ENABLE_DMR_DATA + ENABLE_REMOTE_PROVISION + ENABLE_KEY_INJECTION
+python3 tools/provision.py pair --gen-key --master-id 1234567    # the pairing key and the master this radio accepts
+python3 tools/provision.py show                                   # masters, counters, job state (never key bytes)
+# slave path without RF: build a transaction on the host with the same key and inject its bursts over USB
+python3 tools/prov_packet.py replay --key <64hex> --master 1234567 --slave <this radio's ID> --seq 1 --txn 7 \
+    --chan 5 "PMR 1" 446006250 446006250 --zone 2 Fleet 5 --setting txPowerLevel 3 --commit
+# master path: queue a job and capture it; decode the capture from the blocks DSD-FME prints
+python3 tools/provision.py job --slave 7654321 --txn 7 --chan 5 "PMR 1" 446006250 446006250 --wait
+python3 tools/prov_packet.py decode --key <64hex> --master 1234567 --slave 7654321 --blocks blocks.txt
+```
+`replay` reports the slave's counters after every PDU (staged count, commits, failed MACs, rejections) and the
+radio transmits its STATUS reply to the master ID, which the HackRF can capture and `decode --reply` reads.
+The tools never open the CPS screen: while it shows (`C` command 0, which older tools send) the radio is in
+"no mode" and a data call lights the red LED but transmits nothing; `provision.py close-cps` pops it, and
+the job command refuses with "the CPS screen is up" until then. Bench 2026-10-30 (two fork radios): the
+master's data call and the slave's STATUS reply decode in DSD-FME with every CRC-9 passing (the convention
+is confirmed), the stock TYT shows nothing, and the slave's Response PDU arrives 30 ms after the master's last
+block, which is why a data call now ends without terminator bursts and returns to receive at once. At 4bf9714,
+fork-to-fork jobs complete in both directions in about 6 s (every PDU on its first try, link ACK at full power
+from boot), a HackRF replay of a captured job is rejected, and a forged-key job silences the ACKs after four MAC
+failures. The
+job command returns the outcome (OK, codeplug CRC match) once the master gets the slave's signed STATUS. The
+stock TYT on the same channel must show nothing: it drops SAP 9 data without an extended header. DSD-FME's
+CRC-9 verdict on the confirmed blocks is the one thing the host tests cannot settle (the convention is taken from
+DSD-FME's own source, which carries a "need a sample to confirm" note); our receiver ignores the CRC-9, so a
+mismatch would only be cosmetic, and `dmrProvCrc9()` / `prov_packet.crc9()` are the single place to change.
 
 ## Dual screen build
 `ENABLE_DUAL_SCREEN=1` adds the Anytone-style dual screen (two rows, A and B, each a VFO or a zone channel;

@@ -22,6 +22,9 @@
 #include "crypto/dmr_aes.h"
 #include "crypto/dmr_aes_hook.h"
 #include "user_interface/menuSystem.h"   /* uiNotificationShow + NOTIFICATION_* */
+#if defined(ENABLE_REMOTE_PROVISION)
+#include "functions/dmr_prov.h"          /* SAP 9 PDUs without an ENC header are provisioning frames */
+#endif
 #include <stdio.h>
 #include <string.h>
 
@@ -30,6 +33,7 @@
 #define DT_RATE12_DATA   7
 #define DT_RATE34_DATA   8
 /* Data header DPF (byte 0 low nibble, ETSI TS 102 361-1 9.2). */
+#define DPF_RESPONSE     0x01    /* Response packet: the link-layer acknowledgement */
 #define DPF_UNCONFIRMED  0x02
 #define DPF_CONFIRMED    0x03
 #define DPF_PROPRIETARY  0x0F
@@ -482,6 +486,12 @@ done:
 	return ((crc & 0xFF) << 24) | ((crc & 0xFF00) << 8) | ((crc >> 8) & 0xFF00) | ((crc >> 24) & 0xFF);
 }
 
+#if defined(ENABLE_REMOTE_PROVISION)
+/* The provisioning sender frames its PDUs with the same CRCs as an SMS. */
+uint32_t dmrSmsCrc32(const uint8_t *pdu, int len) { return crc32_dmr(pdu, len); }
+void dmrSmsHdrCrc(const uint8_t *h, int len, uint16_t mask, uint8_t out2[2]) { hdr_crc(h, len, mask, out2); }
+#endif
+
 /* ============================ plaintext builder ========================== */
 /* Build the IPv4/UDP/TMS plaintext into out (>=160 B). Returns length. */
 static int build_plaintext(const char *text, int tlen, uint32_t src, uint32_t dst,
@@ -537,7 +547,17 @@ static int build_plaintext(const char *text, int tlen, uint32_t src, uint32_t ds
 }
 
 /* ============================ TX ======================================== */
-/* Burst queue for the data-TX harness: count*(1 type byte + 12 payload). */
+/* Burst queue scratch: count*(1 type byte + 12 payload), filled by dmrSmsSend (and by the
+ * provisioning sender) and copied into dmr_data.c's own queue by dmrDataTxLoad, so it is only
+ * live inside the building call and the two senders share it. */
+static uint8_t s_txQueue[DMR_DATA_MAX_BURSTS * 13];
+
+#if defined(ENABLE_REMOTE_PROVISION)
+uint8_t *dmrSmsBurstQueueScratch(void) { return s_txQueue; }
+uint32_t dmrSmsCrc32(const uint8_t *pdu, int len);
+void dmrSmsHdrCrc(const uint8_t *h, int len, uint16_t mask, uint8_t out2[2]);
+#endif
+
 static int append_burst(uint8_t *q, int n, uint8_t typeByte, const uint8_t *p12)
 {
 	q[n * 13 + 0] = typeByte;
@@ -640,7 +660,7 @@ int dmrSmsSend(const char *text, uint32_t dst, int group, uint8_t keyId)
 	int nblocks = (encrypt ? 1 : 0) + nDataBlocks;  /* +1 ENC ext header block only when encrypting */
 
 	/* 3) build the burst queue: CSBK preamble + 2 headers + rate-1/2 blocks */
-	static uint8_t q[DMR_DATA_MAX_BURSTS * 13];
+	uint8_t *q = s_txQueue;
 	int n = 0;
 	int preamble = 6;
 	int tail = (encrypt ? 2 : 1) + nDataBlocks;  /* headers (Unconfirmed [+ ENC]) + data blocks after CSBKs */
@@ -792,6 +812,12 @@ static volatile uint8_t s_rxPeerBitPad;
  * length and never needed it; the stock radio's DMR format (below) has none. Main RAM. */
 static volatile uint8_t s_rxPoc;
 static volatile uint8_t s_rxPeerPoc;
+#if defined(ENABLE_REMOTE_PROVISION)
+/* The data header's SAP (byte 1 bits 4..7): SAP 9 without an ENC header is a provisioning
+ * frame (PROVISIONING.md §3.1), never an SMS. Main RAM. */
+static volatile uint8_t s_rxSap;
+static volatile uint8_t s_rxPeerSap;
+#endif
 /* The format of the last stored message, for the duplicate rule: its IP identification and
  * TMS sequence mean nothing against a message in another format. */
 #define RX_FMT_IP     0
@@ -929,6 +955,9 @@ static void rxAccumReset(void)
 	s_rxKeyId = 0;   /* CCM is not zeroed at boot: a cleartext PDU must not report a stale key id */
 	s_rxDefined = 0;
 	s_rxPoc = 0;
+#if defined(ENABLE_REMOTE_PROVISION)
+	s_rxSap = 0;
+#endif
 }
 
 /* Terminator / call end: keep an incomplete copy's blocks for a merge with its retransmission
@@ -1020,6 +1049,16 @@ void dmrSmsRxBurst(int rxDataType, const uint8_t *p)
 	if (rxDataType == DT_DATA_HEADER)
 	{
 		uint8_t dpf = (uint8_t)(p[0] & 0x0F);
+#if defined(ENABLE_REMOTE_PROVISION)
+		if (dpf == DPF_RESPONSE)
+		{
+			/* a Response packet (the acknowledgement of a confirmed PDU, no blocks follow):
+			 * the provisioning master waits for it; it is not a new PDU of ours */
+			dmrProvRxResponse(((uint32_t)p[5] << 16) | ((uint32_t)p[6] << 8) | p[7],
+			                  ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 8) | p[4], p[9]);
+			return;
+		}
+#endif
 		if ((dpf == DPF_PROPRIETARY) && (p[1] == 0x10) && ((p[2] & 0x3F) == (0x51 & 0x3F)))
 		{
 			/* Motorola ENC extended header (proprietary DPF, MFID 0x10, ALG05 AES256; byte 0 may
@@ -1053,6 +1092,9 @@ void dmrSmsRxBurst(int rxDataType, const uint8_t *p)
 			s_rxDdFormat = (dpf == DPF_DEFINED_SHORT) ? (uint8_t)(p[8] >> 2) : 0x03;
 			s_rxBitPad = s_rxDefined ? p[9] : 0;
 			s_rxPoc = s_rxDefined ? 0 : (uint8_t)((((p[0] >> 4) & 0x03) << 4) | (p[1] & 0x0F));
+#if defined(ENABLE_REMOTE_PROVISION)
+			s_rxSap = (uint8_t)(p[1] >> 4);
+#endif
 			/* a different packet: the kept copy cannot be a retransmission of this one */
 			if (s_altCount && ((s_rxSrc != s_altSrc) || (s_rxDst != s_altDst) ||
 					((uint8_t)((s_rxConfirmed ? DPF_CONFIRMED : DPF_UNCONFIRMED) | (s_rxGroup ? 0x80 : 0)) != s_altHdr)))
@@ -1132,11 +1174,21 @@ void dmrSmsRxBurst(int rxDataType, const uint8_t *p)
 			s_rxPeerDdFormat = s_rxDdFormat;
 			s_rxPeerBitPad = s_rxBitPad;
 			s_rxPeerPoc = s_rxPoc;
+#if defined(ENABLE_REMOTE_PROVISION)
+			s_rxPeerSap = s_rxSap;
+#endif
 			s_rxReady = 1;          /* main loop will decrypt (or read cleartext) + store */
 			s_diagPdu++;
 			/* Confirmed, individual, to us, response requested: acknowledge it, whatever the
 			 * main loop then makes of the text (a stock radio acknowledges at the link layer). */
-			if ((s_rxConfirmed || s_rxDefined) && !s_rxGroup && s_rxHdrA && (s_rxDst == trxDMRID))
+			if ((s_rxConfirmed || s_rxDefined) && !s_rxGroup && s_rxHdrA && (s_rxDst == trxDMRID)
+#if defined(ENABLE_REMOTE_PROVISION)
+					/* a provisioning PDU (SAP 9, no ENC header) is acknowledged only when it comes
+					 * from a configured master and no failed-MAC hold-off is in force: the MAC
+					 * itself cannot be checked here (no AES in the ISR), PROVISIONING.md §9 */
+					&& ((s_rxSap != DMR_PROV_SAP) || s_rxHaveEnc || (dmrProvIsMasterId(s_rxSrc) && dmrProvAckAllowed()))
+#endif
+					)
 			{
 				/* status = N(S) of a confirmed packet; a short data header has no N(S) (byte 9 is padding) */
 				uint8_t ns = s_rxConfirmed ? (uint8_t)((s_rxHdrSeq >> 4) & 0x07) : 0;
@@ -1186,6 +1238,9 @@ void dmrSmsRxTick(void)
 	int      ddPad = (int)s_rxPeerBitPad / 8;
 	int      poc = s_rxPeerPoc;
 	uint8_t  fmt = RX_FMT_IP;
+#if defined(ENABLE_REMOTE_PROVISION)
+	uint8_t  sap = s_rxPeerSap;
+#endif
 	if (pduLen > (int)sizeof pdu) { pduLen = (int)sizeof pdu; }
 	memcpy(pdu, s_rxPdu, pduLen);
 	s_rxReady = 0;
@@ -1207,6 +1262,13 @@ void dmrSmsRxTick(void)
 				((uint32_t)pdu[pduLen - 2] << 8) | (uint32_t)pdu[pduLen - 1];
 		if (crc32_dmr(pdu, pduLen) != want) { return; }   /* corrupted reassembly -> drop */
 	}
+
+#if defined(ENABLE_REMOTE_PROVISION)
+	/* SAP 9 without an ENC header: a provisioning frame, never an SMS. The module takes it
+	 * (addressing, MAC, sequence, operation) and says so; a SAP 9 PDU that is not framed as
+	 * one (an encrypted SMS whose ENC header burst was lost) falls through to the decoders. */
+	if (!group && !enc && !defined && (sap == DMR_PROV_SAP) && dmrProvRxPdu(pdu, pduLen, peer, dst)) { return; }
+#endif
 
 	char text[DMR_SMS_TEXT_MAX + 1];
 	uint8_t tmp[384];

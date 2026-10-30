@@ -1819,3 +1819,66 @@ int codeplugAPRSGetIndexOfName(char *configName)
 
 	return 0;
 }
+
+#if defined(ENABLE_REMOTE_PROVISION)
+/* ---- raw records for remote provisioning (dmr_prov_apply.c) ------------------------ *
+ * Main-loop task only: EEPROM_Write and SPI_Flash_write sleep with osDelay(). */
+bool codeplugChannelSaveRawDataForIndex(int index, const uint8_t *record)
+{
+	if ((index < CODEPLUG_CHANNELS_MIN) || (index > CODEPLUG_CHANNELS_MAX))
+	{
+		return false;
+	}
+	index--;
+	if (index < 128)
+	{
+		return EEPROM_Write(CODEPLUG_ADDR_CHANNEL_EEPROM + index * CODEPLUG_CHANNEL_DATA_STRUCT_SIZE, (uint8_t *)record, CODEPLUG_CHANNEL_DATA_STRUCT_SIZE);
+	}
+	index -= 128;
+	// same geometry as codeplugChannelSaveDataForIndex: a 16-byte in-use header before each bank of 128
+	int flashWritePos = CODEPLUG_ADDR_CHANNEL_FLASH + 16 * (index / 128) + index * CODEPLUG_CHANNEL_DATA_STRUCT_SIZE;
+	// SPI_Flash_write reads, patches, erases and rewrites the sector(s) itself, a record that straddles two included
+	return SPI_Flash_write(FLASH_ADDRESS_OFFSET + flashWritePos, (uint8_t *)record, CODEPLUG_CHANNEL_DATA_STRUCT_SIZE);
+}
+
+// The CPS allows 68 zones of 80 channels or 250 zones of 16 channels in the zone list.
+static int codeplugZonesMaxIndex(void)
+{
+	return (codeplugChannelsPerZone == 80) ? 68 : 250;
+}
+
+bool codeplugZoneSaveRawDataForIndex(int zoneIndex, const uint8_t *record)
+{
+	int recordSize = 16 + (int)(sizeof(uint16_t) * codeplugChannelsPerZone);
+	uint8_t rec[16 + 2 * 80];
+
+	if ((zoneIndex < 0) || (zoneIndex >= codeplugZonesMaxIndex()))
+	{
+		return false;
+	}
+	memcpy(rec, record, 16);
+	memcpy(rec + 16, record + 16, (size_t)(recordSize - 16)); // the first channelsPerZone entries of the 80-entry record
+	if (!EEPROM_Write(CODEPLUG_ADDR_EX_ZONE_LIST + (zoneIndex * recordSize), rec, recordSize))
+	{
+		return false;
+	}
+	if (((codeplugZonesInUseCache[zoneIndex / 8] >> (zoneIndex % 8)) & 0x01) == 0)
+	{
+		codeplugZonesInUseCache[zoneIndex / 8] |= (uint8_t)(1 << (zoneIndex % 8));
+		return EEPROM_Write(CODEPLUG_ADDR_EX_ZONE_INUSE_PACKED_DATA + (zoneIndex / 8), &codeplugZonesInUseCache[zoneIndex / 8], 1);
+	}
+	return true;
+}
+
+int codeplugZoneGetRawDataForIndex(int zoneIndex, uint8_t *out, int max)
+{
+	int recordSize = 16 + (int)(sizeof(uint16_t) * codeplugChannelsPerZone);
+
+	if ((zoneIndex < 0) || (zoneIndex >= codeplugZonesMaxIndex()) || (max < recordSize))
+	{
+		return 0;
+	}
+	EEPROM_Read(CODEPLUG_ADDR_EX_ZONE_LIST + (zoneIndex * recordSize), out, recordSize);
+	return recordSize;
+}
+#endif // ENABLE_REMOTE_PROVISION

@@ -18,6 +18,10 @@
  *                   satellite screen is a menu reached by stopping it.
  *   SPECTRUM_PROBE  the USB settle-probe sample buffer (ENABLE_SPECTRUM). Lives for one
  *                   CPS command, run from the main task; refused while the arena is held.
+ *   PROVISION       remote provisioning (ENABLE_REMOTE_PROVISION): the slave's staged
+ *                   transaction between its first PDU and COMMIT, or the master's queued
+ *                   job. Claimed and released from the main loop; a slave whose arena is
+ *                   held answers BUSY, a job cannot be queued while it is held.
  *
  * Rules: claim and release from the main task only (nothing here is touched from the
  * HR-C6000 task, the beep task or an interrupt); a claim zeroes the block, so nothing
@@ -42,7 +46,8 @@ typedef enum
 	FEATURE_ARENA_FREE = 0,
 	FEATURE_ARENA_SATELLITE,
 	FEATURE_ARENA_VFO_SWEEP,
-	FEATURE_ARENA_SPECTRUM_PROBE
+	FEATURE_ARENA_SPECTRUM_PROBE,
+	FEATURE_ARENA_PROVISION      /* remote provisioning: the slave's staging image or the master's job (ENABLE_REMOTE_PROVISION) */
 } featureArenaOwner_t;
 
 /* Layout of the VFO sweep's share. 4 columns is what the sweep needs (a sample column plus

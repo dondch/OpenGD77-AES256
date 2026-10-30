@@ -17,6 +17,7 @@ typedef enum
     CODEPLUG_CUSTOM_DATA_TYPE_AES_KEYS,
     CODEPLUG_CUSTOM_DATA_TYPE_MESSAGES,
     CODEPLUG_CUSTOM_DATA_TYPE_MSG_CONFIG,
+    CODEPLUG_CUSTOM_DATA_TYPE_PROVISION,
 } CodeplugCustomDataType_t;
 
 /* Only the member the AES/SMS code reads (the per-channel encrypt byte). */
