@@ -56,9 +56,13 @@ static volatile uint8_t s_burstCount;   /* read in the HR-C6000 ISR (dmrDataTxNe
 static volatile uint8_t s_burstIndex;   /* volatile: dmrDataTxEnd's resets must not reorder  */
 static volatile uint8_t s_dataTxActive; /* past the active=0 store the ISR gates on           */
 static uint16_t         s_txFinishPolls;
+static uint8_t          s_txDoneGrace;
 
 #define DMR_DATA_TX_FINISH_POLL_MS   25
 #define DMR_DATA_TX_FINISH_TIMEOUT   120  // * poll period -> ~3 s safety cap
+#define DMR_DATA_TX_RX_GRACE_POLLS   8    // 200 ms: the receiver is listening for the Response PDU that
+                                          // follows a confirmed data call 30 ms after its last block; the
+                                          // un-key below re-initialises the RF chip, so not before then
 
 /*
  * Un-key the data call cleanly, mirroring a PTT release. The command path keys via
@@ -76,6 +80,11 @@ static void dmrDataTxFinishPoll(void)
 		addTimerCallback(dmrDataTxFinishPoll, DMR_DATA_TX_FINISH_POLL_MS, MENU_ANY, false);
 		return;
 	}
+	if ((s_txFinishPolls < DMR_DATA_TX_FINISH_TIMEOUT) && (s_txDoneGrace++ < DMR_DATA_TX_RX_GRACE_POLLS))
+	{
+		addTimerCallback(dmrDataTxFinishPoll, DMR_DATA_TX_FINISH_POLL_MS, MENU_ANY, false);   // the Response window
+		return;
+	}
 	dmrDataTxEnd();           // ensure the queue/flags are cleared (idempotent)
 	trxDisableTransmission(); // LED_RED off + trxActivateRx() -> back to RX, like PTT release
 }
@@ -85,6 +94,7 @@ static void dmrDataKeyTx(void)
 	s_burstIndex = 0;
 	s_dataTxActive = 1;
 	s_txFinishPolls = 0;
+	s_txDoneGrace = 0;
 	// hrc6000Tick() starts the DMR TX only when isWaking == NONE AND slotState == IDLE.
 	// Clearing isWaking alone isn't enough: on a channel with any stray/recent RX the
 	// timeslot ISR keeps slotState in an RX state until END_TICK_TIMEOUT of silence, so

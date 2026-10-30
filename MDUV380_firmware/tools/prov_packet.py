@@ -264,8 +264,13 @@ def open_radio(port=None):
         sys.exit("radio not found (1fc9:0094); pass --port")
     ser = serial.Serial(port, 115200, timeout=0.6)
     ser.reset_input_buffer()
-    ser.write(bytes([ord("C"), 0])); ser.flush(); time.sleep(0.1); ser.read(64)   # CPS screen on
+    # Never push the CPS screen ('C' 0): while it is up the radio is in RADIO_MODE_NONE and a
+    # data call lights the LED but puts nothing on the air (bench 2026-10-30). The commands
+    # below work from any screen. close_cps() pops a screen an older tool left behind.
     return ser
+
+def close_cps(ser):
+    cmd(ser, bytes([5]), 8, 0.1)
 
 def cmd(ser, payload, expect, wait=0.15):
     """Send 'C' + payload, read `expect` bytes (or until timeout)."""

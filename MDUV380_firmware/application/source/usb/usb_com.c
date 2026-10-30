@@ -1945,7 +1945,11 @@ static void cpsHandleCommand(void)
 			   // loop. Reply: [cmd, 0x9A, int8 result (0 = queued)].
 			{
 				int len = (com_requestbuffer[2] << 8) | com_requestbuffer[3];
-				int r = (len + 4 <= COM_REQUESTBUFFER_SIZE) ? dmrProvJobLoad((const uint8_t *)&com_requestbuffer[4], len) : -4;
+				int r;
+				// The CPS screen ('C' 0) puts the radio in RADIO_MODE_NONE: a data call would
+				// light the LED and transmit nothing (bench 2026-10-30). Refuse until it is closed.
+				if (menuSystemGetCurrentMenuNumber() == UI_CPS) { r = -7; }
+				else { r = (len + 4 <= COM_REQUESTBUFFER_SIZE) ? dmrProvJobLoad((const uint8_t *)&com_requestbuffer[4], len) : -4; }
 				usbComSendBuf[0] = com_requestbuffer[0];
 				usbComSendBuf[1] = 0x9A;
 				usbComSendBuf[2] = (uint8_t)(int8_t)r;

@@ -21,6 +21,7 @@ Needs an ENABLE_REMOTE_PROVISION build (the dev-prov profile). See PROVISIONING.
 
   python3 provision.py cancel        # abandon a running job
   python3 provision.py reload        # re-read the PROV block after a raw flash write
+  python3 provision.py close-cps     # pop the CPS screen if an older tool left it up (no RF while it shows)
 
 JOB_JSON = {"txn": 7, "channels": [{"index": 5, "name": "PMR 1", "rx_hz": 446006250, "tx_hz": 446006250,
             "mode": "digital", "color_code": 1, "timeslot": 1, "contact": 1, "power": 0, "tot": 0,
@@ -101,6 +102,7 @@ def main():
     sub.add_parser("show")
     sub.add_parser("reload")
     sub.add_parser("cancel")
+    sub.add_parser("close-cps", help="pop the CPS screen an older tool left up (the radio transmits nothing while it shows)")
     p = sub.add_parser("job")
     p.add_argument("--slave", type=int, required=True)
     p.add_argument("--txn", type=int, default=1)
@@ -138,7 +140,8 @@ def main():
                 sys.exit("no reply to the job command (is this an ENABLE_REMOTE_PROVISION build?): %r" % r)
             res = struct.unpack("b", r[2:3])[0]
             why = {0: "queued", -1: "busy (a job runs, or the radio is staging as a slave)", -2: "not paired", -3: "arena held by another feature",
-                   -4: "malformed", -5: "too big", -6: "sequence exhausted: re-key"}.get(res, res)
+                   -4: "malformed", -5: "too big", -6: "sequence exhausted: re-key",
+                   -7: "the CPS screen is up on the radio (no RF in that state): run provision.py close-cps"}.get(res, res)
             print("master:", why)
             if res != 0:
                 sys.exit(1)
@@ -164,6 +167,8 @@ def main():
             pp.cmd(ser, bytes([0x9B, 1]), 3, 0.3); print_show(pp.decode_diag(pp.read_diag(ser)))
         elif a.cmd == "cancel":
             pp.cmd(ser, bytes([0x9B, 4]), 3, 0.3); print_show(pp.decode_diag(pp.read_diag(ser)))
+        elif a.cmd == "close-cps":
+            pp.close_cps(ser); print("CPS screen closed")
         elif a.cmd == "pair":
             if a.gen_key:
                 key = os.urandom(32)

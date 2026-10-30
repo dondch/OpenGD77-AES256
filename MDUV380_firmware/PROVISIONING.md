@@ -97,10 +97,10 @@ The CRC-9 follows ETSI TS 102 361-1 B.3.11 in the form DSD-FME checks it (`dmr_d
 `ComputeCrc9Bit`): the register (polynomial x^9+x^6+x^4+x^3+1, initial 0) runs over the 80 data bits
 then the 7 DBSN bits, MSB first; DSD-FME compares the field XOR the rate-1/2 mask 0x0F0 with the
 inverted register, so the field on the air is the register XOR 0x10F (`dmrProvCrc9()` and
-`prov_packet.crc9()` agree byte for byte). **Not verified against a real radio** (DSD-FME's own source
-says "need to find a sample to confirm this"): our receiver ignores the CRC-9 (the HR-C6000 burst
-CRC already gates the block), so a wrong convention costs nothing but a DSD-FME warning; the bench
-check is in §10 and both implementations are one function to change.
+`prov_packet.crc9()` agree byte for byte). Confirmed on the air 2026-10-30: DSD-FME checks every
+rate-1/2 confirmed block and flagged none of the 72 blocks of three captures (it does flag CRC
+errors elsewhere in the same captures), and reassembled the PDUs. Our own receiver still ignores
+the CRC-9 (the HR-C6000 burst CRC already gates the block).
 
 ### 3.2 The provisioning frame (the PDU payload)
 
@@ -256,7 +256,14 @@ seq == the request's seq; verified like a request, master and slave swapped) -> 
 ```
 The link-layer Response PDU is captured by a hook in `dmrSmsRxBurst()` (DPF 1, individual, to our
 ID) and consumed by the master state machine; it is not authenticated (§9) and only advances the
-sender. Progress and the final STATUS (result, codeplug CRC match, battery, git hash) are shown
+sender. On the air (bench 2026-10-30, two fork radios, HackRF) the slave's Response PDU starts
+30 ms after the master's last block ends, in the next slot of the same timeslot. The data-call
+harness used to follow the last block with two terminator bursts and only then return to
+receive, so the master never heard it. In direct mode a data call now ends with its last block:
+the HR-C6000 is put back into receive in the same interrupt, the RF chip from the timer context
+(as the SMS acknowledgement's end does), and `dmrDataTxFinishPoll` waits 200 ms before the un-key
+that re-initialises the RF chip. Repeater mode keeps the terminator. This also applies to the SMS
+sender, which shares the harness. Progress and the final STATUS (result, codeplug CRC match, battery, git hash) are shown
 with `uiNotificationShow()` ("Prov 2345678: sent 17/17, OK, crc match") and are readable over USB
 (`0x9B`) so the bench runs hands-free. The master never writes anything to its own codeplug.
 
