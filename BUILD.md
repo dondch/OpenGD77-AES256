@@ -195,7 +195,10 @@ The tools never open the CPS screen: while it shows (`C` command 0, which older 
 the job command refuses with "the CPS screen is up" until then. Bench 2026-10-30 (two fork radios): the
 master's data call and the slave's STATUS reply decode in DSD-FME with every CRC-9 passing (the convention
 is confirmed), the stock TYT shows nothing, and the slave's Response PDU arrives 30 ms after the master's last
-block, which is why a data call now ends without terminator bursts and returns to receive at once. The
+block, which is why a data call now ends without terminator bursts and returns to receive at once. At 4bf9714,
+fork-to-fork jobs complete in both directions in about 6 s (every PDU on its first try, link ACK at full power
+from boot), a HackRF replay of a captured job is rejected, and a forged-key job silences the ACKs after four MAC
+failures. The
 job command returns the outcome (OK, codeplug CRC match) once the master gets the slave's signed STATUS. The
 stock TYT on the same channel must show nothing: it drops SAP 9 data without an extended header. DSD-FME's
 CRC-9 verdict on the confirmed blocks is the one thing the host tests cannot settle (the convention is taken from
