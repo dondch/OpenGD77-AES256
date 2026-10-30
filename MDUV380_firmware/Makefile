@@ -47,6 +47,14 @@ INCS  = -I. -ICore/Inc \
 #                          AES-256-CTR + AES-CMAC under a USB-loaded pairing key, replay
 #                          protected, staged and committed atomically (PROVISIONING.md).
 #                          Needs ENABLE_DMR_DATA (the data path it rides on).
+#   ENABLE_SIMPLE_MODE     The "dumb radio" rules for a fleet handheld, switched at run time by
+#                          the settings bit BIT_SIMPLE_MODE (over USB or SET_SETTING): boots on a
+#                          home zone and channel, the knob steps that zone only, GREEN is a
+#                          private-call contact list, SK1 the preset messages (long: the inbox),
+#                          the menu and everything that edits the radio wait for the PIN, no VFO,
+#                          scan or quick keys, and after N idle minutes the radio returns to the
+#                          home channel. Needs ENABLE_DMR_DATA (the messages). With the bit clear
+#                          the radio behaves exactly as without the flag (the master radios).
 #   ENABLE_TA2TWC_SCREENS  The TA2TWC screens (josephddt/OpenGD77-TA2TWC): redesigned Channel
 #                          home screen with the S-meter, dBm, signal quality, battery voltage,
 #                          temperature and a signal history, caller and TX screens, telemetry
@@ -77,7 +85,8 @@ INCS  = -I. -ICore/Inc \
 # Build profiles (PROFILE=<name>); `make profiles` lists them:
 #
 #   release    (default) nothing on
-#   full       every feature flag
+#   full       every feature flag but remote provisioning and the simple mode
+#   fleet      full + ENABLE_REMOTE_PROVISION + ENABLE_SIMPLE_MODE  -- the family fleet radios
 #   dev-sweep  ENABLE_SPECTRUM ENABLE_FAST_SCAN ENABLE_KEY_INJECTION  -- sweep / waterfall bench
 #   dev-prof   ENABLE_SPECTRUM ENABLE_SCAN_PROFILER ENABLE_KEY_INJECTION  -- scanprof.py
 #   dev-aes    DMR_AES_DIAG_RX ENABLE_KEY_INJECTION  -- AES RX diagnostics
@@ -89,16 +98,23 @@ INCS  = -I. -ICore/Inc \
 # (all flags: 14,756 B SRAM spare, "full" profile: 15,556 B SRAM / 6,920 B CCM spare), but the
 # dev flags are still meant to be enabled one at a time on top of a feature profile.
 # ---------------------------------------------------------------------------
-FEATURE_FLAGS = ENABLE_DMR_DATA ENABLE_REMOTE_PROVISION ENABLE_FAST_SCAN ENABLE_DUAL_SCREEN ENABLE_TA2TWC_SCREENS
+FEATURE_FLAGS = ENABLE_DMR_DATA ENABLE_REMOTE_PROVISION ENABLE_SIMPLE_MODE ENABLE_FAST_SCAN ENABLE_DUAL_SCREEN ENABLE_TA2TWC_SCREENS
 DEV_FLAGS     = ENABLE_SPECTRUM ENABLE_SCAN_PROFILER ENABLE_KEY_INJECTION ENABLE_GPS_NMEA_LOG \
                 DMR_AES_DIAG_RX DMR_AES_DIAG_PATTERN DMR_AES_DIAG_ENCPAT
 ALL_FLAGS     = $(FEATURE_FLAGS) $(DEV_FLAGS)
-PROFILES      = release full dev-sweep dev-prof dev-aes dev-gps dev-prov
+PROFILES      = release full fleet dev-sweep dev-prof dev-aes dev-gps dev-prov
 
 PROFILE ?= release
 ifeq ($(PROFILE),release)
 else ifeq ($(PROFILE),full)
 ENABLE_DMR_DATA = 1
+ENABLE_FAST_SCAN = 1
+ENABLE_DUAL_SCREEN = 1
+ENABLE_TA2TWC_SCREENS = 1
+else ifeq ($(PROFILE),fleet)
+ENABLE_DMR_DATA = 1
+ENABLE_REMOTE_PROVISION = 1
+ENABLE_SIMPLE_MODE = 1
 ENABLE_FAST_SCAN = 1
 ENABLE_DUAL_SCREEN = 1
 ENABLE_TA2TWC_SCREENS = 1
@@ -133,6 +149,11 @@ endif
 ifeq ($(ENABLE_REMOTE_PROVISION),1)
 ifneq ($(ENABLE_DMR_DATA),1)
 $(error ENABLE_REMOTE_PROVISION=1 needs ENABLE_DMR_DATA=1: provisioning PDUs ride the DMR data path)
+endif
+endif
+ifeq ($(ENABLE_SIMPLE_MODE),1)
+ifneq ($(ENABLE_DMR_DATA),1)
+$(error ENABLE_SIMPLE_MODE=1 needs ENABLE_DMR_DATA=1: the preset messages and the inbox are the DMR SMS)
 endif
 endif
 ifeq ($(DMR_AES_DIAG_PATTERN)$(DMR_AES_DIAG_ENCPAT),11)

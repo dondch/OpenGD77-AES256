@@ -28,5 +28,6 @@ run test_scanreject   -DENABLE_FAST_SCAN -Iapplication/include tests/test_scanre
 run test_prov_crypto  -DENABLE_REMOTE_PROVISION -Iapplication/include -Iapplication/include/crypto tests/test_prov_crypto.c $CMAC $CRYPTO
 run test_prov_rx      -DENABLE_DMR_DATA -DENABLE_REMOTE_PROVISION -Itests/stubs -Iapplication/include tests/test_prov_rx.c application/source/functions/dmr_prov.c application/source/functions/dmr_sms.c $HOOK $CRYPTO $CMAC
 run test_sms_rx_prov  -DENABLE_DMR_DATA -DENABLE_REMOTE_PROVISION -Itests/stubs -Iapplication/include tests/test_sms_rx.c tests/stubs/prov_stubs.c application/source/functions/dmr_sms.c application/source/functions/dmr_prov.c $HOOK $CRYPTO $CMAC
+run test_simple_mode  -DENABLE_SIMPLE_MODE -Iapplication/include tests/test_simple_mode.c application/source/functions/simpleMode.c
 echo "$fails failing test program(s)"
 exit $fails

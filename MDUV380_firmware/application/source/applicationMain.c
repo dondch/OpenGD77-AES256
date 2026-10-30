@@ -56,6 +56,12 @@
 #if defined(ENABLE_REMOTE_PROVISION)
 #include "functions/dmr_prov.h"
 #endif
+#if defined(ENABLE_SIMPLE_MODE)
+#include "user_interface/uiSimpleMode.h"
+#define SIMPLE_MODE_QUICKKEYS_ALLOWED (!simpleModeIsOn())
+#else
+#define SIMPLE_MODE_QUICKKEYS_ALLOWED true
+#endif
 /* Unconditional: the header compiles to nothing without ENABLE_SPECTRUM apart from the
  * no-op SCANPROF_* macros, which the main loop uses whether or not the flag is set. */
 #include "functions/spectrum.h"   /* spectrumTick(), SCANPROF_* profiler macros */
@@ -1160,7 +1166,7 @@ void applicationMainTask(void)
 		function_event = NO_EVENT;
 		keyFunction = NO_EVENT;
 		int currentMenu = menuSystemGetCurrentMenuNumber();
-		if (KEYCHECK_SHORTUP_NUMBER(keys) && (buttons & BUTTON_SK2) && ((currentMenu == UI_VFO_MODE) || (currentMenu == UI_CHANNEL_MODE)))
+		if (KEYCHECK_SHORTUP_NUMBER(keys) && (buttons & BUTTON_SK2) && ((currentMenu == UI_VFO_MODE) || (currentMenu == UI_CHANNEL_MODE)) && SIMPLE_MODE_QUICKKEYS_ALLOWED)
 		{
 			keyFunction = codeplugGetQuickkeyFunctionID(keys.key);
 			int menuFunction = QUICKKEY_MENUID(keyFunction);
@@ -1335,7 +1341,7 @@ void applicationMainTask(void)
 
 
 		// Clear the Quickkey slot on SK2 + longdown 0..9 KEY
-		if (KEYCHECK_LONGDOWN_NUMBER(ev.keys) && BUTTONCHECK_DOWN(&ev, BUTTON_SK2))
+		if (KEYCHECK_LONGDOWN_NUMBER(ev.keys) && BUTTONCHECK_DOWN(&ev, BUTTON_SK2) && SIMPLE_MODE_QUICKKEYS_ALLOWED)
 		{
 			// Only allow quick keys to be cleared on the 2 main screens
 			if (currentMenu == UI_CHANNEL_MODE || currentMenu == UI_VFO_MODE)
@@ -1408,6 +1414,10 @@ void applicationMainTask(void)
 		// APO checkings
 		apoTick((keyOrButtonChanged || (function_event != NO_EVENT) ||
 				(settingsIsOptionBitSet(BIT_APO_WITH_RF) ? (audioAmpGetStatus() & AUDIO_AMP_CHANNEL_RF) : false)));
+
+#if defined(ENABLE_SIMPLE_MODE)
+		simpleModeTick(keyOrButtonChanged || (function_event != NO_EVENT));
+#endif
 
 		// Autolock trigger/reset
 		if (ticksTimerIsEnabled(&autolockTimer))

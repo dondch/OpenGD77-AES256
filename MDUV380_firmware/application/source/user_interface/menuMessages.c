@@ -19,6 +19,7 @@
 #include "user_interface/uiUtilities.h"
 #include "functions/trx.h"
 #include "functions/dmr_sms.h"
+#include "functions/codeplug.h"
 #include "crypto/dmr_aes.h"
 #include "io/keyboard.h"
 #include <string.h>
@@ -26,7 +27,14 @@
 
 #if defined(ENABLE_DMR_DATA)
 
-enum { MSG_HOME = 0, MSG_LIST, MSG_READ, MSG_COMPOSE, MSG_RECIPIENT, MSG_RESULT };
+enum { MSG_HOME = 0, MSG_LIST, MSG_READ, MSG_COMPOSE, MSG_RECIPIENT, MSG_RESULT, MSG_PRESETS, MSG_TARGET };
+
+#if defined(ENABLE_SIMPLE_MODE)
+/* How the simple mode entered this menu (0 = the normal menu entry). While set, RED at the top
+ * of the flow and the end of a send leave the menu instead of showing the Messages home. */
+enum { ENTRY_MENU = 0, ENTRY_PRESETS, ENTRY_INBOX };
+static uint8_t s_entry;
+#endif
 
 static struct
 {
@@ -41,6 +49,9 @@ static struct
 	int8_t   presetIdx;     // last quick-text preset cycled in (-1 = none)
 	int8_t   result;        // dmrSmsSend() return for the result screen
 	uint16_t resultTicks;
+#if defined(ENABLE_SIMPLE_MODE)
+	int8_t   presetSlot;    // the preset chosen in MSG_PRESETS (its slot, 0..9)
+#endif
 } s_msg DMR_AES_CCM;
 
 static void homeUpdate(void);
@@ -50,6 +61,14 @@ static void composeUpdate(void);
 static void recipientUpdate(void);
 static void resultUpdate(void);
 static void homeEvent(uiEvent_t *ev, menuStatus_t *ec);
+static void openFolder(int folder);
+#if defined(ENABLE_SIMPLE_MODE)
+static void presetsUpdate(void);
+static void targetUpdate(void);
+static void presetsEvent(uiEvent_t *ev, menuStatus_t *ec);
+static void targetEvent(uiEvent_t *ev, menuStatus_t *ec);
+static void simpleLeave(void);
+#endif
 static void listEvent(uiEvent_t *ev);
 static void readEvent(uiEvent_t *ev);
 static void composeEvent(uiEvent_t *ev);
@@ -70,6 +89,21 @@ menuStatus_t menuMessages(uiEvent_t *ev, bool isFirstRun)
 	{
 		memset(&s_msg, 0, sizeof s_msg);
 		dmrSmsInit();
+#if defined(ENABLE_SIMPLE_MODE)
+		if (s_entry == ENTRY_PRESETS)
+		{
+			s_msg.view = MSG_PRESETS;
+			menuDataGlobal.currentItemIndex = 0;
+			menuDataGlobal.numItems = dmrSmsPresetCount();
+			presetsUpdate();
+			return (MENU_STATUS_LIST_TYPE | MENU_STATUS_SUCCESS);
+		}
+		if (s_entry == ENTRY_INBOX)
+		{
+			openFolder(0);
+			return (MENU_STATUS_LIST_TYPE | MENU_STATUS_SUCCESS);
+		}
+#endif
 		gotoHome();
 		return (MENU_STATUS_LIST_TYPE | MENU_STATUS_SUCCESS);
 	}
@@ -81,6 +115,9 @@ menuStatus_t menuMessages(uiEvent_t *ev, bool isFirstRun)
 		if (s_msg.resultTicks) { s_msg.resultTicks--; }
 		if ((s_msg.resultTicks == 0) || (ev->hasEvent && (ev->events & KEY_EVENT)))
 		{
+#if defined(ENABLE_SIMPLE_MODE)
+			if (s_entry != ENTRY_MENU) { simpleLeave(); return exitCode; }
+#endif
 			gotoHome();
 			return (MENU_STATUS_LIST_TYPE | MENU_STATUS_SUCCESS);
 		}
@@ -96,10 +133,171 @@ menuStatus_t menuMessages(uiEvent_t *ev, bool isFirstRun)
 			case MSG_READ:      readEvent(ev);            break;
 			case MSG_COMPOSE:   composeEvent(ev);         break;
 			case MSG_RECIPIENT: recipientEvent(ev);       break;
+#if defined(ENABLE_SIMPLE_MODE)
+			case MSG_PRESETS:   presetsEvent(ev, &exitCode); break;
+			case MSG_TARGET:    targetEvent(ev, &exitCode);  break;
+#endif
 		}
 	}
 	return exitCode;
 }
+
+#if defined(ENABLE_SIMPLE_MODE)
+/* ============================ SIMPLE MODE: preset -> target -> send ==================== */
+void menuMessagesOpenPresets(void)
+{
+	s_entry = ENTRY_PRESETS;
+	menuSystemPushNewMenu(MENU_MESSAGES);
+}
+
+void menuMessagesOpenInbox(void)
+{
+	s_entry = ENTRY_INBOX;
+	menuSystemPushNewMenu(MENU_MESSAGES);
+}
+
+static void simpleLeave(void)
+{
+	s_entry = ENTRY_MENU;
+	keypadAlphaEnable = false;
+	menuSystemPopPreviousMenu();
+}
+
+/* The slot of the n-th non-empty preset (presets may have gaps), or -1. */
+static int presetSlotByOrdinal(int n)
+{
+	for (int i = 0; i < DMR_SMS_NUM_PRESETS; i++)
+	{
+		if (dmrSmsPresetGet(i) != NULL)
+		{
+			if (n == 0) { return i; }
+			n--;
+		}
+	}
+	return -1;
+}
+
+static void presetsUpdate(void)
+{
+	int count = dmrSmsPresetCount();
+	displayClearBuf();
+	menuDisplayTitle("Send message");
+	if (count == 0)
+	{
+		displayPrintCentered(56, "(no presets)", FONT_SIZE_3);
+		displayPrintCentered(112, "RED:back", FONT_SIZE_1);
+		displayRender();
+		return;
+	}
+	for (int i = MENU_START_ITERATION_VALUE; i <= MENU_END_ITERATION_VALUE; i++)
+	{
+		int mNum = menuGetMenuOffset(count, i);
+		if (mNum == MENU_OFFSET_BEFORE_FIRST_ENTRY) { continue; }
+		if (mNum == MENU_OFFSET_AFTER_LAST_ENTRY)   { break; }
+		int slot = presetSlotByOrdinal(mNum);
+		menuDisplayEntry(i, mNum, (slot >= 0) ? dmrSmsPresetGet(slot) : "", 0, THEME_ITEM_FG_MENU_ITEM, THEME_ITEM_FG_OPTIONS_VALUE, THEME_ITEM_BG);
+	}
+	displayRender();
+}
+
+static void presetsEvent(uiEvent_t *ev, menuStatus_t *ec)
+{
+	if ((ev->events & KEY_EVENT) == 0) { return; }
+	int count = dmrSmsPresetCount();
+
+	if (KEYCHECK_SHORTUP(ev->keys, KEY_RED)) { simpleLeave(); return; }
+	if (KEYCHECK_PRESS(ev->keys, KEY_DOWN) && count)
+	{
+		menuSystemMenuIncrement(&menuDataGlobal.currentItemIndex, count);
+		*ec |= MENU_STATUS_LIST_TYPE; presetsUpdate(); return;
+	}
+	if (KEYCHECK_PRESS(ev->keys, KEY_UP) && count)
+	{
+		menuSystemMenuDecrement(&menuDataGlobal.currentItemIndex, count);
+		*ec |= MENU_STATUS_LIST_TYPE; presetsUpdate(); return;
+	}
+	if (KEYCHECK_SHORTUP(ev->keys, KEY_GREEN) && count)
+	{
+		int slot = presetSlotByOrdinal(menuDataGlobal.currentItemIndex);
+		if (slot < 0) { return; }
+		s_msg.presetSlot = (int8_t)slot;
+		s_msg.view = MSG_TARGET;
+		menuDataGlobal.currentItemIndex = 0;
+		menuDataGlobal.numItems = 1 + codeplugContactsGetCount(CONTACT_CALLTYPE_PC);
+		targetUpdate();
+		*ec |= MENU_STATUS_LIST_TYPE;
+		return;
+	}
+}
+
+/* Target n: 0 = the channel's own contact (the group), n >= 1 the n-th private contact. */
+static bool targetContact(int n, CodeplugContact_t *c)
+{
+	if (n == 0)
+	{
+		*c = currentContactData;
+		return true;
+	}
+	return codeplugContactGetDataForNumberInType(n, CONTACT_CALLTYPE_PC, c) > 0;
+}
+
+static void targetUpdate(void)
+{
+	char buf[SCREEN_LINE_BUFFER_SIZE + 8], name[17];
+	int count = menuDataGlobal.numItems;
+	displayClearBuf();
+	menuDisplayTitle("Send to");
+	for (int i = MENU_START_ITERATION_VALUE; i <= MENU_END_ITERATION_VALUE; i++)
+	{
+		int mNum = menuGetMenuOffset(count, i);
+		if (mNum == MENU_OFFSET_BEFORE_FIRST_ENTRY) { continue; }
+		if (mNum == MENU_OFFSET_AFTER_LAST_ENTRY)   { break; }
+		CodeplugContact_t c;
+		if (!targetContact(mNum, &c)) { continue; }
+		codeplugUtilConvertBufToString(c.name, name, 16);
+		snprintf(buf, sizeof buf, "%s%s", (mNum == 0) ? "All: " : "", name);
+		menuDisplayEntry(i, mNum, buf, 0, THEME_ITEM_FG_MENU_ITEM, THEME_ITEM_FG_OPTIONS_VALUE, THEME_ITEM_BG);
+	}
+	displayRender();
+}
+
+static void targetEvent(uiEvent_t *ev, menuStatus_t *ec)
+{
+	if ((ev->events & KEY_EVENT) == 0) { return; }
+	int count = menuDataGlobal.numItems;
+
+	if (KEYCHECK_SHORTUP(ev->keys, KEY_RED))
+	{
+		s_msg.view = MSG_PRESETS;
+		menuDataGlobal.currentItemIndex = 0;
+		menuDataGlobal.numItems = dmrSmsPresetCount();
+		presetsUpdate();
+		*ec |= MENU_STATUS_LIST_TYPE;
+		return;
+	}
+	if (KEYCHECK_PRESS(ev->keys, KEY_DOWN))
+	{
+		menuSystemMenuIncrement(&menuDataGlobal.currentItemIndex, count);
+		*ec |= MENU_STATUS_LIST_TYPE; targetUpdate(); return;
+	}
+	if (KEYCHECK_PRESS(ev->keys, KEY_UP))
+	{
+		menuSystemMenuDecrement(&menuDataGlobal.currentItemIndex, count);
+		*ec |= MENU_STATUS_LIST_TYPE; targetUpdate(); return;
+	}
+	if (KEYCHECK_SHORTUP(ev->keys, KEY_GREEN))
+	{
+		CodeplugContact_t c;
+		const char *text = dmrSmsPresetGet(s_msg.presetSlot);
+		if ((text == NULL) || !targetContact(menuDataGlobal.currentItemIndex, &c) || (c.tgNumber == 0)) { return; }
+		s_msg.result = (int8_t)dmrSmsSend(text, c.tgNumber, (c.callType == CONTACT_CALLTYPE_PC) ? 0 : 1, 0);
+		s_msg.view = MSG_RESULT;
+		s_msg.resultTicks = 100;    // 5 s, or any key
+		resultUpdate();
+		return;
+	}
+}
+#endif /* ENABLE_SIMPLE_MODE */
 
 /* ============================ HOME ===================================== */
 static void homeUpdate(void)
@@ -267,7 +465,13 @@ static void listEvent(uiEvent_t *ev)
 	if ((ev->events & KEY_EVENT) == 0) { return; }
 	int count = dmrSmsCount(s_msg.folder);
 
-	if (KEYCHECK_SHORTUP(ev->keys, KEY_RED)) { gotoHome(); return; }
+	if (KEYCHECK_SHORTUP(ev->keys, KEY_RED))
+	{
+#if defined(ENABLE_SIMPLE_MODE)
+		if (s_entry != ENTRY_MENU) { simpleLeave(); return; }
+#endif
+		gotoHome(); return;
+	}
 
 	if (count == 0) { return; }
 

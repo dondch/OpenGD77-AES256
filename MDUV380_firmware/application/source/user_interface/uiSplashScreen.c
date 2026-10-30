@@ -31,6 +31,9 @@
 #include "user_interface/uiLocalisation.h"
 #include "user_interface/uiBootAnimation.h"
 #include "user_interface/uiTelemetry.h"
+#if defined(ENABLE_SIMPLE_MODE)
+#include "user_interface/uiSimpleMode.h"
+#endif
 
 static void updateScreen(bool isFirstRun);
 static void handleEvent(uiEvent_t *ev);
@@ -69,7 +72,11 @@ menuStatus_t uiSplashScreen(uiEvent_t *ev, bool isFirstRun)
 		}
 		else
 		{
+#if defined(ENABLE_SIMPLE_MODE)
+			int pinLength = simpleModeIsOn() ? 0 : codeplugGetPasswordPin(&pinCode);   // the PIN guards the menu, not the power-on
+#else
 			int pinLength = codeplugGetPasswordPin(&pinCode);
+#endif
 
 			if (pinLength != 0)
 			{
@@ -266,6 +273,14 @@ static void handleEvent(uiEvent_t *ev)
 
 static void exitSplashScreen(void)
 {
+#if defined(ENABLE_SIMPLE_MODE)
+	if (simpleModeIsOn())
+	{
+		simpleModeGoHome();
+		menuSystemSetCurrentMenu(UI_CHANNEL_MODE);
+		return;
+	}
+#endif
 	menuSystemSetCurrentMenu(nonVolatileSettings.initialMenuNumber);
 }
 

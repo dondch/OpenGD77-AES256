@@ -523,6 +523,11 @@ menuStatus_t menuAPRSOptions(uiEvent_t *ev, bool isFirstRun);
 menuStatus_t menuAESKeys(uiEvent_t *ev, bool isFirstRun);
 #if defined(ENABLE_DMR_DATA)
 menuStatus_t menuMessages(uiEvent_t *ev, bool isFirstRun);
+#if defined(ENABLE_SIMPLE_MODE)
+/* Simple mode: open the Messages menu on the preset list (send one to the group or a contact) or on the inbox. */
+void menuMessagesOpenPresets(void);
+void menuMessagesOpenInbox(void);
+#endif
 #endif
 #if defined(ENABLE_DUAL_SCREEN)
 menuStatus_t menuDualWatchOptions(uiEvent_t *ev, bool isFirstRun);

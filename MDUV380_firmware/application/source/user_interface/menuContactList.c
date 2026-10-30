@@ -29,6 +29,9 @@
 #include "user_interface/menuSystem.h"
 #include "user_interface/uiUtilities.h"
 #include "user_interface/uiLocalisation.h"
+#if defined(ENABLE_SIMPLE_MODE)
+#include "user_interface/uiSimpleMode.h"
+#endif
 
 typedef enum
 {
@@ -120,6 +123,12 @@ menuStatus_t menuContactList(uiEvent_t *ev, bool isFirstRun)
 				// Otherwise displays DTMF contact list
 				contactListType = ((currentMenu == MENU_CONTACT_LIST) || ((currentMenu == MENU_CONTACT_QUICKLIST) && (trxGetMode() != RADIO_MODE_ANALOG))) ? MENU_CONTACT_LIST_CONTACT_DIGITAL : MENU_CONTACT_LIST_CONTACT_DTMF;
 				contactCallType = CONTACT_CALLTYPE_TG;
+#if defined(ENABLE_SIMPLE_MODE)
+				if (simpleModeIsOn() && (currentMenu == MENU_CONTACT_QUICKLIST))
+				{
+					contactCallType = CONTACT_CALLTYPE_PC;   // GREEN on the channel screen: who to call
+				}
+#endif
 
 				dtmfSequenceReset();
 			}
@@ -341,7 +350,11 @@ static void handleEvent(uiEvent_t *ev)
 			}
 			else if (KEYCHECK_SHORTUP(ev->keys, KEY_HASH))
 			{
-				if (contactListType == MENU_CONTACT_LIST_CONTACT_DIGITAL)
+				if ((contactListType == MENU_CONTACT_LIST_CONTACT_DIGITAL)
+#if defined(ENABLE_SIMPLE_MODE)
+						&& !(simpleModeIsOn() && (menuSystemGetCurrentMenuNumber() == MENU_CONTACT_QUICKLIST))
+#endif
+				)
 				{
 					contactCallType = (contactCallType + 1) % (CONTACT_CALLTYPE_ALL + 1);
 					reloadContactList(contactListType);
@@ -415,6 +428,9 @@ static void handleEvent(uiEvent_t *ev)
 			}
 
 			if ((contactListType == MENU_CONTACT_LIST_CONTACT_DIGITAL) &&
+#if defined(ENABLE_SIMPLE_MODE)
+					!simpleModeIsOn() &&
+#endif
 					(KEYCHECK_SHORTUP_NUMBER(ev->keys) && (BUTTONCHECK_DOWN(ev, BUTTON_SK2))))
 			{
 				saveQuickkeyContactIndex(ev->keys.key, (uint16_t)contactListContactData.NOT_IN_CODEPLUGDATA_indexNumber);
