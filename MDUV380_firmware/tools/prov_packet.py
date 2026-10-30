@@ -210,6 +210,23 @@ def items_to_job_bytes(items):
         out += bytes([it[0]]) + struct.pack("<H", len(it) - 1) + it[1:]
     return out
 
+def readback_crc(items):
+    """CRC32 of what the slave reads back after the commit (its STATUS codeplugCrc): the record of
+    each record op, a setting as 4 bytes LE, nothing for a key. Same walk as dmr_prov.c readBackBytes."""
+    crc = 0
+    for it in items:
+        op, a = it[0], it[1:]
+        if op == pc.OP_WRITE_CHANNEL: b = a[2:2 + 56]
+        elif op == pc.OP_WRITE_ZONE: b = a[1:1 + 176]
+        elif op == pc.OP_SET_VFO: b = a[1:1 + 56]
+        elif op == pc.OP_SET_SETTING: b = a[1:5]
+        elif op == pc.OP_WRITE_CONTACT: b = a[2:2 + CONTACT_LEN]
+        elif op == pc.OP_SET_IDENTITY: b = a[:4 + CALLSIGN_LEN]
+        elif op == pc.OP_WRITE_MSG_PRESETS: b = a[2:2 + PRESET_LEN * a[1]]
+        else: continue
+        crc = zlib.crc32(b, crc)
+    return crc & 0xFFFFFFFF
+
 def commit_item(items):
     return bytes([pc.OP_COMMIT, len(items)]) + struct.pack(">I", zlib.crc32(items_to_job_bytes(items)) & 0xFFFFFFFF)
 
@@ -415,6 +432,8 @@ def decode_diag(d):
             out["masters"].append({"id": mid, "lastSeq": last, "lastSeen": seen})
     out["ownSeqNext"], out["ownSeqReserved"] = struct.unpack(">II", d[76:84])
     j = d[84:]
+    if len(j) >= 40:
+        out["expectedCrc"] = struct.unpack(">I", j[36:40])[0]
     if len(j) >= 36:
         phases = ["idle", "next", "sending", "wait_ack", "wait_status", "done", "failed"]
         out["job"] = {"phase": phases[j[0]] if j[0] < 7 else j[0], "item": j[1], "count": j[2], "tries": j[3],
@@ -424,6 +443,7 @@ def decode_diag(d):
                       "seq": struct.unpack(">I", j[8:12])[0]}
         if j[6]:
             out["job"]["status"] = describe_body(bytes(j[12:12 + 24]))
+            out["job"]["codeplugCrc"] = struct.unpack(">I", j[12 + 6:12 + 10])[0]
     return out
 
 # ---------------- command line ----------------

@@ -209,6 +209,10 @@ def send_job(ser, slave, txn, items, single, wait, dump):
             print("outcome:", j.get("outcome"), ("(%s)" % j["failReason"]) if j.get("outcome") == "failed" else "")
             if "status" in j:
                 print("STATUS:", j["status"])
+                if items:
+                    want = pp.readback_crc(items)
+                    got = j.get("codeplugCrc")
+                    print("codeplug CRC: %s (slave %08x, expected %08x)" % ("match" if got == want else "MISMATCH", got or 0, want))
             return j.get("outcome") == "done"
     sys.exit("timed out waiting for the job")
 

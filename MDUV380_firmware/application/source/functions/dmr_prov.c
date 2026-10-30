@@ -112,6 +112,7 @@ static uint8_t  s_mCurIsCommit DMR_AES_CCM;      /* the PDU in flight is the imp
 static uint32_t s_mSeqCur DMR_AES_CCM;
 static uint32_t s_mT0 DMR_AES_CCM;
 static uint32_t s_mCrc DMR_AES_CCM;              /* CRC32 of the items (what COMMIT carries) */
+static uint32_t s_mReadBackCrc DMR_AES_CCM;      /* CRC32 of the records the slave will read back (what its STATUS carries) */
 static uint8_t  s_mFailReason DMR_AES_CCM;
 static volatile uint8_t  s_ackSeen DMR_AES_CCM;
 static volatile uint8_t  s_ackNs DMR_AES_CCM;
@@ -222,7 +223,7 @@ void dmrProvInit(void)
     s_lastCommitSeq = 0; s_lastCommitMaster = 0; s_lastCodeplugCrc = 0;
     s_failedMacs = 0; s_failStreak = 0; s_holdoffUntil = 0; s_ackInhibit = 0;
     s_rejSeq = s_rejAddr = s_rejFrame = s_commits = s_stagedTotal = 0;
-    s_mLastOutcome = 0; s_mFailReason = 0; s_mSeqCur = 0; s_mT0 = 0; s_mCrc = 0;
+    s_mLastOutcome = 0; s_mFailReason = 0; s_mSeqCur = 0; s_mT0 = 0; s_mCrc = 0; s_mReadBackCrc = 0;
     memset(s_mStatus, 0, sizeof s_mStatus);
     s_stageLastMs = 0; s_txn = 0;
     loadBlock();
@@ -397,6 +398,25 @@ static int stagedArgsOk(uint8_t op, const uint8_t *args, int alen)
         case DMR_PROV_OP_WRITE_MSG_PRESETS:
             return (alen >= 2 + DMR_PROV_PRESET_LEN) && (args[1] >= 1) && (args[1] <= DMR_PROV_PRESETS_PER_PDU) &&
                    (args[0] + args[1] <= DMR_PROV_PRESET_SLOTS) && (alen == 2 + args[1] * DMR_PROV_PRESET_LEN);
+        default: return 0;
+    }
+}
+
+/* The bytes the slave reads back from flash for one item (dmrProvApplyReadBack), so the master
+ * can compute the codeplug CRC its STATUS reply will carry: the record for the record ops, the
+ * value as 4 bytes LE for a setting, nothing for a key. Returns the length, with *p at the bytes. */
+static int readBackBytes(const uint8_t *it, const uint8_t **p, uint8_t *tmp4)
+{
+    const uint8_t *a = it + 3;
+    switch (it[0])
+    {
+        case DMR_PROV_OP_WRITE_CHANNEL: *p = a + 2; return 56;
+        case DMR_PROV_OP_WRITE_ZONE:    *p = a + 1; return 176;
+        case DMR_PROV_OP_SET_VFO:       *p = a + 1; return 56;
+        case DMR_PROV_OP_SET_SETTING:   memcpy(tmp4, a + 1, 4); *p = tmp4; return 4;
+        case DMR_PROV_OP_WRITE_CONTACT: *p = a + 2; return DMR_PROV_CONTACT_LEN;
+        case DMR_PROV_OP_SET_IDENTITY:  *p = a; return 4 + DMR_PROV_CALLSIGN_LEN;
+        case DMR_PROV_OP_WRITE_MSG_PRESETS: *p = a + 2; return a[1] * DMR_PROV_PRESET_LEN;
         default: return 0;
     }
 }
@@ -654,7 +674,7 @@ static void masterFinish(int ok, uint8_t reason)
     if (ok)
     {
         snprintf(note, sizeof note, "Prov %u: OK res %u crc %s", (unsigned)s_mSlave, s_mStatus[1],
-                 (s_mStatusSeen && (rd32be(s_mStatus + 7) == s_mCrc)) ? "match" : "n/a");
+                 (s_mStatusSeen && s_mCommitSent) ? ((rd32be(s_mStatus + 7) == s_mReadBackCrc) ? "match" : "MISMATCH") : "n/a");
     }
     else
     {
@@ -754,7 +774,7 @@ int dmrProvJobLoad(const uint8_t *job, int len)
     if (s_ownSeqNext >= DMR_PROV_SEQ_LIMIT) { return -6; }
     /* validate the item chain and count it */
     int off = 6, count = 0;
-    uint32_t crc = 0;
+    uint32_t crc = 0, rbCrc = 0;
     while (off < len)
     {
         if (off + 3 > len) { return -4; }
@@ -765,6 +785,11 @@ int dmrProvJobLoad(const uint8_t *job, int len)
         else if (((op == DMR_PROV_OP_STATUS) || (op == DMR_PROV_OP_REBOOT) || (op == DMR_PROV_OP_ABORT)) && (alen == 0)) { }
         else { return -4; }
         crc = crc32_ieee(crc, job + off, 3 + alen);
+        {
+            const uint8_t *p; uint8_t tmp4[4];
+            int n = readBackBytes(job + off, &p, tmp4);
+            if (n > 0) { rbCrc = crc32_ieee(rbCrc, p, n); }
+        }
         off += 3 + alen;
         count++;
     }
@@ -776,7 +801,7 @@ int dmrProvJobLoad(const uint8_t *job, int len)
     s_mSlave = rd32le(job) & 0x00FFFFFFu;
     s_mTxn = job[4]; s_mFlags = job[5];
     s_mItemOff = 6; s_mItemIdx = 0; s_mItemCount = (uint8_t)count;
-    s_mCrc = crc;
+    s_mCrc = crc; s_mReadBackCrc = rbCrc;
     s_mCommitSent = 0; s_mCurIsCommit = 0; s_mTries = 0;
     s_ackSeen = 0; s_mStatusSeen = 0; s_mLastOutcome = 0; s_mFailReason = 0;
     memset(s_mStatus, 0, sizeof s_mStatus);
@@ -791,12 +816,13 @@ void dmrProvJobCancel(void)
 
 int dmrProvJobStatus(uint8_t *out, int max)
 {
-    int n = 12 + DMR_PROV_STATUS_BODY_LEN;
+    int n = 12 + DMR_PROV_STATUS_BODY_LEN + 4;
     if (max < n) { return 0; }
     out[0] = s_mPhase; out[1] = s_mItemIdx; out[2] = s_mItemCount; out[3] = s_mTries;
     out[4] = s_mLastOutcome; out[5] = s_mFailReason; out[6] = s_mStatusSeen; out[7] = s_ackSeen ? (uint8_t)(0x80 | s_ackNs) : 0;
     wr32be(out + 8, s_mSeqCur);
     memcpy(out + 12, s_mStatus, DMR_PROV_STATUS_BODY_LEN);
+    wr32be(out + 12 + DMR_PROV_STATUS_BODY_LEN, s_mReadBackCrc);   /* what the slave's codeplugCrc must equal */
     return n;
 }
 
