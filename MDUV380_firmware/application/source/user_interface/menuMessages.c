@@ -305,7 +305,7 @@ static void targetEvent(uiEvent_t *ev, menuStatus_t *ec)
 		if ((text == NULL) || (text[0] == 0) || !targetContact(menuDataGlobal.currentItemIndex, &c) || (c.tgNumber == 0)) { return; }
 		s_msg.result = (int8_t)dmrSmsSend(text, c.tgNumber, (c.callType == CONTACT_CALLTYPE_PC) ? 0 : 1, 0);
 		s_msg.view = MSG_RESULT;
-		s_msg.resultTicks = 100;    // 5 s, or any key
+		s_msg.resultTicks = 600;    // ~30 s like the stock flow, or any key: long enough to read a failure
 		resultUpdate();
 		return;
 	}
