@@ -218,8 +218,9 @@ mismatch would only be cosmetic, and `dmrProvCrc9()` / `prov_packet.crc9()` are 
 stock radio, which is how the master radios run the same image. On: the radio boots into channel mode on the home
 zone and channel (settings `simpleHomeZone`, `simpleHomeChannel`, the codeplug channel index), the knob and the
 keypad arrows step through that zone only, GREEN opens the private-call contacts (select, PTT calls; the target drops back
-to the group 60 s after the last over, or on RED), SK1 opens the preset messages (then the group or one contact,
-GREEN sends), SK1 held the inbox, GREEN held the menu behind the codeplug PIN (which is then not asked at power-on),
+to the group 60 s after the last over, or on RED), SK1 opens the inbox, SK1 held the send list (the presets and
+"Write message", then the group or one contact, GREEN sends), GREEN held the menu behind the codeplug PIN (which
+is then not asked at power-on),
 and after `simpleIdleMinutes` away from the home channel without a key or PTT the radio returns to it. RED never
 enters the VFO, SK2 combinations, digits, quick keys, scan, the orange button, talkgroup and squelch steps do
 nothing; volume, backlight and the battery indicator stay. The PIN box closes on RED (the stock boot-PIN box

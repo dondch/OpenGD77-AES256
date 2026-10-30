@@ -65,6 +65,9 @@ static void openFolder(int folder);
 #if defined(ENABLE_SIMPLE_MODE)
 static void presetsUpdate(void);
 static void targetUpdate(void);
+static void openTargets(void);
+static int  sendListCount(void);
+static void startCompose(void);
 static void presetsEvent(uiEvent_t *ev, menuStatus_t *ec);
 static void targetEvent(uiEvent_t *ev, menuStatus_t *ec);
 static void simpleLeave(void);
@@ -94,7 +97,7 @@ menuStatus_t menuMessages(uiEvent_t *ev, bool isFirstRun)
 		{
 			s_msg.view = MSG_PRESETS;
 			menuDataGlobal.currentItemIndex = 0;
-			menuDataGlobal.numItems = dmrSmsPresetCount();
+			menuDataGlobal.numItems = sendListCount();
 			presetsUpdate();
 			return (MENU_STATUS_LIST_TYPE | MENU_STATUS_SUCCESS);
 		}
@@ -177,54 +180,64 @@ static int presetSlotByOrdinal(int n)
 	return -1;
 }
 
+/* The send list: every preset, then "Write message" (the compose screen). */
+static int sendListCount(void)
+{
+	return dmrSmsPresetCount() + 1;
+}
+
 static void presetsUpdate(void)
 {
-	int count = dmrSmsPresetCount();
+	int count = sendListCount();
 	displayClearBuf();
 	menuDisplayTitle("Send message");
-	if (count == 0)
-	{
-		displayPrintCentered(56, "(no presets)", FONT_SIZE_3);
-		displayPrintCentered(112, "RED:back", FONT_SIZE_1);
-		displayRender();
-		return;
-	}
 	for (int i = MENU_START_ITERATION_VALUE; i <= MENU_END_ITERATION_VALUE; i++)
 	{
 		int mNum = menuGetMenuOffset(count, i);
 		if (mNum == MENU_OFFSET_BEFORE_FIRST_ENTRY) { continue; }
 		if (mNum == MENU_OFFSET_AFTER_LAST_ENTRY)   { break; }
 		int slot = presetSlotByOrdinal(mNum);
-		menuDisplayEntry(i, mNum, (slot >= 0) ? dmrSmsPresetGet(slot) : "", 0, THEME_ITEM_FG_MENU_ITEM, THEME_ITEM_FG_OPTIONS_VALUE, THEME_ITEM_BG);
+		menuDisplayEntry(i, mNum, (slot >= 0) ? dmrSmsPresetGet(slot) : "Write message...", 0, THEME_ITEM_FG_MENU_ITEM, THEME_ITEM_FG_OPTIONS_VALUE, THEME_ITEM_BG);
 	}
 	displayRender();
+}
+
+static void openTargets(void)
+{
+	s_msg.view = MSG_TARGET;
+	menuDataGlobal.currentItemIndex = 0;
+	menuDataGlobal.numItems = 1 + codeplugContactsGetCount(CONTACT_CALLTYPE_PC);
+	keypadAlphaEnable = false;
+	targetUpdate();
 }
 
 static void presetsEvent(uiEvent_t *ev, menuStatus_t *ec)
 {
 	if ((ev->events & KEY_EVENT) == 0) { return; }
-	int count = dmrSmsPresetCount();
+	int count = sendListCount();
 
 	if (KEYCHECK_SHORTUP(ev->keys, KEY_RED)) { simpleLeave(); return; }
-	if (KEYCHECK_PRESS(ev->keys, KEY_DOWN) && count)
+	if (KEYCHECK_PRESS(ev->keys, KEY_DOWN))
 	{
 		menuSystemMenuIncrement(&menuDataGlobal.currentItemIndex, count);
 		*ec |= MENU_STATUS_LIST_TYPE; presetsUpdate(); return;
 	}
-	if (KEYCHECK_PRESS(ev->keys, KEY_UP) && count)
+	if (KEYCHECK_PRESS(ev->keys, KEY_UP))
 	{
 		menuSystemMenuDecrement(&menuDataGlobal.currentItemIndex, count);
 		*ec |= MENU_STATUS_LIST_TYPE; presetsUpdate(); return;
 	}
-	if (KEYCHECK_SHORTUP(ev->keys, KEY_GREEN) && count)
+	if (KEYCHECK_SHORTUP(ev->keys, KEY_GREEN))
 	{
 		int slot = presetSlotByOrdinal(menuDataGlobal.currentItemIndex);
-		if (slot < 0) { return; }
+		if (slot < 0)
+		{
+			s_msg.presetSlot = -1;   /* the compose buffer: the stock compose screen, then the same targets */
+			startCompose();
+			return;
+		}
 		s_msg.presetSlot = (int8_t)slot;
-		s_msg.view = MSG_TARGET;
-		menuDataGlobal.currentItemIndex = 0;
-		menuDataGlobal.numItems = 1 + codeplugContactsGetCount(CONTACT_CALLTYPE_PC);
-		targetUpdate();
+		openTargets();
 		*ec |= MENU_STATUS_LIST_TYPE;
 		return;
 	}
@@ -270,7 +283,7 @@ static void targetEvent(uiEvent_t *ev, menuStatus_t *ec)
 	{
 		s_msg.view = MSG_PRESETS;
 		menuDataGlobal.currentItemIndex = 0;
-		menuDataGlobal.numItems = dmrSmsPresetCount();
+		menuDataGlobal.numItems = sendListCount();
 		presetsUpdate();
 		*ec |= MENU_STATUS_LIST_TYPE;
 		return;
@@ -288,8 +301,8 @@ static void targetEvent(uiEvent_t *ev, menuStatus_t *ec)
 	if (KEYCHECK_SHORTUP(ev->keys, KEY_GREEN))
 	{
 		CodeplugContact_t c;
-		const char *text = dmrSmsPresetGet(s_msg.presetSlot);
-		if ((text == NULL) || !targetContact(menuDataGlobal.currentItemIndex, &c) || (c.tgNumber == 0)) { return; }
+		const char *text = (s_msg.presetSlot < 0) ? s_msg.compose : dmrSmsPresetGet(s_msg.presetSlot);
+		if ((text == NULL) || (text[0] == 0) || !targetContact(menuDataGlobal.currentItemIndex, &c) || (c.tgNumber == 0)) { return; }
 		s_msg.result = (int8_t)dmrSmsSend(text, c.tgNumber, (c.callType == CONTACT_CALLTYPE_PC) ? 0 : 1, 0);
 		s_msg.view = MSG_RESULT;
 		s_msg.resultTicks = 100;    // 5 s, or any key
@@ -621,12 +634,30 @@ static void composeEvent(uiEvent_t *ev)
 
 	if (KEYCHECK_SHORTUP(ev->keys, KEY_RED))
 	{
+#if defined(ENABLE_SIMPLE_MODE)
+		if (s_entry == ENTRY_PRESETS)
+		{
+			keypadAlphaEnable = false;
+			s_msg.view = MSG_PRESETS;
+			menuDataGlobal.currentItemIndex = 0;
+			menuDataGlobal.numItems = sendListCount();
+			presetsUpdate();
+			return;
+		}
+#endif
 		gotoHome(); return;
 	}
 	if (KEYCHECK_SHORTUP(ev->keys, KEY_GREEN))
 	{
 		if (strlen(s_msg.compose) == 0) { return; }
 		keypadAlphaEnable = false;
+#if defined(ENABLE_SIMPLE_MODE)
+		if (s_entry == ENTRY_PRESETS)
+		{
+			openTargets();   /* the group or one contact, as for a preset */
+			return;
+		}
+#endif
 		prefillRecipient();
 		s_msg.view = MSG_RECIPIENT;
 		recipientUpdate();
