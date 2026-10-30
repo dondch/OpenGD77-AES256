@@ -443,7 +443,7 @@ def decode_diag(d):
                       "seq": struct.unpack(">I", j[8:12])[0]}
         if j[6]:
             out["job"]["status"] = describe_body(bytes(j[12:12 + 24]))
-            out["job"]["codeplugCrc"] = struct.unpack(">I", j[12 + 6:12 + 10])[0]
+            out["job"]["codeplugCrc"] = struct.unpack(">I", j[12 + 7:12 + 11])[0]   # op result txn lastSeq(4) crc(4)
     return out
 
 # ---------------- command line ----------------
