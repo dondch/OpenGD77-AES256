@@ -2484,6 +2484,15 @@ static void hrc6000DataTxStartBurst(void)
 static void hrc6000DataAckStart(const uint8_t *hdr12)
 {
 	audioAmpDisable(AUDIO_AMP_CHANNEL_RF);
+	// The acknowledgement keys the RF from the chip's TX interrupt without going through
+	// trxSetTX(), so the PA drive was whatever the last transmission left: a radio that had
+	// not transmitted since boot sent its ACK ~31 dB down (bench 2026-10-30). Set the drive
+	// for the TX frequency when it is not already set for it, as trxSetTX() would.
+	if ((currentRadioDevice->lastSetTxFrequency != currentRadioDevice->currentTxFrequency) ||
+			(currentRadioDevice->lastSetTxPowerLevel != currentRadioDevice->txPowerLevel))
+	{
+		trxConfigurePA_DAC_ForFrequencyBand();
+	}
 	SPI0WritePageRegByteArray(0x02, 0x00, (uint8_t *)hdr12, LC_DATA_LENGTH);
 	SPI0WritePageRegByte(0x04, 0x50, 0x60);    // Data Header, Data, LCSS=00
 	SPI0WritePageRegByte(0x04, 0x41, 0x80);    // transmit during next timeslot

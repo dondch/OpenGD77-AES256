@@ -262,8 +262,13 @@ harness used to follow the last block with two terminator bursts and only then r
 receive, so the master never heard it. In direct mode a data call now ends with its last block:
 the HR-C6000 is put back into receive in the same interrupt, the RF chip from the timer context
 (as the SMS acknowledgement's end does), and `dmrDataTxFinishPoll` waits 200 ms before the un-key
-that re-initialises the RF chip. Repeater mode keeps the terminator. This also applies to the SMS
-sender, which shares the harness. Progress and the final STATUS (result, codeplug CRC match, battery, git hash) are shown
+that re-initialises the RF chip, and never un-keys once the next call has been loaded (the master
+loads the next PDU ~60 ms after the Response, inside that window; the first on-air build broke
+every second PDU that way). Repeater mode keeps the terminator. This also applies to the SMS
+sender, which shares the harness. Verified on the air 2026-10-30, two fork radios: jobs complete
+in both directions, the signed STATUS verifies, the codeplug is written. The link ACK path sets
+the PA drive for the TX frequency itself (a radio that had not transmitted since boot sent its
+ACK about 31 dB down before that). Progress and the final STATUS (result, codeplug CRC match, battery, git hash) are shown
 with `uiNotificationShow()` ("Prov 2345678: sent 17/17, OK, crc match") and are readable over USB
 (`0x9B`) so the bench runs hands-free. The master never writes anything to its own codeplug.
 
