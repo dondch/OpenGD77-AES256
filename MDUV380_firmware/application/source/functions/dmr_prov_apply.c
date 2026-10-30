@@ -176,10 +176,12 @@ int dmrProvApplyReadBack(uint8_t op, const uint8_t *body, int bodyLen, uint8_t *
             EEPROM_Read(CODEPLUG_ADDR_VFO_A_CHANNEL + (CODEPLUG_CHANNEL_DATA_STRUCT_SIZE * (int)body[0]), out, CODEPLUG_CHANNEL_DATA_STRUCT_SIZE);
             return CODEPLUG_CHANNEL_DATA_STRUCT_SIZE;
         case DMR_PROV_OP_SET_SETTING:
+            /* always 4 bytes LE, zero-extended, so the master can compute the CRC without knowing the field's width */
             if ((body[0] >= PROV_NUM_FIELDS) || (max < 4)) { return 0; }
-            if (s_fields[body[0]].width == 0) { out[0] = settingsIsOptionBitSet((bitfieldOptions_t)s_fields[body[0]].off) ? 1 : 0; return 1; }
+            memset(out, 0, 4);
+            if (s_fields[body[0]].width == 0) { out[0] = settingsIsOptionBitSet((bitfieldOptions_t)s_fields[body[0]].off) ? 1 : 0; return 4; }
             memcpy(out, (uint8_t *)&nonVolatileSettings + s_fields[body[0]].off, s_fields[body[0]].width);
-            return s_fields[body[0]].width;
+            return 4;
         case DMR_PROV_OP_WRITE_CONTACT:
         {
             uint16_t index = (uint16_t)((body[0] << 8) | body[1]);

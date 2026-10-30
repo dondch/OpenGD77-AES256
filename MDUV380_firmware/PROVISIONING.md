@@ -176,8 +176,13 @@ unchanged (one counter per radio, whatever its ID), so no re-key is needed.
 
 STATUS_REPLY body: `result(1) || txn(1) || lastSeq(4) || codeplugCrc(4) || gitHash(8 ASCII) ||
 batteryCentivolts(2) || staged(1) || failedMacs(2)`. `codeplugCrc` is the CRC32 of the records of
-the last committed transaction **read back from flash** after the write (the master compares it
-with the CRC of the image it sent), 0 when nothing was committed since boot. Result codes:
+the last committed transaction **read back from flash** after the write, 0 when nothing was
+committed since boot: the 56-byte channel or VFO record, the 176-byte zone record, the 24-byte
+contact record, the DMR ID (4 BE) and callsign (8), the preset rows, a setting as its value in
+4 bytes LE (zero-extended, whatever the field's width), nothing for a key. The master computes
+the same CRC from the job it sent (`readBackBytes()` in `dmr_prov.c`, `prov_packet.readback_crc()`
+on the host) and reports "crc match" or "crc MISMATCH" (bench 2026-10-30: before this it compared
+against the CRC of the item chain, which the reply never carries, so "match" could not show). Result codes:
 `0 OK, 1 BAD_OP, 2 BAD_SEQ (reply only ever says this for a stale COMMIT), 3 TXN_MISMATCH,
 4 CRC_MISMATCH, 5 NO_SPACE, 6 BUSY (arena held by another feature), 7 WRITE_FAILED, 8 TIMEOUT`.
 

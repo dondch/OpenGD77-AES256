@@ -828,9 +828,11 @@ static void testMaster(void)
     dmrProvTick();
     dmrProvJobStatus(st, sizeof st);
     check(st[0] == 4, "waiting for the STATUS reply");
-    /* the slave's reply (built as the slave builds it), played into the master's RX path */
+    /* the slave's reply (built as the slave builds it), played into the master's RX path; its
+     * codeplug CRC is over the two 56-byte records read back, which the master computed too */
+    uint32_t rbCrc = crc32_ieee(0, job + 6 + 3 + 2, 56); rbCrc = crc32_ieee(rbCrc, job + 6 + 3 + 58 + 3 + 2, 56);
     uint8_t body[DMR_PROV_STATUS_BODY_LEN] = { DMR_PROV_OP_STATUS_REPLY, DMR_PROV_RES_OK, 3 };
-    wr32be(body + 3, 3); wr32be(body + 7, crc); memcpy(body + 11, "abc1234", 7); body[19] = 3; body[20] = 0x0D; body[21] = 2;
+    wr32be(body + 3, 3); wr32be(body + 7, rbCrc); memcpy(body + 11, "abc1234", 7); body[19] = 3; body[20] = 0x0D; body[21] = 2;
     uint8_t rp[DMR_PROV_PDU_MAX], rq[DMR_DATA_MAX_BURSTS * 13];
     int rl = dmrProvBuildPdu(MASTER_ID, SLAVE_ID, 3, 3, 1, body, sizeof body, rp, sizeof rp);
     /* a reply under the wrong seq first: ignored */
@@ -842,8 +844,9 @@ static void testMaster(void)
     check(st[0] == 4 && st[6] == 0, "a STATUS reply for another seq is ignored");
     play(rq, rn);
     dmrProvJobStatus(st, sizeof st);
-    check(st[0] == 0 && st[4] == 1 && st[6] == 1 && st[12 + 1] == DMR_PROV_RES_OK && rd32be(st + 12 + 7) == crc, "the signed STATUS completes the job: outcome OK, fields readable over USB");
-    check(strstr(lastNote, "OK") != NULL && strstr(lastNote, "match") != NULL && !s_arenaHeld, "the UI shows OK and the codeplug CRC match");
+    check(st[0] == 0 && st[4] == 1 && st[6] == 1 && st[12 + 1] == DMR_PROV_RES_OK && rd32be(st + 12 + 7) == rbCrc && rd32be(st + 12 + DMR_PROV_STATUS_BODY_LEN) == rbCrc,
+          "the signed STATUS completes the job: outcome OK, fields and the expected read-back CRC readable over USB");
+    check(strstr(lastNote, "OK") != NULL && strstr(lastNote, "crc match") != NULL && !s_arenaHeld, "the UI shows OK and the codeplug CRC match");
     /* a single-shot STATUS job */
     uint8_t sjob[9]; wr32le(sjob, SLAVE_ID); sjob[4] = 1; sjob[5] = 0x02; sjob[6] = DMR_PROV_OP_STATUS; sjob[7] = 0; sjob[8] = 0;
     check(dmrProvJobLoad(sjob, 9) == 0, "a STATUS job is queued");
