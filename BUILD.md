@@ -53,8 +53,11 @@ turns on, and `make REPRODUCIBLE=1` pins the compiled-in build time to the commi
 commit are byte-identical.
 
 Main SRAM (128 KB) and CCM RAM (64 KB) are the binding constraints, not flash: the release build has 17,452 bytes
-of SRAM and 10,104 bytes of CCM spare, and about 111 KB of flash before the fixed AMBE codec slot. Costs below are
-measured on this tree with arm-none-eabi-gcc 14.2.1 at -Os (2026-10-24) and are deltas against the release build.
+of SRAM and 10,096 bytes of CCM spare, and about 111 KB of flash before the fixed AMBE codec slot. Costs below are
+measured on this tree with arm-none-eabi-gcc 14.2.1 at -Os (2026-10-24; `ENABLE_REMOTE_PROVISION` and
+`ENABLE_SIMPLE_MODE` re-measured 2026-10-30 against the builds they stack on: provisioning over
+`ENABLE_DMR_DATA ENABLE_KEY_INJECTION`, the simple mode over `full` + provisioning) and are deltas against the
+release build.
 
 Features that are only live while their screen or command runs share one 11,904-byte SRAM block, the **feature
 arena** (`application/source/functions/featureArena.c`): the satellite screen's Keps table owns it while that
@@ -70,7 +73,8 @@ blob addresses through the pointer in r1.
 | Flag | What it adds | Code | SRAM | CCM |
 | --- | --- | --- | --- | --- |
 | `ENABLE_DMR_DATA` | Encrypted DMR SMS (Messages menu, store, confirmed delivery) and the raw data-frame TX harness (`tools/dmr_data_tx.py`) | +11,328 | +1,424 | +3,184 |
-| `ENABLE_REMOTE_PROVISION` | Secure remote provisioning over DMR data (see "Remote provisioning"); needs `ENABLE_DMR_DATA` (Makefile error otherwise) | +8,136 | 0 (staging and jobs live in the feature arena) | +444 |
+| `ENABLE_REMOTE_PROVISION` | Secure remote provisioning over DMR data (see "Remote provisioning"); needs `ENABLE_DMR_DATA` (Makefile error otherwise) | +8,976 | 0 (staging and jobs live in the feature arena) | +448 |
+| `ENABLE_SIMPLE_MODE` | The "dumb radio" rules for a fleet handheld, on when the settings bit is set (see "Simple mode build"); needs `ENABLE_DMR_DATA` | +2,504 | +24 | +4 |
 | `ENABLE_FAST_SCAN` | Sub-30 ms analog scan steps (20/15/10/6 ms) in the "Scan dwell time" setting, also via CHIRP | +4,912 | +240 (the sweep traces live in the feature arena) | 0 |
 | `ENABLE_DUAL_SCREEN` | Anytone-style dual screen, row watch, Dual Watch options menu (see "Dual screen build") | +5,080 | +152 | 0 |
 | `ENABLE_TA2TWC_SCREENS` | The TA2TWC redesigned screens, animations and theme (see "TA2TWC screens build") | +14,412 | +96 | 0 |
@@ -93,13 +97,14 @@ The "about" figures for the three sweep-bench flags were measured on the pre-mer
 
 | Profile | Flags | SRAM spare | CCM spare |
 | --- | --- | --- | --- |
-| `release` (default) | none | 17,452 | 10,104 |
-| `full` | all four feature flags | 15,556 | 6,920 |
+| `release` (default) | none | 17,452 | 10,096 |
+| `full` | `ENABLE_DMR_DATA ENABLE_FAST_SCAN ENABLE_DUAL_SCREEN ENABLE_TA2TWC_SCREENS` | 15,556 | 6,912 |
+| `fleet` | `full` + `ENABLE_REMOTE_PROVISION ENABLE_SIMPLE_MODE`: the family fleet image, masters and handhelds alike | 15,536 | 6,460 |
 | `dev-sweep` | `ENABLE_SPECTRUM ENABLE_FAST_SCAN ENABLE_KEY_INJECTION` | 16,956 | 10,104 |
 | `dev-prof` | `ENABLE_SPECTRUM ENABLE_SCAN_PROFILER ENABLE_KEY_INJECTION` | 16,628 | 10,104 |
 | `dev-aes` | `DMR_AES_DIAG_RX ENABLE_KEY_INJECTION` | 17,284 | 9,476 |
 | `dev-gps` | `ENABLE_GPS_NMEA_LOG` | 13,348 | 10,104 |
-| `dev-prov` | `ENABLE_DMR_DATA ENABLE_REMOTE_PROVISION ENABLE_KEY_INJECTION` | 15,860 | 6,468 |
+| `dev-prov` | `ENABLE_DMR_DATA ENABLE_REMOTE_PROVISION ENABLE_KEY_INJECTION` | 15,860 | 6,464 |
 
 `full` plus `ENABLE_SPECTRUM` and `ENABLE_KEY_INJECTION` links with 15,300 bytes of SRAM and 6,920 bytes of CCM
 spare, every flag at once (adding `ENABLE_SCAN_PROFILER`) with 14,756 bytes of SRAM, and `ENABLE_DMR_DATA` with
@@ -131,7 +136,8 @@ state at key-up, the SMS receive path (unconfirmed and confirmed delivery, addre
 acknowledgement, the network's short data, and the stock radio's "DMR format" text, from captured PDUs), the
 remote-provisioning crypto against the RFC 4493, SP 800-38B and FIPS-197 vectors and the Python reference, the
 provisioning slave and master through the real SMS reassembler, and the SMS path again with the provisioning
-hooks compiled in (twelve programs).
+hooks compiled in, and the simple-mode decisions (key routing, idle return, private-call hang, home channel)
+(thirteen programs).
 
 ## Remote provisioning (`ENABLE_REMOTE_PROVISION`)
 A **master** radio running this firmware pushes codeplug writes to **slave** radios running it, over the DMR
@@ -179,7 +185,7 @@ key, the master list and the sequence counters cannot be changed from the air.
 
 **Bench procedure (one fork radio, one stock TYT, HackRF + DSD-FME).**
 ```sh
-cd MDUV380_firmware && make PROFILE=dev-prov          # ENABLE_DMR_DATA + ENABLE_REMOTE_PROVISION + ENABLE_KEY_INJECTION
+cd MDUV380_firmware && make PROFILE=dev-prov          # ENABLE_DMR_DATA + ENABLE_REMOTE_PROVISION + ENABLE_KEY_INJECTION (PROFILE=fleet for the fleet radios)
 python3 tools/provision.py pair --gen-key --master-id 1234567    # the pairing key and the master this radio accepts
 python3 tools/provision.py show                                   # masters, counters, job state (never key bytes)
 # slave path without RF: build a transaction on the host with the same key and inject its bursts over USB
@@ -205,6 +211,19 @@ stock TYT on the same channel must show nothing: it drops SAP 9 data without an 
 CRC-9 verdict on the confirmed blocks is the one thing the host tests cannot settle (the convention is taken from
 DSD-FME's own source, which carries a "need a sample to confirm" note); our receiver ignores the CRC-9, so a
 mismatch would only be cosmetic, and `dmrProvCrc9()` / `prov_packet.crc9()` are the single place to change.
+
+## Simple mode build
+`ENABLE_SIMPLE_MODE=1` (in the `fleet` profile) adds the rules of a fleet handheld, live only while the settings bit
+`BIT_SIMPLE_MODE` is set (over USB, or by the provisioning setting `simpleMode`); with the bit clear the radio is the
+stock radio, which is how the master radios run the same image. On: the radio boots into channel mode on the home
+zone and channel (settings `simpleHomeZone`, `simpleHomeChannel`, the codeplug channel index), the knob and the
+arrows step through that zone only, GREEN opens the private-call contacts (select, PTT calls; the target drops back
+to the group 60 s after the last over, or on RED), SK1 opens the preset messages (then the group or one contact,
+GREEN sends), SK1 held the inbox, GREEN held the menu behind the codeplug PIN (which is then not asked at power-on),
+and after `simpleIdleMinutes` away from the home channel without a key or PTT the radio returns to it. RED never
+enters the VFO, SK2 combinations, digits, quick keys, scan, the orange button, talkgroup and squelch steps do
+nothing; volume, backlight and the battery indicator stay. The decisions are in `functions/simpleMode.c` (host
+tested), the screen glue in `user_interface/uiSimpleMode.c`; the set-up of a fleet is `docs/FLEET_SETUP.md`.
 
 ## Dual screen build
 `ENABLE_DUAL_SCREEN=1` adds the Anytone-style dual screen (two rows, A and B, each a VFO or a zone channel;

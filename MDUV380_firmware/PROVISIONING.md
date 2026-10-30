@@ -310,10 +310,12 @@ Measured with xPack arm-none-eabi-gcc 14.2.1 at -Os (2026-10-29), `objdump -h` s
 | stock (`make`, byte-identical to the tree before this work) | 0x4113C | 0xCE78 | 0x325C | 0xD890 | 0x18374 | 17,452 | 10,096 |
 | fw_sms (`ENABLE_DMR_DATA ENABLE_KEY_INJECTION`) | 0x4430C | 0xD030 | 0x32CC | 0xE500 | 0x1893C | 15,860 | 6,912 |
 | fw_sms + `ENABLE_REMOTE_PROVISION` (= `PROFILE=dev-prov`) | 0x46204 | 0xD100 | 0x32CC | 0xE6BC | 0x1893C | 15,860 | 6,468 |
+| the same two, 2026-10-30, with WRITE_CONTACT / SET_IDENTITY / WRITE_MSG_PRESETS | fw_sms 0x443CC / 0xCFE0; dev-prov 0x46604 / 0xD0B8 | | 0x32CC | 0xE500 / 0xE6C0 | 0x1893C | 15,860 | 6,912 / 6,464 |
+| `PROFILE=fleet` (`full` + provisioning + `ENABLE_SIMPLE_MODE`) | 0x4BF68 | 0xD9C8 | 0x32B0 | 0xE6C4 | 0x18AA0 | 15,536 | 6,460 |
 
-The flag costs 8,136 bytes of code, **0 bytes of main SRAM** (`.bss` and `.data` are unchanged: the two SAP
-bytes in `dmr_sms.c` fit in alignment padding) and 444 bytes of CCM, all of it the module's static state
-(`dmr_prov.c`: 417 bytes):
+The flag costs 8,976 bytes of code (8,136 before the three fleet operations), **0 bytes of main SRAM** (`.bss`
+and `.data` are unchanged: the two SAP bytes in `dmr_sms.c` fit in alignment padding) and 448 bytes of CCM, all
+of it the module's static state (`dmr_prov.c`: 417 bytes, plus the identity-pending byte):
 
 | item | bytes | where |
 | --- | --- | --- |

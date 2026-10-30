@@ -63,6 +63,8 @@ Everything beyond AES voice is behind an off-by-default build flag: encrypted SM
 screen and the TA2TWC screens as features, plus the bench and AES diagnostics. The flags, their measured RAM
 cost and the named build profiles (`make PROFILE=full`, `make PROFILE=dev-aes`, ...) are documented in
 [BUILD.md, "Build flags"](BUILD.md#build-flags).
+A provisioned family fleet (masters pushing the configuration over the air to handhelds in simple mode) is set up
+as described in [docs/FLEET_SETUP.md](docs/FLEET_SETUP.md).
 
 ## License
 
