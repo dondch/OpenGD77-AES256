@@ -172,9 +172,10 @@ this is for licensed commercial/PMR use, like the AES voice.
 
 **Operations (v1).** Write channel N (raw 56-byte record), write zone, set VFO A/B, set a whitelisted
 settings field, store a voice AES key into slot 1..15 (the only way key bytes travel, encrypted like
-everything else), reboot, request STATUS (result, CRC32 of the committed records read back from flash,
-firmware git hash, battery). The pairing key, the master list and the sequence counters cannot be changed
-from the air.
+everything else), write a contact (raw 24-byte record), set the radio's own DMR ID and callsign (live
+after the reply to that COMMIT), write the message preset rows (five per PDU), reboot, request STATUS
+(result, CRC32 of the committed records read back from flash, firmware git hash, battery). The pairing
+key, the master list and the sequence counters cannot be changed from the air.
 
 **Bench procedure (one fork radio, one stock TYT, HackRF + DSD-FME).**
 ```sh

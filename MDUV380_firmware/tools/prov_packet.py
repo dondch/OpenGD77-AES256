@@ -11,6 +11,9 @@ inverse, over the crypto in prov_crypto.py. Command line:
         --channel 5 chan5.bin --zone 2 "Fleet" 5,6,7 --setting txPowerLevel 3 --commit
   #     --seq is the first sequence number to use (one per PDU); read the slave's stored value
   #     with `provision.py show` and use a higher one. --dry-run prints the bursts instead.
+  #     Items: --channel/--chan, --zone, --vfo, --setting, --voice-key, --add-contact INDEX NAME
+  #     ID group|private|all, --presets TEXT... (all 10 slots, two items), --identity DMRID CALLSIGN
+  #     (sent last: the slave answers under its old ID), then --commit.
 
   # (b) decode what a MASTER sent, from the data bursts DSD-FME shows for a HackRF capture:
   python3 prov_packet.py decode --key <64hex> --master 1234567 --slave 7654321 \\
@@ -49,10 +52,30 @@ def css_encode(tone):
         return (bcd(code) & 0x0FFF) | (0xC000 if inv else 0x8000)
     return bcd(int(round(float(tone) * 10))) & 0xFFFF
 
+# The per-channel power byte (CodeplugChannel_t.libreDMR_Power): 0 = the radio's master power
+# setting, else 1 + the index into the MD-UV390 10W table POWER_LEVELS[] in uiGlobals.c
+# ({"50", "250", "500", "750", "1", "2", "3", "5", "10", "+W-"}; the firmware sets
+# txPowerLevel = libreDMR_Power - 1 in radioHardwareInterface.c). "+W-" (the user-calibrated
+# level) is not offered here.
+POWER_W_TO_LIBRE = {0.05: 1, 0.25: 2, 0.5: 3, 0.75: 4, 1: 5, 2: 6, 3: 7, 5: 8, 10: 9}
+
+def power_index(power_w):
+    """power_w in watts -> libreDMR_Power byte; None or 0 -> 0 (follow the master setting)."""
+    if power_w in (None, 0, "master"):
+        return 0
+    w = float(power_w)
+    for watts, idx in POWER_W_TO_LIBRE.items():
+        if abs(w - watts) < 1e-6:
+            return idx
+    raise ValueError("power_w %r is not one of %s" % (power_w, sorted(POWER_W_TO_LIBRE)))
+
 def channel_record(name, rx_hz, tx_hz, mode="digital", color_code=1, timeslot=1, contact=1, rx_group=0,
                    power=0, tot=0, bandwidth_25k=False, rx_only=False, rx_tone=None, tx_tone=None,
-                   squelch=0, encrypt=0):
-    """A 56-byte CodeplugChannel_t as stored (BCD frequencies in 10 Hz units)."""
+                   squelch=0, encrypt=0, power_w=None):
+    """A 56-byte CodeplugChannel_t as stored (BCD frequencies in 10 Hz units). power is the raw
+    libreDMR_Power byte; power_w (watts) overrides it through POWER_W_TO_LIBRE."""
+    if power_w is not None:
+        power = power_index(power_w)
     r = bytearray(CHANNEL_LEN)
     n = name.encode("ascii", "replace")[:ZONE_NAME_LEN]
     r[0:16] = n + b"\xff" * (16 - len(n))
@@ -83,6 +106,28 @@ def zone_record(name, channels):
         r += struct.pack("<H", c)
     return bytes(r)
 
+CONTACT_LEN = 24
+CALL_TYPES = {"group": 0, "tg": 0, "private": 1, "pc": 1, "all": 2}
+
+def contact_record(name, dmr_id, call_type="private"):
+    """A 24-byte CodeplugContact_t as stored: name(16, 0xFF padded), id as 8 BCD digits (byte
+    order as in the codeplug), callType (0 group, 1 private, 2 all), rx tone 0, ring 0,
+    reserve1 0xFF (no timeslot override, as the CPS writes it)."""
+    n = name.encode("ascii", "replace")[:16]
+    r = bytearray(n + b"\xff" * (16 - len(n)))
+    r += struct.pack(">I", bcd(int(dmr_id)))
+    r += bytes([CALL_TYPES[str(call_type).lower()] if not isinstance(call_type, int) else call_type, 0, 0, 0xFF])
+    return bytes(r)
+
+CALLSIGN_LEN = 8
+PRESET_LEN = 48
+PRESET_SLOTS = 10
+PRESETS_PER_ITEM = 5
+
+def callsign_bytes(callsign):
+    c = callsign.encode("ascii", "replace")[:CALLSIGN_LEN]
+    return c + b"\xff" * (CALLSIGN_LEN - len(c))
+
 # the settings fields the slave accepts, by index (dmr_prov_apply.c s_fields, same order)
 SETTING_FIELDS = ["txPowerLevel", "backlightMode", "backLightTimeout", "displayContrast", "scanDelay",
                   "scanModePause", "scanStepTime", "dmrDestinationFilter", "dmrCcTsFilter", "privateCalls",
@@ -108,6 +153,28 @@ def item_setting(field, value):
 def item_key(slot, key32):
     assert len(key32) == 32 and 1 <= slot <= 15
     return bytes([pc.OP_STORE_KEY, slot]) + key32
+
+def item_contact(index, record24):
+    assert len(record24) == CONTACT_LEN and 1 <= index <= 1024
+    return bytes([pc.OP_WRITE_CONTACT]) + struct.pack(">H", index) + record24
+
+def item_identity(dmr_id, callsign):
+    assert 1 <= int(dmr_id) <= 0xFFFFFF
+    return bytes([pc.OP_SET_IDENTITY]) + struct.pack(">I", int(dmr_id)) + callsign_bytes(callsign)
+
+def item_msg_presets(first, rows):
+    """rows: 1..5 strings (or 48-byte rows) for preset slots first.. ."""
+    assert 1 <= len(rows) <= PRESETS_PER_ITEM and 0 <= first and first + len(rows) <= PRESET_SLOTS
+    out = bytes([pc.OP_WRITE_MSG_PRESETS, first, len(rows)])
+    for r in rows:
+        b = r if isinstance(r, (bytes, bytearray)) else r.encode("ascii", "replace")[:PRESET_LEN - 1]
+        out += bytes(b) + b"\x00" * (PRESET_LEN - len(b))
+    return out
+
+def preset_items(texts):
+    """All 10 preset slots from a list of up to 10 strings (missing ones cleared): two items."""
+    rows = list(texts)[:PRESET_SLOTS] + [""] * (PRESET_SLOTS - min(PRESET_SLOTS, len(texts)))
+    return [item_msg_presets(f, rows[f:f + PRESETS_PER_ITEM]) for f in range(0, PRESET_SLOTS, PRESETS_PER_ITEM)]
 
 def item_status():
     return bytes([pc.OP_STATUS])
@@ -231,6 +298,18 @@ def describe_body(body):
         return "%s %s = %d" % (name, f, struct.unpack("<I", a[1:5])[0])
     if op == pc.OP_STORE_KEY and len(a) == 33:
         return "%s slot %d (key bytes not shown)" % (name, a[0])
+    if op == pc.OP_WRITE_CONTACT and len(a) == 2 + CONTACT_LEN:
+        idx = struct.unpack(">H", a[:2])[0]
+        rec = a[2:]
+        digits = "".join("%02x" % x for x in rec[16:20])
+        types = {0: "group", 1: "private", 2: "all"}
+        return "%s idx %d name %r id %d type %s" % (name, idx, rec[:16].rstrip(b"\xff").decode("ascii", "replace"),
+                                                   int(digits.lstrip("0") or "0"), types.get(rec[20], rec[20]))
+    if op == pc.OP_SET_IDENTITY and len(a) == 4 + CALLSIGN_LEN:
+        return "%s id %d callsign %r" % (name, struct.unpack(">I", a[:4])[0], a[4:].rstrip(b"\xff").decode("ascii", "replace"))
+    if op == pc.OP_WRITE_MSG_PRESETS and len(a) >= 2 and len(a) == 2 + PRESET_LEN * a[1]:
+        rows = [a[2 + PRESET_LEN * i:2 + PRESET_LEN * (i + 1)].split(b"\x00")[0].decode("ascii", "replace") for i in range(a[1])]
+        return "%s slots %d..%d %r" % (name, a[0], a[0] + a[1] - 1, rows)
     if op == pc.OP_COMMIT and len(a) == 5:
         return "%s count %d crc %08x" % (name, a[0], struct.unpack(">I", a[1:5])[0])
     if op == pc.OP_STATUS_REPLY and len(a) == 23:
@@ -337,6 +416,10 @@ def add_item_args(ap):
     ap.add_argument("--vfo", nargs=2, action="append", metavar=("A|B", "FILE|HEX"), default=[])
     ap.add_argument("--setting", nargs=2, action="append", metavar=("NAME", "VALUE"), default=[])
     ap.add_argument("--voice-key", nargs=2, action="append", metavar=("SLOT", "64HEX"), default=[])
+    ap.add_argument("--add-contact", nargs=4, action="append", metavar=("INDEX", "NAME", "ID", "group|private|all"), default=[],
+                    help="write contact INDEX (1..1024)")
+    ap.add_argument("--identity", nargs=2, metavar=("DMRID", "CALLSIGN"), help="set the slave's own DMR ID and callsign (goes live after its reply)")
+    ap.add_argument("--presets", nargs="+", metavar="TEXT", help="the 10 message preset slots (missing ones cleared), two items")
     ap.add_argument("--status", action="store_true", help="a STATUS request")
     ap.add_argument("--reboot", action="store_true", help="a REBOOT")
     ap.add_argument("--commit", action="store_true", help="end the staged items with a COMMIT (replay/build)")
@@ -364,6 +447,12 @@ def items_from_args(a):
         items.append(item_setting(name, int(value, 0)))
     for slot, key in a.voice_key:
         items.append(item_key(int(slot), bytes.fromhex(key)))
+    for idx, name, cid, ctype in a.add_contact:
+        items.append(item_contact(int(idx), contact_record(name, int(cid), ctype)))
+    if a.presets:
+        items += preset_items(a.presets)
+    if a.identity:
+        items.append(item_identity(int(a.identity[0]), a.identity[1]))   # last: the reply still uses the old ID
     single = []
     if a.status:
         single.append(item_status())
@@ -382,6 +471,7 @@ def main():
         p.add_argument("--txn", type=int, default=1)
         add_item_args(p)
         p.add_argument("--port"); p.add_argument("--dry-run", action="store_true")
+    sub.add_parser("vectors", help="print the bursts of a fixed WRITE_CONTACT PDU as a C array (tests/test_prov_rx.c compares them with dmrProvBuildBursts)")
     p = sub.add_parser("decode")
     p.add_argument("--key", required=True); p.add_argument("--master", type=int, required=True); p.add_argument("--slave", type=int, required=True)
     p.add_argument("--block", action="append", default=[], help="a 12-byte (or 10-byte payload) rate-1/2 block, hex")
@@ -390,6 +480,19 @@ def main():
     p.add_argument("--reply", action="store_true", help="the PDU is a slave's reply (master <- slave)")
     a = ap.parse_args()
 
+    if a.cmd == "vectors":
+        # the same key, IDs, seq, txn and item as testCrossCheck() in tests/test_prov_rx.c
+        ke, km = pc.derive_keys(bytes(range(32)))
+        body = item_contact(2, contact_record("Alice", 1234567, "private"))
+        bursts, pdu = request_bursts(ke, km, 1234567, 7654321, 5, 4, body)
+        flat = b"".join(bytes([t]) + p for t, p in bursts)
+        print("/* generated by tools/prov_packet.py vectors: WRITE_CONTACT 2 'Alice' 1234567 private, master 1234567,")
+        print(" * slave 7654321, seq 5, txn 4, pairing key 00..1f; %d bursts x [type, 12 bytes] */" % len(bursts))
+        print("static const uint8_t VEC_CONTACT_BURSTS[%d] = {" % len(flat))
+        for i in range(0, len(flat), 13):
+            print("    " + ",".join("0x%02x" % x for x in flat[i:i + 13]) + ",")
+        print("};")
+        return
     if a.cmd == "decode":
         blocks = [bytes.fromhex(b) for b in a.block]
         if a.blocks:

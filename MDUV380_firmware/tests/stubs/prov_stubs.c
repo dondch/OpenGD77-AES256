@@ -8,6 +8,10 @@ int  dmrProvApplyVfo(uint8_t v, const uint8_t *r) { (void)v; (void)r; return 1; 
 int  dmrProvApplySetting(uint8_t f, uint32_t v) { (void)f; (void)v; return 1; }
 int  dmrProvApplySettingsSave(void) { return 1; }
 int  dmrProvApplyStoreKey(uint8_t s, const uint8_t *k) { (void)s; (void)k; return 1; }
+int  dmrProvApplyContact(uint16_t i, const uint8_t *r) { (void)i; (void)r; return 1; }
+int  dmrProvApplyIdentity(uint32_t id, const uint8_t *c) { (void)id; (void)c; return 1; }
+void dmrProvApplyIdentityActivate(void) { }
+int  dmrProvApplyMsgPresets(uint8_t f, uint8_t n, const uint8_t *r) { (void)f; (void)n; (void)r; return 1; }
 void dmrProvApplyReboot(void) { }
 int  dmrProvApplyReadBack(uint8_t op, const uint8_t *b, int bl, uint8_t *o, int m) { (void)op; (void)b; (void)bl; (void)o; (void)m; return 0; }
 int  dmrProvApplyTxAllowed(void) { return 1; }

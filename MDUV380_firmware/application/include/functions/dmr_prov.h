@@ -39,6 +39,9 @@
 #define DMR_PROV_OP_SET_VFO       0x12
 #define DMR_PROV_OP_SET_SETTING   0x13
 #define DMR_PROV_OP_STORE_KEY     0x14
+#define DMR_PROV_OP_WRITE_CONTACT 0x15      /* idx(2 BE) || raw CodeplugContact_t record (24) */
+#define DMR_PROV_OP_SET_IDENTITY  0x16      /* dmrId(4 BE) || callsign(8, 0xFF padded) */
+#define DMR_PROV_OP_WRITE_MSG_PRESETS 0x17  /* first(1) || count(1) || count x 48, count 1..5 */
 #define DMR_PROV_OP_COMMIT        0x20
 #define DMR_PROV_OP_ABORT         0x21
 #define DMR_PROV_OP_REBOOT        0x30
@@ -54,6 +57,13 @@
 #define DMR_PROV_RES_BUSY          6
 #define DMR_PROV_RES_WRITE_FAILED  7
 #define DMR_PROV_RES_TIMEOUT       8
+
+/* argument sizes of the ops with records */
+#define DMR_PROV_CONTACT_LEN      24
+#define DMR_PROV_CALLSIGN_LEN     8
+#define DMR_PROV_PRESET_LEN       48
+#define DMR_PROV_PRESET_SLOTS     10        /* dmrSmsCfg_t preset rows */
+#define DMR_PROV_PRESETS_PER_PDU  5         /* 2 + 5 x 48 = 242 bytes fits DMR_PROV_BODY_MAX */
 
 /* STATUS reply body after the op byte: result(1) txn(1) lastSeq(4 BE) codeplugCrc(4 BE)
  * gitHash(8) battery centivolts(2 BE) staged(1) failedMacs(2 BE) = 23 bytes */
@@ -126,6 +136,17 @@ int      dmrProvApplyVfo(uint8_t vfo, const uint8_t *record56);
 int      dmrProvApplySetting(uint8_t field, uint32_t value);     /* staged in RAM; saved by ...SettingsSave */
 int      dmrProvApplySettingsSave(void);
 int      dmrProvApplyStoreKey(uint8_t slot, const uint8_t *key32);
+/* Contact index 1..1024, the raw 24-byte codeplug record (BCD id as stored); a record whose name
+ * starts with 0xFF deletes the contact. Updates the contacts cache. */
+int      dmrProvApplyContact(uint16_t index, const uint8_t *record24);
+/* Own DMR ID and callsign into the codeplug. The live trxDMRID is NOT changed here: the STATUS
+ * reply to this COMMIT still goes out under the old ID (the master addressed it and verifies
+ * its MAC with it); dmrProvApplyIdentityActivate() runs once the reply has been transmitted. */
+int      dmrProvApplyIdentity(uint32_t dmrId, const uint8_t *callsign8);
+void     dmrProvApplyIdentityActivate(void);
+/* Preset rows [first, first + count) of the MSGC block (dmr_sms.c), the other rows and the
+ * block's other fields kept; the SMS config reloads. */
+int      dmrProvApplyMsgPresets(uint8_t first, uint8_t count, const uint8_t *rows);
 void     dmrProvApplyReboot(void);                                /* deferred, after the reply went out */
 /* Read a committed record back (the codeplug CRC in the STATUS reply); returns bytes, 0 if
  * the op has nothing to read back. */

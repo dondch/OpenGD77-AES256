@@ -104,6 +104,15 @@ void dmrSmsRxTick(void);
 #define DMR_SMS_NUM_PRESETS  10
 int  dmrSmsPresetCount(void);              /* number of non-empty presets */
 const char *dmrSmsPresetGet(int idx);      /* preset text by index, or NULL */
+#if defined(ENABLE_REMOTE_PROVISION)
+/* Remote provisioning (WRITE_MSG_PRESETS): replace preset rows [first, first + count) with the
+ * given 48-byte rows (NUL padded), keep the block's other fields, write the MSGC block through
+ * codeplugSetOpenGD77CustomData (main loop only) and reload. Returns 1 on success. */
+#define DMR_SMS_PRESET_ROW_LEN 48
+int  dmrSmsPresetsWrite(int first, int count, const uint8_t *rows);
+/* The rows as the loaded config holds them (count x 48 bytes into out). Returns the bytes copied. */
+int  dmrSmsPresetsRead(int first, int count, uint8_t *out);
+#endif
 /* Default compose recipient; *dst==0 if unset (fall back to current channel). */
 void dmrSmsDefaultRecipient(uint32_t *dst, int *group);
 /* CHIRP-configurable max compose length, clamped to [1, DMR_SMS_TEXT_MAX]; the MSGC

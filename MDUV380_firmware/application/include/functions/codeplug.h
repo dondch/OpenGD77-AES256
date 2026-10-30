@@ -45,6 +45,9 @@ extern const int VFO_SWEEP_SCAN_RANGE_SAMPLE_STEP_TABLE[7];
 #define CODEPLUG_QUICKKEYS_SIZE                                    10
 extern const int CODEPLUG_ADDR_VFO_A_CHANNEL;
 extern const int CPS_CODEPLUG_SECTION_2_START;
+extern const int CODEPLUG_ADDR_CONTACTS;
+extern const int CODEPLUG_ADDR_USER_DMRID;
+extern const int CODEPLUG_ADDR_USER_CALLSIGN;
 
 // APRS Config
 #define CODEPLUG_APRS_CONFIG_DATA_STRUCT_SIZE                      64U
