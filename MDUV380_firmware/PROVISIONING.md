@@ -6,7 +6,8 @@ writes. This note is the design: PDU layout, keys, nonce and sequence rules, the
 machine, the flash write path, the RAM budget, the threat model and the test plan. It is kept
 current with the code (`functions/dmr_prov.c`, `functions/dmr_prov_apply.c`, `crypto/dmr_cmac.c`).
 
-Build: `make ENABLE_REMOTE_PROVISION=1 ENABLE_DMR_DATA=1`. The flag needs `ENABLE_DMR_DATA`
+Build: `make ENABLE_REMOTE_PROVISION=1 ENABLE_DMR_DATA=1` (or `PROFILE=dev-prov`, `PROFILE=fleet`;
+the fleet set-up itself is `docs/FLEET_SETUP.md`). The flag needs `ENABLE_DMR_DATA`
 (the DMR data path it rides on); the Makefile errors out otherwise. AES-256 is always compiled in
 on this tree (the `ENABLE_AES` opt-in was dropped in PR 6), so the only dependency is the data
 path. A plain `make` is unchanged.
@@ -253,7 +254,7 @@ All through existing, main-loop-safe functions:
 | WRITE_CHANNEL | `codeplugChannelSaveDataForIndex()` after `bcd2int`/CSS conversion of the raw record (the function converts back), then `codeplugAllChannelsIndexSetUsed()` | channels 1..128 are in EEPROM, 129.. in SPI flash sectors |
 | WRITE_ZONE | `EEPROM_Write(CODEPLUG_ADDR_EX_ZONE_LIST + zone * (16 + 2 * channelsPerZone), name || channels)` and the in-use bit at `CODEPLUG_ADDR_EX_ZONE_INUSE_PACKED_DATA` | a 16-channel codeplug takes the first 16 channel entries of the record |
 | SET_VFO | `codeplugSetVFO_ChannelData()` plus the live copy in `settingsVFOChannel[]` | |
-| SET_SETTING | field table in `dmr_prov_apply.c` (`txPowerLevel`, `backlightMode`, `backLightTimeout`, `displayContrast`, `scanDelay`, `scanModePause`, `scanStepTime`, `dmrDestinationFilter`, `dmrCcTsFilter`, `privateCalls`, `txTimeoutBeepX5Secs`, `micGainDMR`, `micGainFM`, `ecoLevel`, `apo`, `autolockTimer`, `currentZone`, `beepVolumeDivider`, `bitfieldOptions[0..1]`), then `settingsSaveSettings(true)` once per commit | the DMR ID, callsign and anything in the `PROV` block are not settings fields |
+| SET_SETTING | field table in `dmr_prov_apply.c` (`txPowerLevel`, `backlightMode`, `backLightTimeout`, `displayContrast`, `scanDelay`, `scanModePause`, `scanStepTime`, `dmrDestinationFilter`, `dmrCcTsFilter`, `privateCalls`, `txTimeoutBeepX5Secs`, `micGainDMR`, `micGainFM`, `ecoLevel`, `apo`, `autolockTimer`, `currentZone`, `beepVolumeDivider`, `bitfieldOptions[0..1]`, and with `ENABLE_SIMPLE_MODE` `simpleMode` (one option bit, 0/1: a whole bank would clobber the other options), `simpleHomeZone`, `simpleHomeChannel`, `simpleIdleMinutes`), then `settingsSaveSettings(true)` once per commit; a changed home or simple-mode bit applies on the next main-loop tick | the DMR ID and callsign are SET_IDENTITY, anything in the `PROV` block is not a settings field |
 | STORE_KEY | `dmrAesStoreKey()` | the only way key bytes travel: encrypted and authenticated like everything else |
 | WRITE_CONTACT | `codeplugContactSaveDataForIndex()` after converting the record's BCD id to the integer the function converts back; the function updates the contacts cache (insert, update or remove) | contacts live in SPI flash sectors at `CODEPLUG_ADDR_CONTACTS`, 24 bytes each; read back raw for the CRC |
 | SET_IDENTITY | `EEPROM_Write(CODEPLUG_ADDR_USER_DMRID)` (byte-swapped BCD, as `codeplugSetUserDMRID`) and `EEPROM_Write(CODEPLUG_ADDR_USER_CALLSIGN, 8)` | `trxDMRID` and `uiDataGlobal.userDMRId` are refreshed after the reply went out (§3.3) |
