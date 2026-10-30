@@ -1892,6 +1892,8 @@ static void cpsHandleCommand(void)
 				// Appended (older hosts read the fixed 29 bytes above and ignore the rest):
 				// the per-burst trace, [writeIndex, 8 x (type, state, b0..b3)].
 				n += dmrSmsRxTrace((uint8_t *)&usbComSendBuf[3 + n], COM_BUFFER_SIZE - (3 + n));
+				n += dmrDataTxDiag((uint8_t *)&usbComSendBuf[3 + n]);   // then the last data call: loaded, sent, endedBy, amp open during TX
+				usbComSendBuf[3 + n++] = (uint8_t)(dmrSmsRxDiagAmpSeen() ? 1 : 0);   // then: the audio amp opened on a data burst
 				usbComSendBuf[0] = com_requestbuffer[0];
 				usbComSendBuf[1] = (uint8_t)((n >> 8) & 0xFF);
 				usbComSendBuf[2] = (uint8_t)(n & 0xFF);

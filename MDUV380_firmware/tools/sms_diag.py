@@ -3,7 +3,8 @@
   0x93 = counters (d/hOk/hBad/bOk/bBad/pdu/msg + txActive)
   0x94 = reset counters      (--reset)
   0x95 = dump last reassembled PDU + metadata   (--pdu)
-Run from Windows or WSL; auto-detects the OpenGD77 radio (1FC9:0094)."""
+Run from Windows or WSL; auto-detects the OpenGD77 radio (1FC9:0094), or --port COMx with
+two radios attached."""
 import sys, time, struct
 import serial
 from serial.tools import list_ports
@@ -17,9 +18,12 @@ def find_port():
     return None
 
 def main():
-    port = find_port()
+    port = None
+    if "--port" in sys.argv:
+        port = sys.argv[sys.argv.index("--port") + 1]
+    port = port or find_port()
     if not port:
-        sys.exit("radio not found (USB 1FC9:0094)")
+        sys.exit("radio not found (USB 1FC9:0094); pass --port COMx")
     ser = serial.Serial(port, 115200, timeout=0.5)
 
     if "--reset" in sys.argv:
@@ -48,6 +52,13 @@ def main():
                     continue
                 print(f"  {e[0]:2d}   {e[1] & 0x3F:2d}   {(e[1] >> 6) & 1}   {(e[1] >> 7) & 1}  "
                       f"{e[2]:02x} {e[3]:02x} {e[4]:02x} {e[5]:02x}")
+        # Then (firmware with dmrDataTxDiag): the last data call as the TX ISR saw it, loaded = bursts
+        # queued, sent = bursts fetched, endedBy 1 = the queue drained / 2 = the finish poll timed
+        # out, ampTx = the RF audio amp was open at a transmitted burst; and ampRx = it was open at
+        # a received data burst since the last reset.
+        if len(body) >= 29 + 49 + 5:
+            t = body[29 + 49:29 + 54]
+            print(f"last data call TX: loaded={t[0]} sent={t[1]} endedBy={t[2]} ampTx={t[3]}   ampRx={t[4]}")
     else:
         print("unexpected reply (%d B): %s" % (len(r), r.hex()))
 

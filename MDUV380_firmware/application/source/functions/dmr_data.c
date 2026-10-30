@@ -11,6 +11,7 @@
 #include "functions/trx.h"             // trxEnableTransmission, trxTransmissionEnabled
 #include "hardware/HR-C6000.h"         // HRC6000ClearIsWakingState
 #include "user_interface/menuSystem.h" // MENU_ANY
+#include "functions/sound.h"            // audioAmpGetStatus (bench diag)
 #include <string.h>
 
 #define SYS_BOOTLOADER_ADDR  0x1FFF0000U  // STM32F405 system memory (ROM DFU bootloader)
@@ -58,6 +59,9 @@ static volatile uint8_t s_dataTxActive; /* past the active=0 store the ISR gates
 static uint16_t         s_txFinishPolls;
 static uint8_t          s_txDoneGrace;
 static volatile uint8_t s_txPending;    /* a call is loaded and keys ~100 ms later: no un-key meanwhile */
+/* Bench diagnostic (USB 0x93): the last data call as the ISR saw it. loaded = bursts queued,
+ * sent = bursts the ISR fetched, endedBy = 1 the queue drained, 2 the finish poll timed out. */
+static volatile uint8_t s_diagLoaded, s_diagSent, s_diagEndedBy, s_diagAmpTx;   /* ampTx: the RF audio amp was open at some transmitted burst */
 
 #define DMR_DATA_TX_FINISH_POLL_MS   25
 #define DMR_DATA_TX_FINISH_TIMEOUT   120  // * poll period -> ~3 s safety cap
@@ -130,6 +134,7 @@ void dmrDataTxLoad(const uint8_t *bursts, uint8_t count)
 	s_burstCount = count;
 	s_burstIndex = 0;
 	s_txPending = 1;
+	s_diagLoaded = count; s_diagSent = 0; s_diagEndedBy = 0; s_diagAmpTx = 0;
 	// Defer keying out of the CPS critical section into the main-loop callback context.
 	addTimerCallback(dmrDataKeyTx, 100, MENU_ANY, false);
 }
@@ -146,13 +151,22 @@ int dmrDataTxNextBurst(uint8_t *dataTypeOut, uint8_t *payload12Out)
 		return 0;
 	}
 	uint8_t *b = s_bursts[s_burstIndex++];
+	s_diagSent = s_burstIndex;
+	if (audioAmpGetStatus() & AUDIO_AMP_CHANNEL_RF) { s_diagAmpTx = 1; }
 	*dataTypeOut = b[0];
 	memcpy(payload12Out, b + 1, DMR_DATA_BURST_LEN);
 	return 1;
 }
 
+int dmrDataTxDiag(uint8_t out[4])
+{
+	out[0] = s_diagLoaded; out[1] = s_diagSent; out[2] = s_diagEndedBy; out[3] = s_diagAmpTx;
+	return 4;
+}
+
 void dmrDataTxEnd(void)
 {
+	if (s_diagEndedBy == 0) { s_diagEndedBy = ((s_burstCount != 0) && (s_burstIndex >= s_burstCount)) ? 1 : 2; }
 	s_dataTxActive = 0;
 	s_burstIndex = 0;
 	s_burstCount = 0;

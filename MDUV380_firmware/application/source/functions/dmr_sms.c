@@ -954,9 +954,13 @@ int dmrSmsRxLastPdu(uint8_t *out, int maxlen)
 
 /* Called for EVERY data-sync-class burst (any type, any CRC) so we can see exactly what
  * the HR-C6000 delivers during a stock SMS transmission. ISR context: counters only. */
-void dmrSmsRxDiagBurst(int rxDataType, int crcOk)
+static volatile uint8_t s_diagAmpSeen DMR_AES_CCM;   /* the RF audio amp was open at some data burst */
+int dmrSmsRxDiagAmpSeen(void) { return s_diagAmpSeen; }
+
+void dmrSmsRxDiagBurst(int rxDataType, int crcOk, int ampOpen)
 {
 	s_diagData++;
+	if (ampOpen) { s_diagAmpSeen = 1; }
 	if (rxDataType == DT_DATA_HEADER) { if (crcOk) s_diagHdrOk++; else s_diagHdrBad++; }
 	else if ((rxDataType == DT_RATE12_DATA) || (rxDataType == DT_RATE34_DATA)) { if (crcOk) s_diagBlkOk++; else s_diagBlkBad++; }
 }
@@ -964,6 +968,7 @@ void dmrSmsRxDiagBurst(int rxDataType, int crcOk)
 void dmrSmsRxDiagReset(void)
 {
 	s_diagData = s_diagHdrOk = s_diagHdrBad = s_diagBlkOk = s_diagBlkBad = 0;
+	s_diagAmpSeen = 0;
 	s_diagPdu = s_diagMsg = 0;
 	s_diagLastPduLen = 0;
 	memset(s_trace, 0, sizeof s_trace);
