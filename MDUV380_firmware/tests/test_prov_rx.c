@@ -48,9 +48,23 @@ static int      s_blockWrites = 0;
 
 bool SPI_Flash_read(uint32_t a, uint8_t *b, int n) { (void)a; memset(b, 0xFF, (size_t)n); return true; }
 bool SPI_Flash_write(uint32_t a, uint8_t *b, int n) { (void)a; (void)b; (void)n; return true; }
+/* the custom-data region: only the MSGC block is kept (the presets write/read-back path) */
+static uint8_t s_msgcBlock[600];
+static int     s_msgcLen = 0, s_msgcWrites = 0;
 bool codeplugGetOpenGD77CustomData(CodeplugCustomDataType_t t, uint8_t *b) { (void)t; (void)b; return false; }
-bool codeplugGetOpenGD77CustomDataBounded(CodeplugCustomDataType_t t, uint8_t *b, int n) { (void)t; (void)b; (void)n; return false; }
-bool codeplugSetOpenGD77CustomData(CodeplugCustomDataType_t t, uint8_t *b, int n) { (void)t; (void)b; (void)n; return true; }
+bool codeplugGetOpenGD77CustomDataBounded(CodeplugCustomDataType_t t, uint8_t *b, int n)
+{
+    if ((t != CODEPLUG_CUSTOM_DATA_TYPE_MSG_CONFIG) || (s_msgcLen == 0)) { return false; }
+    memcpy(b, s_msgcBlock, (size_t)((n < s_msgcLen) ? n : s_msgcLen));
+    return true;
+}
+bool codeplugSetOpenGD77CustomData(CodeplugCustomDataType_t t, uint8_t *b, int n)
+{
+    if (t != CODEPLUG_CUSTOM_DATA_TYPE_MSG_CONFIG) { return true; }
+    if (n > (int)sizeof s_msgcBlock) { return false; }
+    memcpy(s_msgcBlock, b, (size_t)n); s_msgcLen = n; s_msgcWrites++;
+    return true;
+}
 uint8_t codeplugChannelGetFlag(CodeplugChannel_t *c, ChannelFlag_t f) { (void)c; (void)f; return 0; }
 static uint32_t s_nowMs = 1000;
 uint32_t ticksGetMillis(void) { return s_nowMs; }
@@ -71,7 +85,7 @@ int  dmrDataTxNextBurst(uint8_t *t, uint8_t *p) { (void)t; (void)p; return 0; }
 void dmrDataTxEnd(void) { }
 
 /* ---- the apply layer: records what would have been written -------------------- */
-typedef struct { uint8_t op; uint16_t idx; uint8_t data[180]; int len; } written_t;
+typedef struct { uint8_t op; uint16_t idx; uint8_t data[244]; int len; } written_t;
 static written_t s_written[16];
 static int s_nWritten = 0;
 static int s_settingsSaves = 0, s_reboots = 0, s_arenaBusy = 0, s_arenaHeld = 0, s_txAllowed = 1;
@@ -88,6 +102,15 @@ int  dmrProvApplyVfo(uint8_t vfo, const uint8_t *r) { record(DMR_PROV_OP_SET_VFO
 int  dmrProvApplySetting(uint8_t field, uint32_t value) { uint8_t v[4] = { (uint8_t)value, (uint8_t)(value >> 8), (uint8_t)(value >> 16), (uint8_t)(value >> 24) }; record(DMR_PROV_OP_SET_SETTING, field, v, 4); return 1; }
 int  dmrProvApplySettingsSave(void) { s_settingsSaves++; return 1; }
 int  dmrProvApplyStoreKey(uint8_t slot, const uint8_t *k) { record(DMR_PROV_OP_STORE_KEY, slot, k, 32); return 1; }
+int  dmrProvApplyContact(uint16_t index, const uint8_t *r) { record(DMR_PROV_OP_WRITE_CONTACT, index, r, 24); return 1; }
+static int s_identityActivations = 0;
+int  dmrProvApplyIdentity(uint32_t id, const uint8_t *c)
+{
+    uint8_t v[12] = { (uint8_t)(id >> 24), (uint8_t)(id >> 16), (uint8_t)(id >> 8), (uint8_t)id };
+    memcpy(v + 4, c, 8); record(DMR_PROV_OP_SET_IDENTITY, 0, v, 12); return 1;
+}
+void dmrProvApplyIdentityActivate(void) { s_identityActivations++; }
+int  dmrProvApplyMsgPresets(uint8_t first, uint8_t count, const uint8_t *rows) { record(DMR_PROV_OP_WRITE_MSG_PRESETS, (uint16_t)((first << 8) | count), rows, count * 48); return 1; }
 void dmrProvApplyReboot(void) { s_reboots++; }
 int  dmrProvApplyReadBack(uint8_t op, const uint8_t *body, int bodyLen, uint8_t *out, int max)
 {
@@ -95,7 +118,14 @@ int  dmrProvApplyReadBack(uint8_t op, const uint8_t *body, int bodyLen, uint8_t 
     /* "flash" holds what was written: find the record */
     for (int i = 0; i < s_nWritten && i < 16; i++)
     {
-        uint16_t idx = (op == DMR_PROV_OP_WRITE_CHANNEL) ? (uint16_t)((body[0] << 8) | body[1]) : body[0];
+        uint16_t idx;
+        switch (op)
+        {
+            case DMR_PROV_OP_WRITE_CHANNEL: case DMR_PROV_OP_WRITE_CONTACT: idx = (uint16_t)((body[0] << 8) | body[1]); break;
+            case DMR_PROV_OP_SET_IDENTITY: idx = 0; break;
+            case DMR_PROV_OP_WRITE_MSG_PRESETS: idx = (uint16_t)((body[0] << 8) | body[1]); break;
+            default: idx = body[0]; break;
+        }
         if ((s_written[i].op == op) && (s_written[i].idx == idx) && (op != DMR_PROV_OP_STORE_KEY))
         {
             memcpy(out, s_written[i].data, (size_t)s_written[i].len);
@@ -586,6 +616,148 @@ static void testSmsCoexists(void)
     check(dmrSmsCount(0) == 1 && notifications == 0 && diag().stagedCount == 1, "a provisioning PDU is staged, not shown as a message");
 }
 
+/* ---- the fleet ops: contacts, identity, message presets --------------------------------- */
+static int itemContact(uint8_t *body, uint16_t idx, const char *name, uint32_t id, uint8_t callType)
+{
+    body[0] = DMR_PROV_OP_WRITE_CONTACT; body[1] = (uint8_t)(idx >> 8); body[2] = (uint8_t)idx;
+    memset(body + 3, 0xFF, 16); memcpy(body + 3, name, strlen(name));
+    /* the codeplug stores the id as byte-swapped BCD */
+    uint32_t bcd = 0; for (int i = 0; i < 8; i++) { bcd |= (id % 10) << (4 * i); id /= 10; }
+    body[19] = (uint8_t)(bcd >> 24); body[20] = (uint8_t)(bcd >> 16); body[21] = (uint8_t)(bcd >> 8); body[22] = (uint8_t)bcd;
+    body[23] = callType; body[24] = 0; body[25] = 0; body[26] = 0x01;
+    return 27;
+}
+static int itemIdentity(uint8_t *body, uint32_t id, const char *callsign)
+{
+    body[0] = DMR_PROV_OP_SET_IDENTITY; wr32be(body + 1, id);
+    memset(body + 5, 0xFF, 8); memcpy(body + 5, callsign, strlen(callsign));
+    return 13;
+}
+static int itemPresets(uint8_t *body, uint8_t first, uint8_t count, const char *prefix)
+{
+    body[0] = DMR_PROV_OP_WRITE_MSG_PRESETS; body[1] = first; body[2] = count;
+    memset(body + 3, 0, (size_t)count * 48);
+    for (int i = 0; i < count; i++) { snprintf((char *)body + 3 + 48 * i, 48, "%s %d", prefix, first + i); }
+    return 3 + 48 * count;
+}
+
+static void testFleetOps(void)
+{
+    uint8_t q[DMR_DATA_MAX_BURSTS * 13], body[DMR_PROV_BODY_MAX], rb[32];
+    uint32_t crc = 0, rseq; uint8_t rtxn;
+    int n;
+    bootAs(SLAVE_ID, MASTER_ID, 0); s_seq = 0; s_identityActivations = 0;
+
+    n = itemContact(body, 2, "Alice", 1234567, 1); crc = stageCrc(crc, body, n);
+    play(q, request(q, MASTER_ID, SLAVE_ID, nextSeq(), 4, body, n));
+    n = itemContact(body, 3, "Bob", 2345678, 1); crc = stageCrc(crc, body, n);
+    play(q, request(q, MASTER_ID, SLAVE_ID, nextSeq(), 4, body, n));
+    n = itemPresets(body, 0, 5, "Preset"); crc = stageCrc(crc, body, n);
+    play(q, request(q, MASTER_ID, SLAVE_ID, nextSeq(), 4, body, n));
+    n = itemPresets(body, 5, 5, "Preset"); crc = stageCrc(crc, body, n);
+    play(q, request(q, MASTER_ID, SLAVE_ID, nextSeq(), 4, body, n));
+    n = itemIdentity(body, 3456789, "ALICE"); crc = stageCrc(crc, body, n);
+    play(q, request(q, MASTER_ID, SLAVE_ID, nextSeq(), 4, body, n));
+    check(diag().stagedCount == 5 && s_nWritten == 0, "contacts, two preset chunks and the identity staged, nothing written");
+
+    uint32_t commitSeq = nextSeq();
+    n = itemCommit(body, 5, crc);
+    s_txLoads = 0;
+    play(q, request(q, MASTER_ID, SLAVE_ID, commitSeq, 4, body, n));
+    check(s_nWritten == 5 && lastReply(rb, &rseq, &rtxn) > 0 && rb[1] == DMR_PROV_RES_OK && rb[21] == 5, "COMMIT writes the five items and answers OK");
+    check(s_written[0].op == DMR_PROV_OP_WRITE_CONTACT && s_written[0].idx == 2 && memcmp(s_written[0].data, "Alice\xff", 6) == 0 &&
+          s_written[0].data[16] == 0x01 && s_written[0].data[17] == 0x23 && s_written[0].data[18] == 0x45 && s_written[0].data[19] == 0x67 && s_written[0].data[20] == 1,
+          "contact 2 written with its raw 24-byte record (name, BCD id, private call)");
+    check(s_written[1].op == DMR_PROV_OP_WRITE_CONTACT && s_written[1].idx == 3 && memcmp(s_written[1].data, "Bob\xff", 4) == 0, "contact 3 written second");
+    check(s_written[2].op == DMR_PROV_OP_WRITE_MSG_PRESETS && s_written[2].idx == 0x0005 && strcmp((char *)s_written[2].data, "Preset 0") == 0 &&
+          strcmp((char *)s_written[2].data + 4 * 48, "Preset 4") == 0 && s_written[2].len == 240, "presets 0..4 written as five 48-byte rows");
+    check(s_written[3].op == DMR_PROV_OP_WRITE_MSG_PRESETS && s_written[3].idx == 0x0505 && strcmp((char *)s_written[3].data, "Preset 5") == 0, "presets 5..9 written");
+    check(s_written[4].op == DMR_PROV_OP_SET_IDENTITY && rd32be(s_written[4].data) == 3456789 && memcmp(s_written[4].data + 4, "ALICE\xff\xff\xff", 8) == 0, "identity written last: id and 0xFF-padded callsign");
+    uint32_t want = 0;
+    for (int i = 0; i < 5; i++) { want = crc32_ieee(want, s_written[i].data, s_written[i].len); }
+    check(rd32be(rb + 7) == want, "reply codeplug CRC covers the contacts, presets and identity read back");
+    check(s_identityActivations == 0 && s_txLoads == 1, "the new DMR ID is not live yet: the reply went out under the old one");
+    clockAdvance(500); dmrProvTick();
+    check(s_identityActivations == 1, "... and goes live once the reply has been transmitted");
+
+    /* wrong lengths poison the transaction */
+    static const struct { int len; const char *what; } bad[] = {
+        { 26, "a contact record one byte short" }, { 28, "a contact record one byte long" },
+        { 12, "an identity 1 byte short" }, { 14, "an identity 1 byte long" },
+    };
+    for (unsigned i = 0; i < sizeof bad / sizeof bad[0]; i++)
+    {
+        n = (i < 2) ? itemContact(body, 1, "X", 1, 1) : itemIdentity(body, 1, "X");
+        play(q, request(q, MASTER_ID, SLAVE_ID, nextSeq(), 20 + i, body, bad[i].len));
+        check(diag().stageErr == DMR_PROV_RES_BAD_OP, bad[i].what);
+    }
+    n = itemPresets(body, 0, 5, "P"); body[2] = 6;   /* count 6 claims more rows than present */
+    play(q, request(q, MASTER_ID, SLAVE_ID, nextSeq(), 30, body, n));
+    check(diag().stageErr == DMR_PROV_RES_BAD_OP, "presets: count beyond the 5 rows carried is BAD_OP");
+    n = itemPresets(body, 6, 5, "P");                 /* 6 + 5 > 10 slots */
+    play(q, request(q, MASTER_ID, SLAVE_ID, nextSeq(), 31, body, n));
+    check(diag().stageErr == DMR_PROV_RES_BAD_OP, "presets: first + count past the 10 slots is BAD_OP");
+    n = itemPresets(body, 0, 1, "P");
+    play(q, request(q, MASTER_ID, SLAVE_ID, nextSeq(), 32, body, n - 1));
+    check(diag().stageErr == DMR_PROV_RES_BAD_OP, "presets: a row one byte short is BAD_OP");
+    n = itemPresets(body, 9, 1, "P"); crc = stageCrc(0, body, n);
+    play(q, request(q, MASTER_ID, SLAVE_ID, nextSeq(), 33, body, n));
+    check(diag().stageErr == 0 && diag().stagedCount == 1, "presets: one row into the last slot is accepted");
+
+    /* the real MSGC writer (dmr_sms.c): layout and reload */
+    s_msgcLen = 0; s_msgcWrites = 0;
+    uint8_t rows[2 * 48]; memset(rows, 0, sizeof rows); strcpy((char *)rows, "Hello"); strcpy((char *)rows + 48, "World");
+    check(dmrSmsPresetsWrite(3, 2, rows) == 1 && s_msgcWrites == 1 && s_msgcLen >= 12 + 480, "dmrSmsPresetsWrite writes one MSGC block");
+    check(memcmp(s_msgcBlock, "MSGC", 4) == 0 && s_msgcBlock[4] == 1 && s_msgcBlock[5] == 5, "block: magic, version 1, numPresets = highest used row + 1");
+    check(strcmp((char *)s_msgcBlock + 12 + 3 * 48, "Hello") == 0 && strcmp((char *)s_msgcBlock + 12 + 4 * 48, "World") == 0 && s_msgcBlock[12] == 0, "rows at 12 + 48 * i, untouched rows empty");
+    check(dmrSmsPresetCount() == 2 && strcmp(dmrSmsPresetGet(4), "World") == 0 && dmrSmsPresetGet(0) == NULL, "the SMS config reloaded the written presets");
+    memset(rows, 0, sizeof rows); strcpy((char *)rows, "Again");
+    check(dmrSmsPresetsWrite(0, 1, rows) == 1 && strcmp((char *)s_msgcBlock + 12, "Again") == 0 && strcmp((char *)s_msgcBlock + 12 + 4 * 48, "World") == 0, "a second write keeps the other rows");
+    uint8_t back[96];
+    check(dmrSmsPresetsRead(3, 2, back) == 96 && strcmp((char *)back, "Hello") == 0 && strcmp((char *)back + 48, "World") == 0, "dmrSmsPresetsRead returns the stored rows");
+
+    /* the master validates the variable-length item too */
+    uint8_t job[300]; wr32le(job, SLAVE_ID); job[4] = 9; job[5] = 0x01;
+    n = itemPresets(body, 0, 2, "J");
+    job[6] = body[0]; job[7] = (uint8_t)(n - 1); job[8] = 0; memcpy(job + 9, body + 1, (size_t)(n - 1));
+    bootAs(MASTER_ID, 0, 0);
+    check(dmrProvJobLoad(job, 6 + 3 + n - 1) == 0, "a job with a two-row presets item is accepted");
+    dmrProvJobCancel();
+    job[8 + 2] = 3;   /* count 3 with two rows */
+    check(dmrProvJobLoad(job, 6 + 3 + n - 1) == -4, "a job whose presets count does not match its rows is malformed");
+}
+
+/* generated by tools/prov_packet.py vectors: WRITE_CONTACT 2 'Alice' 1234567 private, master 1234567,
+ * slave 7654321, seq 5, txn 4, pairing key 00..1f; 13 bursts x [type, 12 bytes] */
+static const uint8_t VEC_CONTACT_BURSTS[169] = {
+    0x30,0xbd,0x00,0x80,0x0c,0x74,0xcb,0xb1,0x12,0xd6,0x87,0x5c,0xd6,
+    0x30,0xbd,0x00,0x80,0x0b,0x74,0xcb,0xb1,0x12,0xd6,0x87,0x45,0x92,
+    0x30,0xbd,0x00,0x80,0x0a,0x74,0xcb,0xb1,0x12,0xd6,0x87,0xfd,0xf3,
+    0x30,0xbd,0x00,0x80,0x09,0x74,0xcb,0xb1,0x12,0xd6,0x87,0x25,0x71,
+    0x30,0xbd,0x00,0x80,0x08,0x74,0xcb,0xb1,0x12,0xd6,0x87,0x9d,0x10,
+    0x30,0xbd,0x00,0x80,0x07,0x74,0xcb,0xb1,0x12,0xd6,0x87,0x17,0xf9,
+    0x60,0x43,0x93,0x74,0xcb,0xb1,0x12,0xd6,0x87,0x86,0x50,0x97,0xfb,
+    0x70,0x00,0x96,0x50,0x01,0x04,0x00,0x00,0x00,0x00,0x05,0x00,0x1b,
+    0x70,0x02,0x3f,0x97,0xd9,0x52,0xae,0x59,0xed,0x84,0xa1,0x30,0xe2,
+    0x70,0x04,0x13,0x28,0xa5,0x2c,0x76,0xfd,0x1a,0xb7,0xfe,0x32,0x00,
+    0x70,0x06,0xb6,0x2c,0xb9,0x1c,0x47,0x0e,0x42,0xdd,0xe3,0xe4,0xda,
+    0x70,0x08,0xae,0x88,0x0f,0x43,0x5b,0xb7,0x7b,0xda,0xe9,0x0d,0xdb,
+    0x70,0x0a,0x59,0x41,0x4e,0x6a,0x00,0x00,0x00,0xaf,0xa2,0x92,0x78,
+};
+
+/* The Python builder (tools/prov_packet.py) and the C builder must put the same bytes on the
+ * air for the same key, IDs, seq, txn and item: CSBK preamble, header CRC, blocks, CRC-9, CRC32. */
+static void testCrossCheck(void)
+{
+    uint8_t q[DMR_DATA_MAX_BURSTS * 13], body[DMR_PROV_BODY_MAX];
+    bootAs(SLAVE_ID, MASTER_ID, 0);
+    int n = itemContact(body, 2, "Alice", 1234567, 1);
+    body[26] = 0xFF;   /* reserve1 as contact_record() writes it */
+    int nb = request(q, MASTER_ID, SLAVE_ID, 5, 4, body, n);
+    check(nb == (int)(sizeof VEC_CONTACT_BURSTS / 13), "WRITE_CONTACT: the C builder makes as many bursts as the Python one");
+    check((nb > 0) && (memcmp(q, VEC_CONTACT_BURSTS, sizeof VEC_CONTACT_BURSTS) == 0), "WRITE_CONTACT: C and Python bursts are byte-identical");
+}
+
 /* ---- the master ------------------------------------------------------------------------- */
 static int jobChannel(uint8_t *job, int off, uint16_t idx, uint8_t fill)
 {
@@ -692,6 +864,8 @@ int main(void)
     testTransactionIntegrity();
     testStatusAndReboot();
     testSmsCoexists();
+    testFleetOps();
+    testCrossCheck();
     testMaster();
     printf("%s\n", fails ? "FAILED" : "ALL PASS");
     return fails ? 1 : 0;

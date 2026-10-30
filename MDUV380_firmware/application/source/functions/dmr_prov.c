@@ -87,6 +87,7 @@ static uint32_t s_replyLoadedMs DMR_AES_CCM;
 static uint32_t s_replyFirstMs DMR_AES_CCM;      /* when the cached reply was first queued */
 static uint8_t  s_replyResends DMR_AES_CCM;      /* re-sends of the cached reply so far */
 static uint8_t  s_rebootPending DMR_AES_CCM;     /* after the reply has gone out */
+static uint8_t  s_identityPending DMR_AES_CCM;   /* a committed SET_IDENTITY goes live after the reply has gone out */
 static uint16_t s_failedMacs DMR_AES_CCM;
 static uint8_t  s_failStreak DMR_AES_CCM;
 static uint32_t s_holdoffUntil DMR_AES_CCM;
@@ -216,7 +217,7 @@ void dmrProvInit(void)
     s_stage = NULL; s_job = NULL;          /* CCM garbage must not look like a held arena */
     stageDiscard();
     masterReset();
-    s_replyLen = 0; s_replyPending = 0; s_rebootPending = 0; s_replyDst = 0; s_replySeq = 0; s_replyLoadedMs = 0;
+    s_replyLen = 0; s_replyPending = 0; s_rebootPending = 0; s_identityPending = 0; s_replyDst = 0; s_replySeq = 0; s_replyLoadedMs = 0;
     s_replyFirstMs = 0; s_replyResends = 0;
     s_lastCommitSeq = 0; s_lastCommitMaster = 0; s_lastCodeplugCrc = 0;
     s_failedMacs = 0; s_failStreak = 0; s_holdoffUntil = 0; s_ackInhibit = 0;
@@ -365,22 +366,43 @@ static int stageItem(uint8_t txn, const uint8_t *body, int bodyLen)
     return 1;
 }
 
-/* Expected argument length per staged op, -1 for not a staged op. */
-static int stagedArgLen(uint8_t op)
+/* Is op a staged (transaction) operation? */
+static int isStagedOp(uint8_t op)
 {
     switch (op)
     {
-        case DMR_PROV_OP_WRITE_CHANNEL: return 2 + 56;
-        case DMR_PROV_OP_WRITE_ZONE:    return 1 + 16 + 160;
-        case DMR_PROV_OP_SET_VFO:       return 1 + 56;
-        case DMR_PROV_OP_SET_SETTING:   return 1 + 4;
-        case DMR_PROV_OP_STORE_KEY:     return 1 + 32;
-        default: return -1;
+        case DMR_PROV_OP_WRITE_CHANNEL: case DMR_PROV_OP_WRITE_ZONE: case DMR_PROV_OP_SET_VFO:
+        case DMR_PROV_OP_SET_SETTING:   case DMR_PROV_OP_STORE_KEY:  case DMR_PROV_OP_WRITE_CONTACT:
+        case DMR_PROV_OP_SET_IDENTITY:  case DMR_PROV_OP_WRITE_MSG_PRESETS:
+            return 1;
+        default:
+            return 0;
+    }
+}
+
+/* Are these arguments (alen bytes after the op, args pointing at them) well-formed for a staged
+ * op? Fixed sizes for the record ops; WRITE_MSG_PRESETS carries 1..5 rows and must stay inside
+ * the 10 slots. */
+static int stagedArgsOk(uint8_t op, const uint8_t *args, int alen)
+{
+    switch (op)
+    {
+        case DMR_PROV_OP_WRITE_CHANNEL: return alen == 2 + 56;
+        case DMR_PROV_OP_WRITE_ZONE:    return alen == 1 + 16 + 160;
+        case DMR_PROV_OP_SET_VFO:       return alen == 1 + 56;
+        case DMR_PROV_OP_SET_SETTING:   return alen == 1 + 4;
+        case DMR_PROV_OP_STORE_KEY:     return alen == 1 + 32;
+        case DMR_PROV_OP_WRITE_CONTACT: return alen == 2 + DMR_PROV_CONTACT_LEN;
+        case DMR_PROV_OP_SET_IDENTITY:  return alen == 4 + DMR_PROV_CALLSIGN_LEN;
+        case DMR_PROV_OP_WRITE_MSG_PRESETS:
+            return (alen >= 2 + DMR_PROV_PRESET_LEN) && (args[1] >= 1) && (args[1] <= DMR_PROV_PRESETS_PER_PDU) &&
+                   (args[0] + args[1] <= DMR_PROV_PRESET_SLOTS) && (alen == 2 + args[1] * DMR_PROV_PRESET_LEN);
+        default: return 0;
     }
 }
 
 /* Write one staged item. Returns 1 on success. */
-static int applyItem(const uint8_t *it, int *settingsTouched)
+static int applyItem(const uint8_t *it, int *settingsTouched, int *identityTouched)
 {
     uint8_t op = it[0];
     const uint8_t *a = it + 3;
@@ -391,6 +413,9 @@ static int applyItem(const uint8_t *it, int *settingsTouched)
         case DMR_PROV_OP_SET_VFO:       return dmrProvApplyVfo(a[0], a + 1);
         case DMR_PROV_OP_SET_SETTING:   *settingsTouched = 1; return dmrProvApplySetting(a[0], rd32le(a + 1));
         case DMR_PROV_OP_STORE_KEY:     return dmrProvApplyStoreKey(a[0], a + 1);
+        case DMR_PROV_OP_WRITE_CONTACT: return dmrProvApplyContact((uint16_t)((a[0] << 8) | a[1]), a + 2);
+        case DMR_PROV_OP_SET_IDENTITY:  *identityTouched = 1; return dmrProvApplyIdentity(rd32be(a), a + 4);
+        case DMR_PROV_OP_WRITE_MSG_PRESETS: return dmrProvApplyMsgPresets(a[0], a[1], a + 2);
         default: return 0;
     }
 }
@@ -432,18 +457,19 @@ static void slaveCommit(int mIdx, uint32_t seq, uint8_t txn, const uint8_t *args
     else if ((count != s_stageCount) || (crc32_ieee(0, s_stage, s_stageUsed) != crc)) { result = DMR_PROV_RES_CRC_MISMATCH; }
     if (result == DMR_PROV_RES_OK)
     {
-        int settingsTouched = 0, off = 0, done = 0;
+        int settingsTouched = 0, identityTouched = 0, off = 0, done = 0;
         uint8_t rb[DMR_PROV_BODY_MAX];
         uint32_t rcrc = 0;
         for (int i = 0; i < s_stageCount; i++)
         {
             const uint8_t *it = s_stage + off;
             int alen = rd16le(it + 1);
-            if (!applyItem(it, &settingsTouched)) { result = DMR_PROV_RES_WRITE_FAILED; break; }
+            if (!applyItem(it, &settingsTouched, &identityTouched)) { result = DMR_PROV_RES_WRITE_FAILED; break; }
             done++;
             off += 3 + alen;
         }
         if ((result == DMR_PROV_RES_OK) && settingsTouched && !dmrProvApplySettingsSave()) { result = DMR_PROV_RES_WRITE_FAILED; }
+        if (identityTouched) { s_identityPending = 1; }   /* the new ID goes live after the reply (built under the old one) */
         /* read the written records back: the codeplug CRC the master compares against */
         off = 0;
         for (int i = 0; i < done; i++)
@@ -519,10 +545,9 @@ int dmrProvRxPdu(uint8_t *pdu, int len, uint32_t src, uint32_t dst)
     s_lastSeen[mIdx] = seq;
     uint8_t *body = pdu + DMR_PROV_HDR_LEN;
     uint8_t op = body[0];
-    int alen = stagedArgLen(op);
-    if (alen >= 0)
+    if (isStagedOp(op))
     {
-        if (n - 1 != alen) { stageBegin(txn); s_stageErr = DMR_PROV_RES_BAD_OP; return 1; }
+        if (!stagedArgsOk(op, body + 1, n - 1)) { stageBegin(txn); s_stageErr = DMR_PROV_RES_BAD_OP; return 1; }
         stageItem(txn, body, n);
         return 1;
     }
@@ -736,8 +761,7 @@ int dmrProvJobLoad(const uint8_t *job, int len)
         int alen = rd16le(job + off + 1);
         uint8_t op = job[off];
         if ((off + 3 + alen > len) || (alen + 1 > DMR_PROV_BODY_MAX) || (count == 255)) { return -4; }
-        int want = stagedArgLen(op);
-        if (want >= 0) { if (alen != want) { return -4; } }
+        if (isStagedOp(op)) { if (!stagedArgsOk(op, job + off + 3, alen)) { return -4; } }
         else if (((op == DMR_PROV_OP_STATUS) || (op == DMR_PROV_OP_REBOOT) || (op == DMR_PROV_OP_ABORT)) && (alen == 0)) { }
         else { return -4; }
         crc = crc32_ieee(crc, job + off, 3 + alen);
@@ -793,6 +817,11 @@ void dmrProvTick(void)
             if (nb > 0) { dmrDataTxLoad(dmrSmsBurstQueueScratch(), (uint8_t)nb); s_replyLoadedMs = now; }
             s_replyPending = 0;
         }
+    }
+    if (s_identityPending && !s_replyPending && txDone(s_replyLoadedMs))
+    {
+        s_identityPending = 0;
+        dmrProvApplyIdentityActivate();
     }
     if (s_rebootPending && !s_replyPending && txDone(s_replyLoadedMs))
     {

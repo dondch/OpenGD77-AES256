@@ -144,6 +144,9 @@ anywhere, and the staging area is not touched, before the MAC and sequence check
 | 0x12 | SET_VFO | `vfo(1: 0 = A, 1 = B) || record(56)` | staged: write the VFO record |
 | 0x13 | SET_SETTING | `field(1) || value(4 LE)` | staged: set a whitelisted `nonVolatileSettings` field (§6), saved with `settingsSaveSettings(true)` |
 | 0x14 | STORE_KEY | `slot(1) || key(32)` | staged: `dmrAesStoreKey(slot, key)`, slot 1..15 (voice keys only) |
+| 0x15 | WRITE_CONTACT | `idx(2 BE) || record(24)` | staged: write contact idx (1..1024), the raw `CodeplugContact_t` record (name 16, id as 8 BCD digits in codeplug byte order, call type, rx tone, ring, flags); a name starting with 0xFF deletes it; the contacts cache is updated |
+| 0x16 | SET_IDENTITY | `dmrId(4 BE) || callsign(8)` | staged: this radio's own DMR ID and callsign (0xFF padded) into the codeplug; `trxDMRID` is refreshed once the STATUS reply to the COMMIT has been transmitted (see below) |
+| 0x17 | WRITE_MSG_PRESETS | `first(1) || count(1) || count x 48` | staged: message preset rows `first..first+count-1` (count 1..5, first + count <= 10) of the MSGC block, NUL padded; the other rows and fields are kept, the SMS config reloads |
 | 0x20 | COMMIT | `count(1) || crc32(4 BE)` | verify the staged image, write it, reply STATUS |
 | 0x21 | ABORT | none | discard the staged image |
 | 0x30 | REBOOT | none | persist seq, reply STATUS, reboot 1.5 s later |
@@ -152,6 +155,23 @@ anywhere, and the staging area is not touched, before the MAC and sequence check
 Anything else, and any op whose body length is wrong, is rejected with result `BAD_OP`. There is
 no operation that reads or writes the `PROV` block (pairing key, master list, sequence numbers):
 those change only over USB.
+
+The ten preset rows (480 bytes) do not fit one PDU (`DMR_PROV_BODY_MAX` is 260), so
+WRITE_MSG_PRESETS carries up to five rows at a time with a start slot; the tools always send all
+ten slots as two items, so rows the new list no longer has are cleared.
+
+**SET_IDENTITY and the IDs the protocol is keyed by.** The MAC and the CTR nonce bind every PDU
+to the (master, slave) pair as addressed on the air, and the slave's sequence state is kept per
+master ID. A slave whose own ID changes keeps all of that: its master list holds the senders'
+IDs, which do not change. What does change is the address the master must use: the COMMIT that
+carries SET_IDENTITY is answered under the **old** ID (the master addressed it and verifies the
+reply's MAC with it), and the new ID goes live only after that reply has been transmitted
+(`dmrProvApplyIdentityActivate` from `dmrProvTick`). The next job to that radio uses the new ID;
+the tool puts SET_IDENTITY last in a job and, when a job is split, in the last transaction. A
+**master's** own ID is a different matter: every slave accepts only the master IDs in its `PROV`
+block, and the nonce includes the master ID, so a master that changes its ID must be re-paired
+into every slave over USB (`provision.py pair --master-id`); its own sequence counter carries on
+unchanged (one counter per radio, whatever its ID), so no re-key is needed.
 
 STATUS_REPLY body: `result(1) || txn(1) || lastSeq(4) || codeplugCrc(4) || gitHash(8 ASCII) ||
 batteryCentivolts(2) || staged(1) || failedMacs(2)`. `codeplugCrc` is the CRC32 of the records of
@@ -235,6 +255,9 @@ All through existing, main-loop-safe functions:
 | SET_VFO | `codeplugSetVFO_ChannelData()` plus the live copy in `settingsVFOChannel[]` | |
 | SET_SETTING | field table in `dmr_prov_apply.c` (`txPowerLevel`, `backlightMode`, `backLightTimeout`, `displayContrast`, `scanDelay`, `scanModePause`, `scanStepTime`, `dmrDestinationFilter`, `dmrCcTsFilter`, `privateCalls`, `txTimeoutBeepX5Secs`, `micGainDMR`, `micGainFM`, `ecoLevel`, `apo`, `autolockTimer`, `currentZone`, `beepVolumeDivider`, `bitfieldOptions[0..1]`), then `settingsSaveSettings(true)` once per commit | the DMR ID, callsign and anything in the `PROV` block are not settings fields |
 | STORE_KEY | `dmrAesStoreKey()` | the only way key bytes travel: encrypted and authenticated like everything else |
+| WRITE_CONTACT | `codeplugContactSaveDataForIndex()` after converting the record's BCD id to the integer the function converts back; the function updates the contacts cache (insert, update or remove) | contacts live in SPI flash sectors at `CODEPLUG_ADDR_CONTACTS`, 24 bytes each; read back raw for the CRC |
+| SET_IDENTITY | `EEPROM_Write(CODEPLUG_ADDR_USER_DMRID)` (byte-swapped BCD, as `codeplugSetUserDMRID`) and `EEPROM_Write(CODEPLUG_ADDR_USER_CALLSIGN, 8)` | `trxDMRID` and `uiDataGlobal.userDMRId` are refreshed after the reply went out (§3.3) |
+| WRITE_MSG_PRESETS | `dmrSmsPresetsWrite()` in `dmr_sms.c`: read-modify-write of the MSGC block through `codeplugSetOpenGD77CustomData`, then the config reloads | one custom-data write per item (two per full preset list) |
 | REBOOT | `settingsSaveSettings(true)` then `NVIC_SystemReset()` from a timer callback | after the STATUS reply has been transmitted |
 
 The sequence number is persisted (`codeplugSetOpenGD77CustomData` on the `PROV` block) after the
@@ -350,7 +373,13 @@ Host (`sh tests/run_all.sh`, plain gcc):
   `dmr_sms.c` and an unpaired radio (the hooks must change nothing).
 * The Python builder is checked against the C builder byte for byte (same key, IDs, seq, txn and
   body give the same 16 bursts, CRC-9 and header CRCs included), and `prov_packet.py decode` reads
-  the C builder's blocks back.
+  the C builder's blocks back. `prov_packet.py vectors` prints the bursts of a fixed WRITE_CONTACT
+  PDU as a C array, and `test_prov_rx` compares `dmrProvBuildBursts()` with it.
+* `test_prov_rx` also commits a transaction of two contacts, both preset chunks and an identity
+  (order, record bytes, read-back CRC, the deferred `trxDMRID` refresh), rejects each of them a
+  byte short or long and a preset chunk whose count or start slot is out of range, and drives the
+  real `dmrSmsPresetsWrite()` / `dmrSmsPresetsRead()` against a flash-backed MSGC block (magic,
+  version, `numPresets`, row offsets, reload, untouched rows kept).
 
 Bench (one fork radio, one stock TYT, HackRF + DSD-FME), see BUILD.md "Remote provisioning":
 

@@ -22,6 +22,9 @@
 #include "crypto/dmr_aes.h"
 #include "crypto/dmr_aes_hook.h"
 #include "hardware/EEPROM.h"
+#include "hardware/SPI_Flash.h"
+#include "functions/dmr_sms.h"
+#include "user_interface/uiGlobals.h"
 #include "interfaces/batteryAndPowerManagement.h"
 #include "user_interface/menuSystem.h"
 #include <string.h>
@@ -88,6 +91,36 @@ int dmrProvApplyStoreKey(uint8_t slot, const uint8_t *key32)
     return dmrAesStoreKey(slot, key32);
 }
 
+int dmrProvApplyContact(uint16_t index, const uint8_t *record24)
+{
+    if ((index < CODEPLUG_CONTACTS_MIN) || (index > CODEPLUG_CONTACTS_MAX)) { return 0; }
+    CodeplugContact_t c;
+    memcpy(&c, record24, CODEPLUG_CONTACT_DATA_SIZE);
+    /* the record is in codeplug form; the saver takes the converted id and converts it back,
+     * then updates the contacts cache itself (a name starting with 0xFF removes the contact) */
+    c.tgNumber = bcd2int(__builtin_bswap32(c.tgNumber));
+    c.NOT_IN_CODEPLUGDATA_indexNumber = index;
+    return codeplugContactSaveDataForIndex(index, &c) ? 1 : 0;
+}
+
+int dmrProvApplyIdentity(uint32_t dmrId, const uint8_t *callsign8)
+{
+    if ((dmrId == 0) || (dmrId > 0x00FFFFFFu)) { return 0; }
+    uint32_t bcd = __builtin_bswap32(int2bcd(dmrId));   /* as codeplugSetUserDMRID stores it */
+    if (!EEPROM_Write(CODEPLUG_ADDR_USER_DMRID, (uint8_t *)&bcd, 4)) { return 0; }
+    return EEPROM_Write(CODEPLUG_ADDR_USER_CALLSIGN, (uint8_t *)callsign8, DMR_PROV_CALLSIGN_LEN) ? 1 : 0;
+}
+
+void dmrProvApplyIdentityActivate(void)
+{
+    trxDMRID = uiDataGlobal.userDMRId = codeplugGetUserDMRID();   /* what settingsLoadSettings does at boot */
+}
+
+int dmrProvApplyMsgPresets(uint8_t first, uint8_t count, const uint8_t *rows)
+{
+    return dmrSmsPresetsWrite(first, count, rows);
+}
+
 static void provRebootCallback(void)
 {
     settingsSaveSettings(true);
@@ -123,6 +156,24 @@ int dmrProvApplyReadBack(uint8_t op, const uint8_t *body, int bodyLen, uint8_t *
             if ((body[0] >= PROV_NUM_FIELDS) || (max < 4)) { return 0; }
             memcpy(out, (uint8_t *)&nonVolatileSettings + s_fields[body[0]].off, s_fields[body[0]].width);
             return s_fields[body[0]].width;
+        case DMR_PROV_OP_WRITE_CONTACT:
+        {
+            uint16_t index = (uint16_t)((body[0] << 8) | body[1]);
+            if ((index < CODEPLUG_CONTACTS_MIN) || (index > CODEPLUG_CONTACTS_MAX) || (max < CODEPLUG_CONTACT_DATA_SIZE)) { return 0; }
+            SPI_Flash_read(FLASH_ADDRESS_OFFSET + CODEPLUG_ADDR_CONTACTS + (index - 1) * CODEPLUG_CONTACT_DATA_SIZE, out, CODEPLUG_CONTACT_DATA_SIZE);
+            return CODEPLUG_CONTACT_DATA_SIZE;
+        }
+        case DMR_PROV_OP_SET_IDENTITY:
+        {
+            if (max < 4 + DMR_PROV_CALLSIGN_LEN) { return 0; }
+            uint32_t id = codeplugGetUserDMRID();
+            out[0] = (uint8_t)(id >> 24); out[1] = (uint8_t)(id >> 16); out[2] = (uint8_t)(id >> 8); out[3] = (uint8_t)id;
+            EEPROM_Read(CODEPLUG_ADDR_USER_CALLSIGN, out + 4, DMR_PROV_CALLSIGN_LEN);
+            return 4 + DMR_PROV_CALLSIGN_LEN;
+        }
+        case DMR_PROV_OP_WRITE_MSG_PRESETS:
+            if (max < body[1] * DMR_PROV_PRESET_LEN) { return 0; }
+            return dmrSmsPresetsRead(body[0], body[1], out);
         default:
             return 0;   /* keys are never read back */
     }

@@ -387,6 +387,40 @@ const char *dmrSmsPresetGet(int idx)
 	return s_cfg.preset[idx];
 }
 
+#if defined(ENABLE_REMOTE_PROVISION)
+int dmrSmsPresetsWrite(int first, int count, const uint8_t *rows)
+{
+	if ((first < 0) || (count < 1) || (first + count > DMR_SMS_NUM_PRESETS)) { return 0; }
+	cfg_ensure();
+	if (memcmp(s_cfg.magic, "MSGC", 4) != 0)
+	{
+		/* no block yet: start one with the defaults every other field reads as */
+		memset(&s_cfg, 0, sizeof s_cfg);
+		memcpy(s_cfg.magic, "MSGC", 4);
+		s_cfg.version = 1;
+	}
+	for (int i = 0; i < count; i++)
+	{
+		memcpy(s_cfg.preset[first + i], rows + i * MSGC_PRESET_LEN, MSGC_PRESET_LEN);
+		s_cfg.preset[first + i][MSGC_PRESET_LEN - 1] = 0;
+	}
+	s_cfg.numPresets = 0;
+	for (int i = 0; i < DMR_SMS_NUM_PRESETS; i++) { if (s_cfg.preset[i][0] != 0) { s_cfg.numPresets = (uint8_t)(i + 1); } }
+	dmrAesEnsureCustomDataRegion();
+	int ok = codeplugSetOpenGD77CustomData(CODEPLUG_CUSTOM_DATA_TYPE_MSG_CONFIG, (uint8_t *)&s_cfg, (int)sizeof s_cfg) ? 1 : 0;
+	s_cfgLoaded = 0;   /* read it back from flash on the next use */
+	return ok;
+}
+
+int dmrSmsPresetsRead(int first, int count, uint8_t *out)
+{
+	if ((first < 0) || (count < 1) || (first + count > DMR_SMS_NUM_PRESETS)) { return 0; }
+	cfg_ensure();
+	memcpy(out, s_cfg.preset[first], (size_t)count * MSGC_PRESET_LEN);
+	return count * MSGC_PRESET_LEN;
+}
+#endif
+
 void dmrSmsDefaultRecipient(uint32_t *dst, int *group)
 {
 	cfg_ensure();
