@@ -41,6 +41,12 @@ INCS  = -I. -ICore/Inc \
 #                          the Anytone radios), the row watch, and the Dual Watch options menu
 #                          (home side, speed, stay, channel as side B). Ported from
 #                          erenbozaci/md-uv390-firmware (Eren TA3BZC).
+#   ENABLE_REMOTE_PROVISION
+#                          Secure remote provisioning over DMR data: a master radio pushes
+#                          channels, zones, VFOs, settings and voice keys to slave radios,
+#                          AES-256-CTR + AES-CMAC under a USB-loaded pairing key, replay
+#                          protected, staged and committed atomically (PROVISIONING.md).
+#                          Needs ENABLE_DMR_DATA (the data path it rides on).
 #   ENABLE_TA2TWC_SCREENS  The TA2TWC screens (josephddt/OpenGD77-TA2TWC): redesigned Channel
 #                          home screen with the S-meter, dBm, signal quality, battery voltage,
 #                          temperature and a signal history, caller and TX screens, telemetry
@@ -76,17 +82,18 @@ INCS  = -I. -ICore/Inc \
 #   dev-prof   ENABLE_SPECTRUM ENABLE_SCAN_PROFILER ENABLE_KEY_INJECTION  -- scanprof.py
 #   dev-aes    DMR_AES_DIAG_RX ENABLE_KEY_INJECTION  -- AES RX diagnostics
 #   dev-gps    ENABLE_GPS_NMEA_LOG
+#   dev-prov   ENABLE_DMR_DATA ENABLE_REMOTE_PROVISION ENABLE_KEY_INJECTION  -- provisioning bench
 #
 # There is no "everything" profile. Since the notification save buffer shrank to an 80-row
 # band and the AMBE codec state moved to CCM (2026-10-24), every flag combination links
 # (all flags: 14,756 B SRAM spare, "full" profile: 15,556 B SRAM / 6,920 B CCM spare), but the
 # dev flags are still meant to be enabled one at a time on top of a feature profile.
 # ---------------------------------------------------------------------------
-FEATURE_FLAGS = ENABLE_DMR_DATA ENABLE_FAST_SCAN ENABLE_DUAL_SCREEN ENABLE_TA2TWC_SCREENS
+FEATURE_FLAGS = ENABLE_DMR_DATA ENABLE_REMOTE_PROVISION ENABLE_FAST_SCAN ENABLE_DUAL_SCREEN ENABLE_TA2TWC_SCREENS
 DEV_FLAGS     = ENABLE_SPECTRUM ENABLE_SCAN_PROFILER ENABLE_KEY_INJECTION ENABLE_GPS_NMEA_LOG \
                 DMR_AES_DIAG_RX DMR_AES_DIAG_PATTERN DMR_AES_DIAG_ENCPAT
 ALL_FLAGS     = $(FEATURE_FLAGS) $(DEV_FLAGS)
-PROFILES      = release full dev-sweep dev-prof dev-aes dev-gps
+PROFILES      = release full dev-sweep dev-prof dev-aes dev-gps dev-prov
 
 PROFILE ?= release
 ifeq ($(PROFILE),release)
@@ -108,6 +115,10 @@ DMR_AES_DIAG_RX = 1
 ENABLE_KEY_INJECTION = 1
 else ifeq ($(PROFILE),dev-gps)
 ENABLE_GPS_NMEA_LOG = 1
+else ifeq ($(PROFILE),dev-prov)
+ENABLE_DMR_DATA = 1
+ENABLE_REMOTE_PROVISION = 1
+ENABLE_KEY_INJECTION = 1
 else
 $(error Unknown PROFILE '$(PROFILE)'. Known profiles: $(PROFILES))
 endif
@@ -117,6 +128,11 @@ endif
 ifeq ($(ENABLE_SCAN_PROFILER),1)
 ifneq ($(ENABLE_SPECTRUM),1)
 $(error ENABLE_SCAN_PROFILER=1 needs ENABLE_SPECTRUM=1: the profiler is implemented in spectrum.c)
+endif
+endif
+ifeq ($(ENABLE_REMOTE_PROVISION),1)
+ifneq ($(ENABLE_DMR_DATA),1)
+$(error ENABLE_REMOTE_PROVISION=1 needs ENABLE_DMR_DATA=1: provisioning PDUs ride the DMR data path)
 endif
 endif
 ifeq ($(DMR_AES_DIAG_PATTERN)$(DMR_AES_DIAG_ENCPAT),11)

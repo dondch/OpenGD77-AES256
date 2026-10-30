@@ -56,9 +56,14 @@ static volatile uint8_t s_burstCount;   /* read in the HR-C6000 ISR (dmrDataTxNe
 static volatile uint8_t s_burstIndex;   /* volatile: dmrDataTxEnd's resets must not reorder  */
 static volatile uint8_t s_dataTxActive; /* past the active=0 store the ISR gates on           */
 static uint16_t         s_txFinishPolls;
+static uint8_t          s_txDoneGrace;
+static volatile uint8_t s_txPending;    /* a call is loaded and keys ~100 ms later: no un-key meanwhile */
 
 #define DMR_DATA_TX_FINISH_POLL_MS   25
 #define DMR_DATA_TX_FINISH_TIMEOUT   120  // * poll period -> ~3 s safety cap
+#define DMR_DATA_TX_RX_GRACE_POLLS   8    // 200 ms: the receiver is listening for the Response PDU that
+                                          // follows a confirmed data call 30 ms after its last block; the
+                                          // un-key below re-initialises the RF chip, so not before then
 
 /*
  * Un-key the data call cleanly, mirroring a PTT release. The command path keys via
@@ -71,9 +76,20 @@ static uint16_t         s_txFinishPolls;
  */
 static void dmrDataTxFinishPoll(void)
 {
-	if ((s_dataTxActive || trxIsTransmitting) && (++s_txFinishPolls < DMR_DATA_TX_FINISH_TIMEOUT))
+	// A back-to-back call (the next provisioning PDU is loaded as soon as the Response to this
+	// one is in, ~60 ms after the last block) must never be un-keyed by the poll of the call
+	// before it: on the bench (2026-10-30) the held un-key landed on the next call's key-up and
+	// broke its first try every time. s_txPending covers the 100 ms between load and key-up,
+	// s_dataTxActive the call itself; the un-key below happens only after a call that no new
+	// call followed within the Response window.
+	if ((s_dataTxActive || trxIsTransmitting || s_txPending) && (++s_txFinishPolls < DMR_DATA_TX_FINISH_TIMEOUT))
 	{
-		addTimerCallback(dmrDataTxFinishPoll, DMR_DATA_TX_FINISH_POLL_MS, MENU_ANY, false);
+		addTimerCallback(dmrDataTxFinishPoll, DMR_DATA_TX_FINISH_POLL_MS, MENU_ANY, true);
+		return;
+	}
+	if ((s_txFinishPolls < DMR_DATA_TX_FINISH_TIMEOUT) && (s_txDoneGrace++ < DMR_DATA_TX_RX_GRACE_POLLS))
+	{
+		addTimerCallback(dmrDataTxFinishPoll, DMR_DATA_TX_FINISH_POLL_MS, MENU_ANY, true);   // the Response window
 		return;
 	}
 	dmrDataTxEnd();           // ensure the queue/flags are cleared (idempotent)
@@ -84,7 +100,9 @@ static void dmrDataKeyTx(void)
 {
 	s_burstIndex = 0;
 	s_dataTxActive = 1;
+	s_txPending = 0;
 	s_txFinishPolls = 0;
+	s_txDoneGrace = 0;
 	// hrc6000Tick() starts the DMR TX only when isWaking == NONE AND slotState == IDLE.
 	// Clearing isWaking alone isn't enough: on a channel with any stray/recent RX the
 	// timeslot ISR keeps slotState in an RX state until END_TICK_TIMEOUT of silence, so
@@ -93,8 +111,9 @@ static void dmrDataKeyTx(void)
 	// IDLE (also clears isWaking) so the next hrc6000Tick() keys deterministically.
 	HRC6000ForceDMRIdleForTx();
 	trxEnableTransmission(); // LEDs + trxSetTX() (sets trxTransmissionEnabled); state machine -> TX_2 sends our bursts
-	// Poll for completion and un-key (the data call has no PTT release to do it).
-	addTimerCallback(dmrDataTxFinishPoll, DMR_DATA_TX_FINISH_POLL_MS, MENU_ANY, false);
+	// Poll for completion and un-key (the data call has no PTT release to do it). One poll entry
+	// only: the previous call's poll may still be pending, so update it rather than add a second.
+	addTimerCallback(dmrDataTxFinishPoll, DMR_DATA_TX_FINISH_POLL_MS, MENU_ANY, true);
 }
 
 void dmrDataTxLoad(const uint8_t *bursts, uint8_t count)
@@ -110,6 +129,7 @@ void dmrDataTxLoad(const uint8_t *bursts, uint8_t count)
 	memcpy(s_bursts, bursts, (size_t)count * (1 + DMR_DATA_BURST_LEN));
 	s_burstCount = count;
 	s_burstIndex = 0;
+	s_txPending = 1;
 	// Defer keying out of the CPS critical section into the main-loop callback context.
 	addTimerCallback(dmrDataKeyTx, 100, MENU_ANY, false);
 }

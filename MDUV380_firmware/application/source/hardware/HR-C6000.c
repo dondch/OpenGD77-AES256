@@ -1956,8 +1956,22 @@ void hrc6000TimeslotInterruptHandler(void)
 				{
 					dmrDataTxEnd();                            // clears trxTransmissionEnabled
 					hrc.transmissionEnabled = false;          // -> next TX_1 exits to TX_END
+					if (currentRadioDevice->trxDMRModeTx == DMR_MODE_DMO)
+					{
+						// The last block has just gone out. A confirmed-delivery receiver answers
+						// with its Response PDU in the next slot of this timeslot (bench
+						// 2026-10-30: 30 ms after the block ends), which the terminators this
+						// path used to send would talk over: so no terminator in direct mode,
+						// and straight back to receive, the chip now and the RF chip from the
+						// timer context (I2C), as the end of the SMS acknowledgement does.
+						SPI0WritePageRegByte(0x04, 0x41, 0x00);
+						HRC6000InitDigitalDmrRx();
+						addTimerCallback(hrc6000TxBurstCallback, 1, MENU_ANY, false);
+						slotState = DMR_STATE_TX_END_3_DMO;
+						break;
+					}
 					SPI0WritePageRegByte(0x04, 0x41, 0x80);
-					SPI0WritePageRegByte(0x04, 0x50, 0x20);   // Terminator with LC, Data
+					SPI0WritePageRegByte(0x04, 0x50, 0x20);   // Terminator with LC, Data (repeater mode)
 				}
 				slotState = DMR_STATE_TX_1;
 				break;
@@ -2470,6 +2484,15 @@ static void hrc6000DataTxStartBurst(void)
 static void hrc6000DataAckStart(const uint8_t *hdr12)
 {
 	audioAmpDisable(AUDIO_AMP_CHANNEL_RF);
+	// The acknowledgement keys the RF from the chip's TX interrupt without going through
+	// trxSetTX(), so the PA drive was whatever the last transmission left: a radio that had
+	// not transmitted since boot sent its ACK ~31 dB down (bench 2026-10-30). Set the drive
+	// for the TX frequency when it is not already set for it, as trxSetTX() would.
+	if ((currentRadioDevice->lastSetTxFrequency != currentRadioDevice->currentTxFrequency) ||
+			(currentRadioDevice->lastSetTxPowerLevel != currentRadioDevice->txPowerLevel))
+	{
+		trxConfigurePA_DAC_ForFrequencyBand();
+	}
 	SPI0WritePageRegByteArray(0x02, 0x00, (uint8_t *)hdr12, LC_DATA_LENGTH);
 	SPI0WritePageRegByte(0x04, 0x50, 0x60);    // Data Header, Data, LCSS=00
 	SPI0WritePageRegByte(0x04, 0x41, 0x80);    // transmit during next timeslot

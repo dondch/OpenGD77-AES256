@@ -53,6 +53,9 @@
 #include "interfaces/adc.h"
 #include "functions/rxPowerSaving.h"
 #include "functions/dmr_sms.h"
+#if defined(ENABLE_REMOTE_PROVISION)
+#include "functions/dmr_prov.h"
+#endif
 /* Unconditional: the header compiles to nothing without ENABLE_SPECTRUM apart from the
  * no-op SCANPROF_* macros, which the main loop uses whether or not the flag is set. */
 #include "functions/spectrum.h"   /* spectrumTick(), SCANPROF_* profiler macros */
@@ -556,6 +559,9 @@ void applicationMainTask(void)
 
 #if defined(ENABLE_DMR_DATA)
 	dmrSmsInit();   // load the encrypted-SMS store from flash
+#if defined(ENABLE_REMOTE_PROVISION)
+	dmrProvInit();  // pairing key, master list and sequence counters from flash; derive the session keys
+#endif
 #endif
 
 	/* Infinite loop */
@@ -1451,6 +1457,9 @@ void applicationMainTask(void)
 		settingsSaveIfNeeded(false);
 #if defined(ENABLE_DMR_DATA)
 		dmrSmsRxTick();   // decrypt + store + notify any received encrypted SMS
+#if defined(ENABLE_REMOTE_PROVISION)
+		dmrProvTick();    // slave commits and replies, master send/ACK/STATUS state machine
+#endif
 #endif
 
 		if (settingsIsOptionBitSet(BIT_DISPLAY_TIME_IN_HEADER))

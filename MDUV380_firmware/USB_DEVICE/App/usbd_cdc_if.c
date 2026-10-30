@@ -415,6 +415,18 @@ static int8_t CDC_Receive_FS(uint8_t* Buf, uint32_t *Len)
 										s_recvCount = 3 + (Buf[2] * 13);
 									}
 #endif
+#if defined(ENABLE_REMOTE_PROVISION)
+									// 0x9A (provisioning job, [2..3] = length BE) and 0x9B/5 (the 96-byte
+									// PROV block) also span several packets.
+									if ((recvSize >= 4) && (Buf[1] == 0x9A))
+									{
+										s_recvCount = 4 + ((Buf[2] << 8) + Buf[3]);
+									}
+									if ((recvSize >= 3) && (Buf[1] == 0x9B) && (Buf[2] == 5))
+									{
+										s_recvCount = 3 + 96;
+									}
+#endif
 									break;
 
 								default:
