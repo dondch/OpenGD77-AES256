@@ -213,6 +213,9 @@ static struct
 {
 	volatile bool hasEncodedAudio;
 	volatile bool hasAudioData;
+#if defined(ENABLE_DMR_DATA)
+	volatile bool dataCall;          // this reception has carried data bursts and no voice frame yet: no RX beeps for it
+#endif
 	volatile bool hasAbnormalExit;
 	volatile int receivedFramesCount;
 	volatile bool insertSilenceFrame;
@@ -1251,6 +1254,9 @@ static inline void hrc6000SysReceivedDataInt(void)
 					}
 				}
 
+#if defined(ENABLE_DMR_DATA)
+				hrc.dataCall = false;
+#endif
 				SPI1ReadPageRegByteArray(0x03, 0x00, DMR_frame_buffer + LC_DATA_LENGTH, AMBE_AUDIO_LENGTH);
 				dmrAesRxBurst(rxDataType & 0x07); // AES: advance superframe/keystream offset (decrypt happens in codecDecode)
 				dmrAesRxLateEntry(rxDataType & 0x07, (const uint8_t *)(DMR_frame_buffer + LC_DATA_LENGTH)); // AES: read Late-Entry MI direct from AMBE bits (fast new-call lock)
@@ -1754,7 +1760,11 @@ void hrc6000TimeslotInterruptHandler(void)
 			// Once the TS lock is acquired start listening one TS out of two
 			if (hrc.tsAgreed == TS_IS_LOCKED)
 			{
-				if ((hrc.transmissionEnabled == false) && ((uiDataGlobal.rxBeepState & RX_BEEP_CARRIER_HAS_STARTED) == 0))
+				if ((hrc.transmissionEnabled == false) && ((uiDataGlobal.rxBeepState & RX_BEEP_CARRIER_HAS_STARTED) == 0)
+#if defined(ENABLE_DMR_DATA)
+						&& (hrc.dataCall == false)   // a data call is silent: no carrier beep, hence no end beep either
+#endif
+						)
 				{
 					uiDataGlobal.rxBeepState |= (RX_BEEP_CARRIER_HAS_STARTED | RX_BEEP_CARRIER_HAS_STARTED_EXEC);
 					uiDataGlobal.rxBeepState &= ~(RX_BEEP_TALKER_IDENTIFIED | RX_BEEP_TALKER_HAS_ENDED_EXEC);
@@ -2296,6 +2306,9 @@ static void hrc6000InitDigitalState(void)
 	hrc.skipOneTS = false;
 	hrc.lastRxColorCode = 0xFF;
 	hrc.lastRxColorCodeCount = 0;
+#if defined(ENABLE_DMR_DATA)
+	hrc.dataCall = false;
+#endif
 	monitorModeData.dmrIsValid = false;
 }
 
@@ -2326,6 +2339,9 @@ void HRC6000InitDigitalDmrRx(void)
 	hrc.qsoDataTimeout = 0;
 	hrc.lastRxColorCode = 0xFF;
 	hrc.lastRxColorCodeCount = 0;
+#if defined(ENABLE_DMR_DATA)
+	hrc.dataCall = false;
+#endif
 }
 
 void HRC6000ResetTimeSlotDetection(void)
