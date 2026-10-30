@@ -172,6 +172,8 @@ def print_show(d):
             (" (%s)" % j["failReason"]) if j["outcome"] == "failed" else "", j["seq"], j["ack"]))
         if "status" in j:
             print("last STATUS:", j["status"])
+            if "expectedCrc" in d and d["expectedCrc"]:
+                print("codeplug CRC: %s (slave %08x, expected %08x)" % ("match" if j.get("codeplugCrc") == d["expectedCrc"] else "MISMATCH", j.get("codeplugCrc", 0), d["expectedCrc"]))
 
 def send_job(ser, slave, txn, items, single, wait, dump):
     if single:
