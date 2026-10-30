@@ -37,6 +37,7 @@
 #include "user_interface/uiCustomStrings.h"
 #if defined(ENABLE_SIMPLE_MODE)
 #include "user_interface/uiSimpleMode.h"
+#include "functions/codeplug.h"
 #endif
 
 #if defined(HAS_TELEMETRY)
@@ -417,6 +418,15 @@ void uiHomeScreenDraw(const uiHomeScreenData_t *data)
 	else
 	{
 		displayThemeApply(THEME_ITEM_FG_CHANNEL_NAME, THEME_ITEM_BG);
+#if defined(ENABLE_SIMPLE_MODE)
+		if (simpleModeIsOn())
+		{
+			char numbered[SCREEN_LINE_BUFFER_SIZE];   // "1. Fleet": the number the rule card refers to
+			snprintf(numbered, sizeof(numbered), "%d. %s", (codeplugGetLastUsedChannelInCurrentZone() + 1), data->channelName);
+			displayPrintCore(0, HOME_Y_POS_NAME, numbered, FONT_SIZE_3, TEXT_ALIGN_CENTER, false);
+		}
+		else
+#endif
 		displayPrintCore(0, HOME_Y_POS_NAME, data->channelName, FONT_SIZE_3, TEXT_ALIGN_CENTER, false);
 
 		drawFrequency((data->isTransmitting ? data->txFrequency : data->rxFrequency), (data->isTransmitting ? THEME_ITEM_FG_TX_FREQ : THEME_ITEM_FG_RX_FREQ));

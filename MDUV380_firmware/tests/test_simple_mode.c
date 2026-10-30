@@ -28,8 +28,8 @@ static void testKeyRouting(void)
 	check(route(SM_KEY_GREEN, 0, 0, 0) == SM_CONTACTS, "GREEN opens the contact list");
 	check(route(SM_KEY_GREEN, 1, 0, 0) == SM_PIN_MENU, "GREEN held opens the menu behind the PIN");
 	check(route(SM_KEY_GREEN, 0, 0, 1) == SM_BLOCK, "SK2 + GREEN (channel details) is blocked");
-	check(route(SM_KEY_SK1, 0, 0, 0) == SM_PRESETS, "SK1 opens the preset messages");
-	check(route(SM_KEY_SK1, 1, 0, 0) == SM_INBOX, "SK1 held opens the inbox");
+	check(route(SM_KEY_SK1, 0, 0, 0) == SM_INBOX, "SK1 opens the inbox");
+	check(route(SM_KEY_SK1, 1, 0, 0) == SM_PRESETS, "SK1 held opens the send list");
 	check(route(SM_KEY_SK1, 0, 0, 1) == SM_BLOCK, "SK2 + SK1 is blocked");
 	check(route(SM_KEY_RED, 0, 0, 0) == SM_CANCEL_PRIVATE_CALL, "RED never enters the VFO: it only ends a private-call target");
 	check(route(SM_KEY_RED, 1, 0, 0) == SM_BLOCK && route(SM_KEY_RED, 0, 1, 0) == SM_BLOCK && route(SM_KEY_RED, 0, 0, 1) == SM_BLOCK,

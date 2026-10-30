@@ -13,8 +13,8 @@ simpleAction_t simpleModeRouteKey(const simpleKeyEvent_t *ev)
 	{
 		case SM_KEY_NONE:
 			return SM_PASS;
-		case SM_KEY_SK1:      /* short: preset messages; long: the inbox */
-			return ev->sk2Held ? SM_BLOCK : (ev->isLong ? SM_INBOX : SM_PRESETS);
+		case SM_KEY_SK1:      /* short: the inbox; long: send a message (the user's choice on the bench) */
+			return ev->sk2Held ? SM_BLOCK : (ev->isLong ? SM_PRESETS : SM_INBOX);
 		case SM_KEY_GREEN:    /* short: who to call; long: the menu (PIN) */
 			return ev->sk2Held ? SM_BLOCK : (ev->isLong ? SM_PIN_MENU : SM_CONTACTS);
 		case SM_KEY_RED:      /* the VFO key: here it only ends a private call target */

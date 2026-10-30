@@ -152,8 +152,8 @@ On the handheld (power-cycle it once; it should come up on the home channel):
 | knob / keypad arrows | channels of the home zone only; SK2 + knob does nothing |
 | GREEN | the private contacts; select one, PTT calls it; 60 s after the last over the target is the group again |
 | GREEN held | PIN prompt; the right PIN opens the menu, RED cancels; back on the channel screen the PIN is asked again |
-| SK1 | the preset list; GREEN, then "All: <group>" or a contact, GREEN sends; the base shows "SMS: ..." |
-| SK1 held | the inbox |
+| SK1 | the inbox |
+| SK1 held | the send list: a preset or "Write message", GREEN, then "All: <group>" or a contact, GREEN sends; the base shows "SMS: ..." |
 | idle | on another channel, no key or PTT for `idle_return_minutes`: back to the home channel |
 | `provision.py show` over USB | `paired: yes`, lastSeq = the COMMIT's seq, `commits 1` |
 
