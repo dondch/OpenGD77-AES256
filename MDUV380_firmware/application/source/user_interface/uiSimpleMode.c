@@ -114,9 +114,12 @@ static bool pinValidator(void)
 		soundSetMelody(MELODY_ERROR_BEEP);
 		return false;   /* the box clears the digits and stays */
 	}
-	/* RED: give up */
+	/* RED: give up. The box draws a PIN with MESSAGEBOX_BUTTONS_OK and then never closes on RED
+	 * (the boot PIN cannot be escaped by design), so this closes it itself. */
 	s_pendingMenu = MENU_EMPTY;
 	freqEnterReset();
+	uiDataGlobal.MessageBox.validatorCallback = NULL;
+	menuSystemPopPreviousMenu();
 	return true;
 }
 

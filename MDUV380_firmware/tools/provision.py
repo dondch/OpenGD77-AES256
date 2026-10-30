@@ -40,6 +40,7 @@ JOB_JSON (every key optional; a fleet file, FLEET_SETUP.md, is the same with "ra
    "vfos": [{"vfo": "A", "hex": "<112 hex chars>"}],
    "contacts": [{"index": 1, "name": "Fleet", "id": 1, "type": "group"},
                 {"index": 2, "name": "Alice", "id": 1234567, "type": "private"}],
+   "delete_contacts": [6, 7, 8],                            # slots a radio may still hold from before
    "message_presets": ["All well", "Need help"],            # all 10 slots are written, the rest cleared
    "settings": {"txPowerLevel": 3},                        # "per-channel" skips a field
    "home": {"zone": 0, "channel": 1, "idle_return_minutes": 5},
@@ -111,6 +112,8 @@ def items_from_json(j, a, radio=None):
         items.append(pp.item_vfo(0 if str(v["vfo"]).upper() == "A" else 1, bytes.fromhex(v["hex"])))
     for c in j.get("contacts", []):
         items.append(pp.item_contact(int(c["index"]), pp.contact_record(c["name"], int(c["id"]), c.get("type", "private"))))
+    for idx in j.get("delete_contacts", []):
+        items.append(pp.item_contact(int(idx), pp.contact_delete_record()))
     keys = j.get("voice_keys")
     if keys is None:
         keys = j.get("fleet", {}).get("voice_keys", [])

@@ -54,6 +54,8 @@ What the pieces are: `BUILD.md` (build, flags, flashing), `MDUV380_firmware/PROV
   slot (0 = none), `power_w` one of 0.05, 0.25, 0.5, 0.75, 1, 2, 3, 5, 10.
 * `home.channel` is the codeplug channel index of the home channel (its position in the home
   zone is looked up on the radio); `idle_return_minutes` 0 = never, 1..240.
+* `delete_contacts` lists contact slots to clear on radios that still hold older contacts (the GREEN list shows
+  every private contact the radio has).
 * `message_presets` are ASCII (the radio font has no diacritics), up to 10 of 47 characters; all
   ten slots are written, so dropping a line removes it from the radios.
 * `settings` names are the whitelist in `PROVISIONING.md` §6; a value that is not a number (such
@@ -133,7 +135,7 @@ On the handheld (power-cycle it once; it should come up on the home channel):
 | --- | --- |
 | boot | channel screen, home zone and channel, no PIN prompt |
 | RED | nothing (or ends a private-call target); never the VFO |
-| knob / arrows | channels of the home zone only; SK2 + knob does nothing |
+| knob / keypad arrows | channels of the home zone only; SK2 + knob does nothing |
 | GREEN | the private contacts; select one, PTT calls it; 60 s after the last over the target is the group again |
 | GREEN held | PIN prompt; the right PIN opens the menu, RED cancels; back on the channel screen the PIN is asked again |
 | SK1 | the preset list; GREEN, then "All: <group>" or a contact, GREEN sends; the base shows "SMS: ..." |

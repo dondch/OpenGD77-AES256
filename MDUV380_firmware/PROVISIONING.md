@@ -145,7 +145,7 @@ anywhere, and the staging area is not touched, before the MAC and sequence check
 | 0x12 | SET_VFO | `vfo(1: 0 = A, 1 = B) || record(56)` | staged: write the VFO record |
 | 0x13 | SET_SETTING | `field(1) || value(4 LE)` | staged: set a whitelisted `nonVolatileSettings` field (§6), saved with `settingsSaveSettings(true)` |
 | 0x14 | STORE_KEY | `slot(1) || key(32)` | staged: `dmrAesStoreKey(slot, key)`, slot 1..15 (voice keys only) |
-| 0x15 | WRITE_CONTACT | `idx(2 BE) || record(24)` | staged: write contact idx (1..1024), the raw `CodeplugContact_t` record (name 16, id as 8 BCD digits in codeplug byte order, call type, rx tone, ring, flags); a name starting with 0xFF deletes it; the contacts cache is updated |
+| 0x15 | WRITE_CONTACT | `idx(2 BE) || record(24)` | staged: write contact idx (1..1024), the raw `CodeplugContact_t` record (name 16, id as 8 BCD digits in codeplug byte order, call type, rx tone, ring, flags); a name starting with 0xFF deletes it (`prov_packet.contact_delete_record()`, `"delete_contacts"` in the job file); the contacts cache is updated |
 | 0x16 | SET_IDENTITY | `dmrId(4 BE) || callsign(8)` | staged: this radio's own DMR ID and callsign (0xFF padded) into the codeplug; `trxDMRID` is refreshed once the STATUS reply to the COMMIT has been transmitted (see below) |
 | 0x17 | WRITE_MSG_PRESETS | `first(1) || count(1) || count x 48` | staged: message preset rows `first..first+count-1` (count 1..5, first + count <= 10) of the MSGC block, NUL padded; the other rows and fields are kept, the SMS config reloads |
 | 0x20 | COMMIT | `count(1) || crc32(4 BE)` | verify the staged image, write it, reply STATUS |

@@ -35,6 +35,9 @@
 #include "user_interface/uiGlobals.h"
 #include "user_interface/uiHomeScreen.h"
 #include "user_interface/uiCustomStrings.h"
+#if defined(ENABLE_SIMPLE_MODE)
+#include "user_interface/uiSimpleMode.h"
+#endif
 
 #if defined(HAS_TELEMETRY)
 
@@ -136,6 +139,12 @@ static void drawStatusBar(const uiHomeScreenData_t *data)
 	}
 
 	x = (BADGE_X + badgeWidth + 5);
+#if defined(ENABLE_SIMPLE_MODE)
+	if (simpleModeIsOn())
+	{
+		buffer[0] = 0;   // a fleet handheld shows no timeslot, colour code or bandwidth
+	}
+#endif
 	displayThemeApply(((data->isReceivingCall && (data->callMatchesTxSettings == false)) ? THEME_ITEM_FG_TX_COUNTER : THEME_ITEM_FG_HEADER_TEXT), THEME_ITEM_BG);
 	displayPrintCore(x, STATUS_TEXT_Y, buffer, FONT_SIZE_1, TEXT_ALIGN_LEFT, false);
 	displayThemeApply(THEME_ITEM_FG_HEADER_TEXT, THEME_ITEM_BG);
@@ -422,6 +431,12 @@ void uiHomeScreenDraw(const uiHomeScreenData_t *data)
 	{
 		drawTxValues(data);
 	}
+#if defined(ENABLE_SIMPLE_MODE)
+	else if (simpleModeIsOn())
+	{
+		uiTelemetryDrawRxBar(&data->telemetry, HOME_Y_POS_TELEMETRY);   // the bar says enough; no numbers, no history
+	}
+#endif
 	else
 	{
 		uiTelemetryDrawRx(&data->telemetry, HOME_Y_POS_TELEMETRY, true);

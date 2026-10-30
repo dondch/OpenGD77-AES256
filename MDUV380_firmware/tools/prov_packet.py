@@ -13,7 +13,10 @@ inverse, over the crypto in prov_crypto.py. Command line:
   #     with `provision.py show` and use a higher one. --dry-run prints the bursts instead.
   #     Items: --channel/--chan, --zone, --vfo, --setting, --voice-key, --add-contact INDEX NAME
   #     ID group|private|all, --presets TEXT... (all 10 slots, two items), --identity DMRID CALLSIGN
-  #     (sent last: the slave answers under its old ID), then --commit.
+  #     (sent last: the slave answers under its old ID), or --from-json FILE [--radio UNIT] (the
+  #     items provision.py would send), then --commit. This is how a master radio, which never
+  #     writes its own codeplug over the air, gets the fleet configuration: replay the job into
+  #     it over USB under one of its configured master IDs.
 
   # (b) decode what a MASTER sent, from the data bursts DSD-FME shows for a HackRF capture:
   python3 prov_packet.py decode --key <64hex> --master 1234567 --slave 7654321 \\
@@ -80,19 +83,27 @@ def channel_record(name, rx_hz, tx_hz, mode="digital", color_code=1, timeslot=1,
     n = name.encode("ascii", "replace")[:ZONE_NAME_LEN]
     r[0:16] = n + b"\xff" * (16 - len(n))
     struct.pack_into("<II", r, 16, bcd(rx_hz // 10), bcd(tx_hz // 10))
+    # offsets from CodeplugChannel_t (codeplug.h): the fields after the tones start at 36
+    # (locationLon2 36, unused 37, LibreDMR_flag1 38, rxSignaling 39, artsInterval 40, encrypt 41,
+    # unused 42, rxGroupList 43, txColor 44, aprsConfigIndex 45, contact 46..47, flag1 48, flag2 49,
+    # flag3 50, flag4 51, VFOoffsetFreq 52..53, VFOflag5 54, sql 55); CODEPLUG_CHANNEL_FLAG4_OFFSET
+    # is 51. Bench 2026-10-30: one byte further and the colour code lands in the APRS index, the
+    # contact reads 256 and the bandwidth bit goes into an unused word.
     r[24] = 1 if mode == "digital" else 0          # chMode
     r[25] = power & 0xFF                            # libreDMR_Power (0 = master)
     r[27] = tot & 0xFF
     struct.pack_into("<HH", r, 32, css_encode(rx_tone), css_encode(tx_tone))
-    r[40] = 0                                       # rxSignaling (repurposed)
-    r[42] = encrypt & 0xFF                          # per-channel AES key slot (0 = inherit, 0xFF = clear)
-    r[44] = rx_group & 0xFF
-    r[45] = color_code & 0x0F                       # txColor
-    struct.pack_into("<H", r, 47, contact & 0xFFFF)
-    r[49] = 0                                       # flag1
-    r[50] = 0x40 if timeslot == 2 else 0x00         # flag2: 0x40 = TS2
-    r[51] = 0x00                                    # flag3
-    r[52] = (0x02 if bandwidth_25k else 0) | (0x04 if rx_only else 0)   # flag4
+    r[38] = 0                                       # LibreDMR_flag1 (optional DMR ID, no beep, no eco)
+    r[39] = 0                                       # rxSignaling (repurposed)
+    r[41] = encrypt & 0xFF                          # per-channel AES key slot (0 = inherit, 0xFF = clear)
+    r[43] = rx_group & 0xFF
+    r[44] = color_code & 0x0F                       # txColor
+    r[45] = 0                                       # aprsConfigIndex
+    struct.pack_into("<H", r, 46, contact & 0xFFFF)
+    r[48] = 0                                       # flag1
+    r[49] = 0x40 if timeslot == 2 else 0x00         # flag2: 0x40 = TS2
+    r[50] = 0x00                                    # flag3
+    r[51] = (0x02 if bandwidth_25k else 0) | (0x04 if rx_only else 0)   # flag4
     r[55] = squelch & 0xFF
     return bytes(r)
 
@@ -118,6 +129,11 @@ def contact_record(name, dmr_id, call_type="private"):
     r += struct.pack(">I", bcd(int(dmr_id)))
     r += bytes([CALL_TYPES[str(call_type).lower()] if not isinstance(call_type, int) else call_type, 0, 0, 0xFF])
     return bytes(r)
+
+def contact_delete_record():
+    """The record that deletes a contact slot: name all 0xFF, call type 0xFF (the firmware's own
+    delete convention; the saver drops it from the contacts cache)."""
+    return b"\xff" * 16 + bytes(4) + b"\xff" + bytes([0, 0, 0xFF])
 
 CALLSIGN_LEN = 8
 PRESET_LEN = 48
@@ -287,9 +303,10 @@ def describe_body(body):
         idx = struct.unpack(">H", a[:2])[0]
         rec = a[2:]
         rx, tx = struct.unpack("<II", rec[16:24])
-        return "%s idx %d name %r rx %s tx %s mode %s cc %d ts %d contact %d" % (
+        return "%s idx %d name %r rx %s tx %s mode %s cc %d ts %d contact %d key %d bw %s" % (
             name, idx, rec[:16].rstrip(b"\xff").decode("ascii", "replace"), "%08x" % rx, "%08x" % tx,
-            "digital" if rec[24] else "analog", rec[45] & 0x0F, 2 if rec[50] & 0x40 else 1, struct.unpack("<H", rec[47:49])[0])
+            "digital" if rec[24] else "analog", rec[44] & 0x0F, 2 if rec[49] & 0x40 else 1, struct.unpack("<H", rec[46:48])[0],
+            rec[41], "25k" if rec[51] & 0x02 else "12.5k")
     if op == pc.OP_WRITE_ZONE and len(a) == 177:
         chans = [struct.unpack("<H", a[17 + 2 * i:19 + 2 * i])[0] for i in range(80)]
         return "%s zone %d name %r channels %s" % (name, a[0], a[1:17].rstrip(b"\xff").decode("ascii", "replace"), [c for c in chans if c])
@@ -303,6 +320,8 @@ def describe_body(body):
     if op == pc.OP_WRITE_CONTACT and len(a) == 2 + CONTACT_LEN:
         idx = struct.unpack(">H", a[:2])[0]
         rec = a[2:]
+        if rec[0] == 0xFF:
+            return "%s idx %d (delete)" % (name, idx)
         digits = "".join("%02x" % x for x in rec[16:20])
         types = {0: "group", 1: "private", 2: "all"}
         return "%s idx %d name %r id %d type %s" % (name, idx, rec[:16].rstrip(b"\xff").decode("ascii", "replace"),
@@ -420,6 +439,7 @@ def add_item_args(ap):
     ap.add_argument("--voice-key", nargs=2, action="append", metavar=("SLOT", "64HEX"), default=[])
     ap.add_argument("--add-contact", nargs=4, action="append", metavar=("INDEX", "NAME", "ID", "group|private|all"), default=[],
                     help="write contact INDEX (1..1024)")
+    ap.add_argument("--del-contact", type=int, action="append", default=[], metavar="INDEX", help="delete contact INDEX")
     ap.add_argument("--identity", nargs=2, metavar=("DMRID", "CALLSIGN"), help="set the slave's own DMR ID and callsign (goes live after its reply)")
     ap.add_argument("--presets", nargs="+", metavar="TEXT", help="the 10 message preset slots (missing ones cleared), two items")
     ap.add_argument("--status", action="store_true", help="a STATUS request")
@@ -451,6 +471,8 @@ def items_from_args(a):
         items.append(item_key(int(slot), bytes.fromhex(key)))
     for idx, name, cid, ctype in a.add_contact:
         items.append(item_contact(int(idx), contact_record(name, int(cid), ctype)))
+    for idx in a.del_contact:
+        items.append(item_contact(int(idx), contact_delete_record()))
     if a.presets:
         items += preset_items(a.presets)
     if a.identity:
@@ -472,6 +494,8 @@ def main():
         p.add_argument("--seq", type=int, required=True, help="first sequence number (one per PDU)")
         p.add_argument("--txn", type=int, default=1)
         add_item_args(p)
+        p.add_argument("--from-json", help="a job or fleet file (provision.py JOB_JSON); with --radio UNIT that unit's identity")
+        p.add_argument("--radio")
         p.add_argument("--port"); p.add_argument("--dry-run", action="store_true")
     sub.add_parser("vectors", help="print the bursts of a fixed WRITE_CONTACT PDU as a C array (tests/test_prov_rx.c compares them with dmrProvBuildBursts)")
     p = sub.add_parser("decode")
@@ -515,6 +539,12 @@ def main():
     key = bytes.fromhex(a.key)
     ke, km = pc.derive_keys(key)
     items, single = items_from_args(a)
+    if a.from_json:
+        import provision
+        j = provision.load_json(a.from_json)
+        radio = provision.pick_radio(j, a.radio) if a.radio else None
+        ji, js = provision.items_from_json(j, None, radio)
+        items += ji; single += js
     seq = a.seq
     pdus = []
     for it in items:

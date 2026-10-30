@@ -38,11 +38,17 @@ int dmrProvApplyChannel(uint16_t index, const uint8_t *record56)
     if ((index < CODEPLUG_CHANNELS_MIN) || (index > CODEPLUG_CHANNELS_MAX)) { return 0; }
     if (!codeplugChannelSaveRawDataForIndex(index, record56)) { return 0; }
     if (!codeplugAllChannelsIndexIsInUse(index)) { codeplugAllChannelsIndexSetUsed(index); }
+#if defined(ENABLE_SIMPLE_MODE)
+    simpleModeSettingsChanged();   /* the channel screen holds a copy of the current record: reload the home channel */
+#endif
     return 1;
 }
 
 int dmrProvApplyZone(uint8_t zone, const uint8_t *record176)
 {
+#if defined(ENABLE_SIMPLE_MODE)
+    simpleModeSettingsChanged();
+#endif
     return codeplugZoneSaveRawDataForIndex(zone, record176) ? 1 : 0;
 }
 

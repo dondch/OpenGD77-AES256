@@ -23,7 +23,12 @@ simpleAction_t simpleModeRouteKey(const simpleKeyEvent_t *ev)
 			return (ev->isLong || ev->sk2Held) ? SM_BLOCK : SM_CHANNEL_UP;
 		case SM_KEY_DOWN:
 			return (ev->isLong || ev->sk2Held) ? SM_BLOCK : SM_CHANNEL_DOWN;
-		default:              /* talkgroup and squelch steps, timeslot, mode, numeric entry, quick menu, APRS ... */
+		case SM_KEY_RIGHT:    /* the keypad arrows reach the channel screen as LEFT / RIGHT (talkgroup or squelch
+		                       * steps there, and power with SK2): here they step the channel like the knob */
+			return (ev->isLong || ev->sk2Held) ? SM_BLOCK : SM_CHANNEL_UP;
+		case SM_KEY_LEFT:
+			return (ev->isLong || ev->sk2Held) ? SM_BLOCK : SM_CHANNEL_DOWN;
+		default:              /* timeslot, mode, numeric entry, quick menu, APRS, mute ... */
 			return SM_BLOCK;
 	}
 }

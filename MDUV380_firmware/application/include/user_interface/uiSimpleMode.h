@@ -32,7 +32,8 @@ simpleAction_t simpleModeRouteUiEvent(uiEvent_t *ev);
 /* Main loop, once per iteration: the pending menu after a PIN, the idle return, the end of a
  * private call, a home change pushed over the air. activity = a key or button this tick. */
 void simpleModeTick(bool activity);
-/* The settings were just rewritten by remote provisioning: apply a changed home on the next tick. */
+/* Remote provisioning rewrote the settings, a channel or a zone: go to the (possibly new) home
+ * channel on the next tick, which also reloads the channel screen's copy of the record. */
 void simpleModeSettingsChanged(void);
 /* Keep the three simple-mode settings fields sane (a radio upgraded from a build without the
  * flag reads whatever its EEPROM held there). Called from settingsLoadSettings. */
