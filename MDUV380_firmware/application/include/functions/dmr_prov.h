@@ -91,7 +91,7 @@ void dmrProvRxResponse(uint32_t src, uint32_t dst, uint8_t status);
  * flags bit0: append an implicit COMMIT(count, crc) after the items; bit1: the items are
  * single-shot (STATUS / REBOOT), no COMMIT. Returns 0 when queued, <0: -1 busy (a job is
  * running), -2 not paired, -3 arena held by another feature, -4 malformed, -5 too big,
- * -6 sequence exhausted (re-key). */
+ * -6 sequence exhausted (re-key); the USB handler adds -7 (the CPS screen is up: no RF). */
 int  dmrProvJobLoad(const uint8_t *job, int len);
 /* Snapshot for the host: phase, item index/count, tries, last ACK N(S), last STATUS fields.
  * Returns the bytes written. */
