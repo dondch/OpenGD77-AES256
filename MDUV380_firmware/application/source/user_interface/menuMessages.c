@@ -22,6 +22,7 @@
 #include "functions/codeplug.h"
 #include "crypto/dmr_aes.h"
 #include "io/keyboard.h"
+#include "functions/ticks.h"
 #include <string.h>
 #include <stdlib.h>
 
@@ -29,9 +30,14 @@
 
 enum { MSG_HOME = 0, MSG_LIST, MSG_READ, MSG_COMPOSE, MSG_RECIPIENT, MSG_RESULT, MSG_PRESETS, MSG_TARGET };
 
+#define MSG_RESULT_HOLD_MS  30000u   /* the send result stays this long (by the clock, not loop iterations) */
+
 #if defined(ENABLE_SIMPLE_MODE)
-/* How the simple mode entered this menu (0 = the normal menu entry). While set, RED at the top
- * of the flow and the end of a send leave the menu instead of showing the Messages home. */
+/* How the simple mode enters this menu (0 = the normal menu entry): set right before the push,
+ * read into s_msg.entry on the first run and cleared, so a screen that is popped from outside
+ * (the idle return, the end of a private call) cannot leave it behind for the next entry. While
+ * s_msg.entry is set, RED at the top of the flow and the end of a send leave the menu instead
+ * of showing the Messages home. */
 enum { ENTRY_MENU = 0, ENTRY_PRESETS, ENTRY_INBOX };
 static uint8_t s_entry;
 #endif
@@ -48,9 +54,10 @@ static struct
 	uint8_t  rcptGroup;     // 1 = talkgroup, 0 = private call
 	int8_t   presetIdx;     // last quick-text preset cycled in (-1 = none)
 	int8_t   result;        // dmrSmsSend() return for the result screen
-	uint16_t resultTicks;
+	ticksTimer_t resultTimer; // the result screen stays until this expires, or any key
 #if defined(ENABLE_SIMPLE_MODE)
 	int8_t   presetSlot;    // the preset chosen in MSG_PRESETS (its slot, 0..9)
+	uint8_t  entry;         // ENTRY_* this session was opened with
 #endif
 } s_msg DMR_AES_CCM;
 
@@ -93,7 +100,9 @@ menuStatus_t menuMessages(uiEvent_t *ev, bool isFirstRun)
 		memset(&s_msg, 0, sizeof s_msg);
 		dmrSmsInit();
 #if defined(ENABLE_SIMPLE_MODE)
-		if (s_entry == ENTRY_PRESETS)
+		s_msg.entry = s_entry;
+		s_entry = ENTRY_MENU;
+		if (s_msg.entry == ENTRY_PRESETS)
 		{
 			s_msg.view = MSG_PRESETS;
 			menuDataGlobal.currentItemIndex = 0;
@@ -101,7 +110,7 @@ menuStatus_t menuMessages(uiEvent_t *ev, bool isFirstRun)
 			presetsUpdate();
 			return (MENU_STATUS_LIST_TYPE | MENU_STATUS_SUCCESS);
 		}
-		if (s_entry == ENTRY_INBOX)
+		if (s_msg.entry == ENTRY_INBOX)
 		{
 			openFolder(0);
 			return (MENU_STATUS_LIST_TYPE | MENU_STATUS_SUCCESS);
@@ -115,11 +124,10 @@ menuStatus_t menuMessages(uiEvent_t *ev, bool isFirstRun)
 
 	if (s_msg.view == MSG_RESULT)
 	{
-		if (s_msg.resultTicks) { s_msg.resultTicks--; }
-		if ((s_msg.resultTicks == 0) || (ev->hasEvent && (ev->events & KEY_EVENT)))
+		if (ticksTimerHasExpired(&s_msg.resultTimer) || (ev->hasEvent && (ev->events & KEY_EVENT)))
 		{
 #if defined(ENABLE_SIMPLE_MODE)
-			if (s_entry != ENTRY_MENU) { simpleLeave(); return exitCode; }
+			if (s_msg.entry != ENTRY_MENU) { simpleLeave(); return exitCode; }
 #endif
 			gotoHome();
 			return (MENU_STATUS_LIST_TYPE | MENU_STATUS_SUCCESS);
@@ -161,7 +169,6 @@ void menuMessagesOpenInbox(void)
 
 static void simpleLeave(void)
 {
-	s_entry = ENTRY_MENU;
 	keypadAlphaEnable = false;
 	menuSystemPopPreviousMenu();
 }
@@ -305,7 +312,7 @@ static void targetEvent(uiEvent_t *ev, menuStatus_t *ec)
 		if ((text == NULL) || (text[0] == 0) || !targetContact(menuDataGlobal.currentItemIndex, &c) || (c.tgNumber == 0)) { return; }
 		s_msg.result = (int8_t)dmrSmsSend(text, c.tgNumber, (c.callType == CONTACT_CALLTYPE_PC) ? 0 : 1, 0);
 		s_msg.view = MSG_RESULT;
-		s_msg.resultTicks = 600;    // ~30 s like the stock flow, or any key: long enough to read a failure
+		ticksTimerStart(&s_msg.resultTimer, MSG_RESULT_HOLD_MS);   // long enough to read a failure, or any key
 		resultUpdate();
 		return;
 	}
@@ -481,7 +488,7 @@ static void listEvent(uiEvent_t *ev)
 	if (KEYCHECK_SHORTUP(ev->keys, KEY_RED))
 	{
 #if defined(ENABLE_SIMPLE_MODE)
-		if (s_entry != ENTRY_MENU) { simpleLeave(); return; }
+		if (s_msg.entry != ENTRY_MENU) { simpleLeave(); return; }
 #endif
 		gotoHome(); return;
 	}
@@ -635,7 +642,7 @@ static void composeEvent(uiEvent_t *ev)
 	if (KEYCHECK_SHORTUP(ev->keys, KEY_RED))
 	{
 #if defined(ENABLE_SIMPLE_MODE)
-		if (s_entry == ENTRY_PRESETS)
+		if (s_msg.entry == ENTRY_PRESETS)
 		{
 			keypadAlphaEnable = false;
 			s_msg.view = MSG_PRESETS;
@@ -652,7 +659,7 @@ static void composeEvent(uiEvent_t *ev)
 		if (strlen(s_msg.compose) == 0) { return; }
 		keypadAlphaEnable = false;
 #if defined(ENABLE_SIMPLE_MODE)
-		if (s_entry == ENTRY_PRESETS)
+		if (s_msg.entry == ENTRY_PRESETS)
 		{
 			openTargets();   /* the group or one contact, as for a preset */
 			return;
@@ -721,7 +728,7 @@ static void doSend(void)
 	if (dst == 0) { return; }
 	s_msg.result = (int8_t)dmrSmsSend(s_msg.compose, dst, s_msg.rcptGroup ? 1 : 0, 0);
 	s_msg.view = MSG_RESULT;
-	s_msg.resultTicks = 600;    // persist (~30 s) so the result/code is readable; any key dismisses
+	ticksTimerStart(&s_msg.resultTimer, MSG_RESULT_HOLD_MS);   // so the result / code is readable; any key dismisses
 	resultUpdate();
 }
 
