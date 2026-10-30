@@ -206,6 +206,15 @@ void uiTelemetryDrawRx(const uiTelemetryData_t *data, int16_t y, bool withDetail
 	displayThemeResetToDefault();
 }
 
+#if defined(ENABLE_SIMPLE_MODE)
+void uiTelemetryDrawRxBar(const uiTelemetryData_t *data, int16_t y)
+{
+	clearArea(y, TELEMETRY_RX_HEIGHT);
+	drawSMeterBar((y + BAR_Y_OFFSET), data->rssidBm);
+	displayThemeResetToDefault();
+}
+#endif
+
 void uiTelemetryDrawTx(const uiTelemetryData_t *data)
 {
 	char buffer[SCREEN_LINE_BUFFER_SIZE];

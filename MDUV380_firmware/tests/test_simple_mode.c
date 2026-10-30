@@ -37,8 +37,8 @@ static void testKeyRouting(void)
 	check(route(SM_KEY_UP, 0, 0, 0) == SM_CHANNEL_UP && route(SM_KEY_DOWN, 0, 0, 0) == SM_CHANNEL_DOWN, "knob / arrows step the channel");
 	check(route(SM_KEY_UP, 0, 0, 1) == SM_BLOCK && route(SM_KEY_DOWN, 0, 0, 1) == SM_BLOCK, "SK2 + knob (zone change) is blocked");
 	check(route(SM_KEY_UP, 1, 0, 0) == SM_BLOCK, "UP held (scan start) is blocked");
-	check(route(SM_KEY_LEFT, 0, 0, 0) == SM_BLOCK && route(SM_KEY_RIGHT, 0, 0, 0) == SM_BLOCK, "LEFT / RIGHT (talkgroup, squelch) are blocked");
-	check(route(SM_KEY_LEFT, 0, 0, 1) == SM_BLOCK && route(SM_KEY_RIGHT, 1, 0, 1) == SM_BLOCK, "SK2 + LEFT / RIGHT (power) are blocked");
+	check(route(SM_KEY_RIGHT, 0, 0, 0) == SM_CHANNEL_UP && route(SM_KEY_LEFT, 0, 0, 0) == SM_CHANNEL_DOWN, "the keypad arrows (LEFT / RIGHT on this platform) step the channel too");
+	check(route(SM_KEY_LEFT, 0, 0, 1) == SM_BLOCK && route(SM_KEY_RIGHT, 0, 0, 1) == SM_BLOCK && route(SM_KEY_RIGHT, 1, 0, 0) == SM_BLOCK, "SK2 + arrows (power) and a held arrow are blocked");
 	check(route(SM_KEY_STAR, 0, 0, 0) == SM_BLOCK && route(SM_KEY_STAR, 0, 0, 1) == SM_BLOCK && route(SM_KEY_STAR, 1, 0, 0) == SM_BLOCK,
 	      "STAR (timeslot, mode, timeslot reset) is blocked");
 	check(route(SM_KEY_HASH, 0, 0, 0) == SM_BLOCK && route(SM_KEY_HASH, 0, 0, 1) == SM_BLOCK && route(SM_KEY_HASH, 1, 0, 0) == SM_BLOCK,

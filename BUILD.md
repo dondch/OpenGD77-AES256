@@ -217,12 +217,13 @@ mismatch would only be cosmetic, and `dmrProvCrc9()` / `prov_packet.crc9()` are 
 `BIT_SIMPLE_MODE` is set (over USB, or by the provisioning setting `simpleMode`); with the bit clear the radio is the
 stock radio, which is how the master radios run the same image. On: the radio boots into channel mode on the home
 zone and channel (settings `simpleHomeZone`, `simpleHomeChannel`, the codeplug channel index), the knob and the
-arrows step through that zone only, GREEN opens the private-call contacts (select, PTT calls; the target drops back
+keypad arrows step through that zone only, GREEN opens the private-call contacts (select, PTT calls; the target drops back
 to the group 60 s after the last over, or on RED), SK1 opens the preset messages (then the group or one contact,
 GREEN sends), SK1 held the inbox, GREEN held the menu behind the codeplug PIN (which is then not asked at power-on),
 and after `simpleIdleMinutes` away from the home channel without a key or PTT the radio returns to it. RED never
 enters the VFO, SK2 combinations, digits, quick keys, scan, the orange button, talkgroup and squelch steps do
-nothing; volume, backlight and the battery indicator stay. The decisions are in `functions/simpleMode.c` (host
+nothing; volume, backlight and the battery indicator stay. The PIN box closes on RED (the stock boot-PIN box
+cannot be escaped; the gate closes its own). The decisions are in `functions/simpleMode.c` (host
 tested), the screen glue in `user_interface/uiSimpleMode.c`; the set-up of a fleet is `docs/FLEET_SETUP.md`.
 
 ## Dual screen build

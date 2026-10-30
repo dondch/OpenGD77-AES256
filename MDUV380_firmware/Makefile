@@ -49,7 +49,7 @@ INCS  = -I. -ICore/Inc \
 #                          Needs ENABLE_DMR_DATA (the data path it rides on).
 #   ENABLE_SIMPLE_MODE     The "dumb radio" rules for a fleet handheld, switched at run time by
 #                          the settings bit BIT_SIMPLE_MODE (over USB or SET_SETTING): boots on a
-#                          home zone and channel, the knob steps that zone only, GREEN is a
+#                          home zone and channel, the knob and arrows step that zone only, GREEN is a
 #                          private-call contact list, SK1 the preset messages (long: the inbox),
 #                          the menu and everything that edits the radio wait for the PIN, no VFO,
 #                          scan or quick keys, and after N idle minutes the radio returns to the

@@ -35,6 +35,9 @@
 #include "user_interface/uiUtilities.h"
 #include "user_interface/uiLocalisation.h"
 #include "user_interface/uiTelemetry.h"
+#if defined(ENABLE_SIMPLE_MODE)
+#include "user_interface/uiSimpleMode.h"
+#endif
 #include "user_interface/uiHomeScreen.h"
 #if defined(ENABLE_DUAL_SCREEN)
 #include "user_interface/uiDualScreen.h"
@@ -2518,6 +2521,13 @@ bool uiUtilityDrawTelemetryRx(int16_t y, int16_t historyY, int16_t historyHeight
 		uint32_t now = ticksGetMillis();
 
 		telemetryCollect(&data);
+#if defined(ENABLE_SIMPLE_MODE)
+		if (isHomeScreen && simpleModeIsOn())
+		{
+			uiTelemetryDrawRxBar(&data, y);   // the simple screen: the bar alone, no history
+			return true;
+		}
+#endif
 		uiTelemetryDrawRx(&data, y, (isHomeScreen || (uiDataGlobal.isDisplayingQSOData == false))); // The second line of the caller's data uses the details line
 
 		// The history is about one frequency. It is not sampled while transmitting, or while another screen is displayed: this is leaving a gap in it.

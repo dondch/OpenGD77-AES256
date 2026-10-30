@@ -94,6 +94,9 @@ typedef struct
 // These functions are only drawing in the screen buffer, clearing their own area first.
 uint8_t uiTelemetryNoiseToQuality(uint8_t noiseRaw); // 0..100 %
 void uiTelemetryDrawRx(const uiTelemetryData_t *data, int16_t y, bool withDetails);
+#if defined(ENABLE_SIMPLE_MODE)
+void uiTelemetryDrawRxBar(const uiTelemetryData_t *data, int16_t y); // the S-meter bar alone (the simple mode's screen)
+#endif
 void uiTelemetryDrawTx(const uiTelemetryData_t *data);
 // Tx frequency (in 10Hz units, not displayed if 0) and mode related text (TS and CC, CTCSS tone...), with the remaining time before the timeout
 // as a bar (not displayed if totTotalSecs is 0).
