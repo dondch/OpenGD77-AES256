@@ -965,6 +965,97 @@ static inline void hrc6000SysPostAccessInt(void)
 	}
 }
 
+#if defined(ENABLE_KEY_INJECTION)
+/* Bench receive diagnostics (CPS 0x93 / 0x94): what the chip and the slot machine did around a
+ * data call. Counters: [0] system interrupts, [1] data interrupts, [2] early returns for a bad
+ * CRC, [3] for a colour code mismatch, [4] receptions ended by a Terminator, [5] by the
+ * END_TICK_TIMEOUT silence, [6] by the INTERRUPT_TIMEOUT, [7] RX mode switched to RMO. Ring: the
+ * last 16 data interrupts as (sync type, trxDMRModeRx before the switch, slotState, reg 0x51,
+ * rxColorCode). */
+static volatile uint16_t s_rxDiagCount[16];   /* [8] RECEIVED_INFORMATION ints, [9] last reg 0x90, [10] ABNORMAL_EXIT ints, [11] last reg 0x98, [12] POST_ACCESS ints, [13] SEND_START, [14] SEND_END, [15] REJECTED */
+static volatile uint8_t  s_rxDiagRing[16][5];
+static volatile uint8_t  s_rxDiagRingW;
+/* Quiet-spell probe (hrc6000Tick): the slot machine is receiving but the SYS interrupt has not run
+ * for more than a slot pair. One record per spell: [0] SYS_INTER pin level, [1] reg 0x82, [2] reg
+ * 0x90, [3] reg 0x98, [4] slotState, [5] tickCount, [6] handler re-dispatched from the task, [7] the
+ * data interrupts counted before the spell. Counters: spells, spells with the pin low or a flag
+ * pending (an edge-triggered line left low), re-dispatches. */
+static volatile uint32_t s_sysIntMs;
+static volatile uint8_t  s_deafArmed;
+static volatile uint8_t  s_deaf[8];
+static volatile uint16_t s_deafCount, s_deafWedged, s_deafRedispatched;
+/* Event log: [ms lo, ms hi, code, val]. code < 0xF0 = a write to HR-C6000 page 4 register code
+ * (0x00 reset, 0x01, 0x06, 0x10 mode, 0x40 timing, 0x41 with the sync-fail bit); 0xFE = data burst
+ * fetched by the TX ISR (val = index), 0xFD = data call ended, 0xFC = trxActivateRx, 0xFB =
+ * trxActivateTx, 0xF9 = HRC6000InitDigital, 0xF8 = HRC6000InitDigitalDmrRx, 0xF6 = TX burst
+ * callback, 0xF5 = data call keyed, 0xF3 = ResetTimeSlotDetection, 0xF2 = eco power up/down
+ * (val), 0xF1 = radioSetFrequency (val = tx), 0xF0 = interrupt-timeout re-init. */
+#define EVT_N 128
+static volatile uint8_t  s_evt[EVT_N][4];
+static volatile uint8_t  s_evtW;
+void HRC6000DiagEvent(uint8_t code, uint8_t val)
+{
+	uint32_t ms = ticksGetMillis();
+	volatile uint8_t *e = s_evt[s_evtW % EVT_N];
+	e[0] = (uint8_t)ms; e[1] = (uint8_t)(ms >> 8); e[2] = code; e[3] = val;
+	s_evtW++;
+}
+void HRC6000DiagReset(void)
+{
+	for (int i = 0; i < EVT_N; i++) { for (int j = 0; j < 4; j++) { s_evt[i][j] = 0; } }
+	s_evtW = 0;
+	for (int i = 0; i < 16; i++) { s_rxDiagCount[i] = 0; }
+	for (int i = 0; i < 16; i++) { for (int j = 0; j < 5; j++) { s_rxDiagRing[i][j] = 0; } }
+	s_rxDiagRingW = 0;
+	for (int i = 0; i < 8; i++) { s_deaf[i] = 0; }
+	s_deafCount = 0; s_deafWedged = 0; s_deafRedispatched = 0;
+}
+int HRC6000DiagDump(uint8_t *out)
+{
+	int n = 0;
+	for (int i = 0; i < 16; i++) { out[n++] = (uint8_t)s_rxDiagCount[i]; out[n++] = (uint8_t)(s_rxDiagCount[i] >> 8); }
+	out[n++] = s_rxDiagRingW;
+	for (int i = 0; i < 16; i++) { for (int j = 0; j < 5; j++) { out[n++] = s_rxDiagRing[i][j]; } }
+	for (int i = 0; i < 8; i++) { out[n++] = s_deaf[i]; }
+	out[n++] = (uint8_t)s_deafCount; out[n++] = (uint8_t)(s_deafCount >> 8);
+	out[n++] = (uint8_t)s_deafWedged; out[n++] = (uint8_t)(s_deafWedged >> 8);
+	out[n++] = (uint8_t)s_deafRedispatched; out[n++] = (uint8_t)(s_deafRedispatched >> 8);
+	out[n++] = s_evtW;
+	for (int i = 0; i < EVT_N; i++) { for (int j = 0; j < 4; j++) { out[n++] = s_evt[i][j]; } }
+	return n;
+}
+static void hrc6000DeafProbe(void)
+{
+	if (((slotState == DMR_STATE_RX_1) || (slotState == DMR_STATE_RX_2)) && (s_deafArmed == 0) &&
+			(hrc.transmissionEnabled == false) && ((ticksGetMillis() - s_sysIntMs) > 75))
+	{
+		uint8_t r82 = 0xEE, r90 = 0xEE, r98 = 0xEE;
+		int pin = (HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_1) != GPIO_PIN_RESET) ? 1 : 0;   /* SYS_INTER: PC1, falling-edge EXTI */
+		interruptsDisableC6000Interrupts();
+		SPI0ReadPageRegByte(0x04, 0x82, &r82);
+		SPI0ReadPageRegByte(0x04, 0x90, &r90);
+		SPI0ReadPageRegByte(0x04, 0x98, &r98);
+		s_deaf[0] = (uint8_t)pin; s_deaf[1] = r82; s_deaf[2] = r90; s_deaf[3] = r98;
+		s_deaf[4] = (uint8_t)slotState; s_deaf[5] = (uint8_t)hrc.tickCount; s_deaf[6] = 0; s_deaf[7] = (uint8_t)s_rxDiagCount[1];
+		s_deafArmed = 1;
+		s_deafCount++;
+		if ((pin == 0) || ((r82 != 0) && (r82 != 0xEE))) { s_deafWedged++; }
+		if ((r82 != 0) && (r82 != 0xEE))
+		{
+			s_deaf[6] = 1;
+			s_deafRedispatched++;
+			hrc6000SysInterruptHandler();
+		}
+		interruptsEnableC6000Interrupts();
+	}
+}
+#define RXDIAG_COUNT(i) do { s_rxDiagCount[i]++; } while (0)
+#define RXDIAG_SET(i, v) do { s_rxDiagCount[i] = (uint16_t)(v); } while (0)
+#else
+#define RXDIAG_COUNT(i) do { } while (0)
+#define RXDIAG_SET(i, v) do { } while (0)
+#endif
+
 static inline void hrc6000SysReceivedDataInt(void)
 {
 	/*
@@ -1004,11 +1095,23 @@ static inline void hrc6000SysReceivedDataInt(void)
 	}
 
 	rxSyncType = (reg_0x5F & 0x03); //received Sync Type
+	RXDIAG_COUNT(1);
+#if defined(ENABLE_KEY_INJECTION)
+	if (((reg_0x51 & 0x03) == SYNC_CLASS_DATA) || (slotState == DMR_STATE_IDLE))   /* the call itself, plus whatever starts a reception */
+	{
+		volatile uint8_t *e = s_rxDiagRing[s_rxDiagRingW % 16];
+		e[0] = (uint8_t)rxSyncType; e[1] = (uint8_t)currentRadioDevice->trxDMRModeRx; e[2] = (uint8_t)slotState; e[3] = reg_0x51; e[4] = hrc.rxColorCode;
+		s_rxDiagRingW++;
+	}
+#endif
 
 	if (codeplugChannelGetFlag(currentChannelData, CHANNEL_FLAG_FORCE_DMO) == 0)
 	{
 		if (rxSyncType == BS_SYNC)       // if we are receiving from a base station (Repeater)
 		{
+#if defined(ENABLE_KEY_INJECTION)
+			if (currentRadioDevice->trxDMRModeRx != DMR_MODE_RMO) { RXDIAG_COUNT(7); }
+#endif
 			currentRadioDevice->trxDMRModeRx = DMR_MODE_RMO; // switch to RMO mode to allow reception
 		}
 		else
@@ -1021,6 +1124,9 @@ static inline void hrc6000SysReceivedDataInt(void)
 			((rxPrivacyIndicator != 0) || (hrc6000CrcIsValid() == false) || (hrc6000CheckColourCodeFilter() == false)))
 	{
 		// Something is not correct
+#if defined(ENABLE_KEY_INJECTION)
+		if ((reg_0x51 & 0x03) == SYNC_CLASS_DATA) { if (hrc6000CrcIsValid() == false) { RXDIAG_COUNT(2); } else { RXDIAG_COUNT(3); } }
+#endif
 		return;
 	}
 
@@ -1061,6 +1167,7 @@ static inline void hrc6000SysReceivedDataInt(void)
 		if ((currentRadioDevice->trxDMRModeRx == DMR_MODE_DMO) && hrc6000CallAcceptFilter())
 		{
 			slotState = DMR_STATE_RX_END;
+			RXDIAG_COUNT(4);
 #ifdef DMR_AES_DIAG_RX
 			dmrAesDiagRxMark(4); // RXEND: CRC-valid Terminator
 #endif
@@ -1379,6 +1486,11 @@ static inline
 void hrc6000SysInterruptHandler(void)
 {
 	uint8_t reg0x52;
+	RXDIAG_COUNT(0);
+#if defined(ENABLE_KEY_INJECTION)
+	s_sysIntMs = ticksGetMillis();
+	s_deafArmed = 0;
+#endif
 	bool reg82Result = (SPI0ReadPageRegByte(0x04, 0x82, &reg_0x82) == kStatus_Success); // Read Interrupt Flag Register1
 	bool reg52Result = (SPI0ReadPageRegByte(0x04, 0x52, &reg0x52) == kStatus_Success);  // Read Received CC and CACH
 
@@ -1461,6 +1573,7 @@ void hrc6000SysInterruptHandler(void)
 		if (reg_0x82 & SYS_INT_SEND_REQUEST_REJECTED)
 		{
 			hrc6000SysSendRejectedInt();
+			RXDIAG_COUNT(15);
 		}
 
 		/*
@@ -1472,6 +1585,7 @@ void hrc6000SysInterruptHandler(void)
 		if (reg_0x82 & SYS_INT_SEND_START)
 		{
 			hrc6000SysSendStartInt();
+			RXDIAG_COUNT(13);
 		}
 		else
 		{
@@ -1486,6 +1600,7 @@ void hrc6000SysInterruptHandler(void)
 		if (reg_0x82 & SYS_INT_SEND_END) // Kai's comment was InterSendStop interrupt
 		{
 			hrc6000SysSendEndInt();
+			RXDIAG_COUNT(14);
 		}
 		else
 		{
@@ -1500,6 +1615,7 @@ void hrc6000SysInterruptHandler(void)
 		if (reg_0x82 & SYS_INT_POST_ACCESS)
 		{
 			hrc6000SysPostAccessInt();
+			RXDIAG_COUNT(12);
 		}
 
 		/*
@@ -1520,6 +1636,7 @@ void hrc6000SysInterruptHandler(void)
 		if (reg_0x82 & SYS_INT_RECEIVED_INFORMATION)
 		{
 			hrc6000SysReceivedInformationInt();
+			RXDIAG_COUNT(8); RXDIAG_SET(9, reg_0x90);
 		}
 		else
 		{
@@ -1536,6 +1653,7 @@ void hrc6000SysInterruptHandler(void)
 		if (reg_0x82 & SYS_INT_ABNORMAL_EXIT)
 		{
 			hrc6000SysAbnormalExitInt();
+			RXDIAG_COUNT(10); RXDIAG_SET(11, reg_0x98);
 		}
 		else
 		{
@@ -1582,6 +1700,9 @@ static void hrc6000TransitionToTx(void)
 void hrc6000TxBurstCallback(void)
 {
 	trxIsTransmittingDMR = false;
+#if defined(ENABLE_KEY_INJECTION)
+	HRC6000DiagEvent(0xF6, (uint8_t)slotState);
+#endif
 
 	hrc6000SetInIRQHandler(true);
 	hrc6000RxInterruptHandler();
@@ -1590,6 +1711,14 @@ void hrc6000TxBurstCallback(void)
 
 void hrc6000TimeslotInterruptHandler(void)
 {
+#if defined(ENABLE_KEY_INJECTION)
+	{
+		static uint32_t lastTs;
+		uint32_t now = ticksGetMillis();
+		if ((lastTs != 0) && ((now - lastTs) > 32) && ((now - lastTs) < 2000)) { HRC6000DiagEvent(0xEF, (uint8_t)((now - lastTs) > 255 ? 255 : (now - lastTs))); }
+		lastTs = now;
+	}
+#endif
 	//this check needs to be immediately at the start of the ISR to try to keep the Tx Burst length as close as possible to 30ms.
 	if((trxIsTransmittingDMR) && ( ticksGetMillis() - trxDMRstartTime > 20 ))				// The MDUV380 doesn't have the hardware for the Rx Interrupt so we turn off the tx from here instead if it has been on for at least 20ms
 	{
@@ -2207,6 +2336,7 @@ void hrc6000TimeslotInterruptHandler(void)
 		{
 			HRC6000InitDigitalDmrRx();
 			HRC6000ClearActiveDMRID();
+			RXDIAG_COUNT(5);
 			// RX ended by silence: END_TICK_TIMEOUT timeslots (13 x 30 ms) without a CRC-valid
 			// burst. This is the path the chip takes when a carrier simply drops mid-call, and
 			// it does NOT go through hrc6000InitDigitalState(). The encrypted stream has ended
@@ -2328,6 +2458,9 @@ void HRC6000InitInterrupts(void)
 
 void HRC6000InitDigitalDmrRx(void)
 {
+#if defined(ENABLE_KEY_INJECTION)
+	HRC6000DiagEvent(0xF8, (uint8_t)slotState);
+#endif
 	HRC6000SetDMR();						 // ensure any registers changed by FM use are restored to DMR settings
 
 	SPI0WritePageRegByte(0x04, 0x40, 0xC3);  // Enable DMR Tx, DMR Rx, Passive Timing, Normal mode
@@ -2353,6 +2486,9 @@ void HRC6000InitDigitalDmrRx(void)
 
 void HRC6000ResetTimeSlotDetection(void)
 {
+#if defined(ENABLE_KEY_INJECTION)
+	HRC6000DiagEvent(0xF3, (uint8_t)slotState);
+#endif
 	if (hrc.keepMonitorCapturedTSAfterTxing == false)
 	{
 		audioAmpDisable(AUDIO_AMP_CHANNEL_RF);
@@ -2386,6 +2522,9 @@ void HRC6000ResetTimeSlotDetection(void)
 
 void HRC6000InitDigital(void)
 {
+#if defined(ENABLE_KEY_INJECTION)
+	HRC6000DiagEvent(0xF9, (uint8_t)slotState);
+#endif
 	// Partial timeslot detection reset
 	audioAmpDisable(AUDIO_AMP_CHANNEL_RF);
 	if ((voicePromptsIsPlaying() == false) && (soundMelodyIsPlaying() == false))
@@ -2704,6 +2843,15 @@ static bool hrc6000AesTxTailActive(void)
 static void hrc6000Tick(void)
 {
 	hrc6000ManageCCHoldState();
+#if defined(ENABLE_KEY_INJECTION)
+	{
+		static uint32_t lastTick;
+		uint32_t now = ticksGetMillis();
+		if ((lastTick != 0) && ((now - lastTick) > 4) && ((now - lastTick) < 2000)) { HRC6000DiagEvent(0xEE, (uint8_t)((now - lastTick) > 255 ? 255 : (now - lastTick))); }
+		lastTick = now;
+	}
+	hrc6000DeafProbe();
+#endif
 
 	if (hrc.transmissionEnabled && (hrc.isWaking == WAKING_MODE_NONE))
 	{
@@ -2805,6 +2953,10 @@ static void hrc6000Tick(void)
 				// is ended by hrc6000InitDigitalState() inside HRC6000InitDigital(); mark it here
 				// first so the ring records whether decryption was still active.
 				dmrAesDiagRxMark(9); // IDLE: interrupt timeout
+#endif
+				RXDIAG_COUNT(6);
+#if defined(ENABLE_KEY_INJECTION)
+				HRC6000DiagEvent(0xF0, (uint8_t)slotState);
 #endif
 				HRC6000InitDigital();// sets 	interruptTimeout=0;
 				HRC6000ClearActiveDMRID();

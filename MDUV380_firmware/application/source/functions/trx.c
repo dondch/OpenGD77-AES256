@@ -855,6 +855,9 @@ void trxSetTX(void)
 void trxActivateRx(bool critical)
 {
 	UNUSED_PARAMETER(critical);
+#if defined(ENABLE_KEY_INJECTION)
+	HRC6000DiagEvent(0xFC, 0);
+#endif
 
 	trxIsTransmittingDMR = false;
 	radioSetRx(currentRadioDevice->trxCurrentBand[TRX_RX_FREQ_BAND]);
@@ -870,6 +873,9 @@ void trxActivateRx(bool critical)
 void trxActivateTx(bool critical)
 {
 	UNUSED_PARAMETER(critical);
+#if defined(ENABLE_KEY_INJECTION)
+	HRC6000DiagEvent(0xFB, 0);
+#endif
 
 	if (currentRadioDevice->currentMode == RADIO_MODE_NONE)
 	{
@@ -1272,6 +1278,9 @@ void trxDisableTransmission(void)
 bool trxPowerUpDownRxAndC6000(bool powerUp, bool includeC6000, bool includeMic)
 {
 	bool status = false;
+#if defined(ENABLE_KEY_INJECTION)
+	HRC6000DiagEvent(0xF2, (uint8_t)(powerUp ? 1 : 0));
+#endif
 
 	// Check the radio is not transmitting.
 	if ((powerUp == powerUpDownState) || trxTransmissionEnabled || trxIsTransmitting)

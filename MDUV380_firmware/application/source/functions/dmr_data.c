@@ -102,6 +102,9 @@ static void dmrDataTxFinishPoll(void)
 
 static void dmrDataKeyTx(void)
 {
+#if defined(ENABLE_KEY_INJECTION)
+	HRC6000DiagEvent(0xF5, s_burstCount);
+#endif
 	s_burstIndex = 0;
 	s_dataTxActive = 1;
 	s_txPending = 0;
@@ -152,6 +155,9 @@ int dmrDataTxNextBurst(uint8_t *dataTypeOut, uint8_t *payload12Out)
 	}
 	uint8_t *b = s_bursts[s_burstIndex++];
 	s_diagSent = s_burstIndex;
+#if defined(ENABLE_KEY_INJECTION)
+	HRC6000DiagEvent(0xFE, s_burstIndex);
+#endif
 	if (audioAmpGetStatus() & AUDIO_AMP_CHANNEL_RF) { s_diagAmpTx = 1; }
 	*dataTypeOut = b[0];
 	memcpy(payload12Out, b + 1, DMR_DATA_BURST_LEN);
@@ -166,6 +172,9 @@ int dmrDataTxDiag(uint8_t out[4])
 
 void dmrDataTxEnd(void)
 {
+#if defined(ENABLE_KEY_INJECTION)
+	HRC6000DiagEvent(0xFD, s_burstIndex);
+#endif
 	if (s_diagEndedBy == 0) { s_diagEndedBy = ((s_burstCount != 0) && (s_burstIndex >= s_burstCount)) ? 1 : 2; }
 	s_dataTxActive = 0;
 	s_burstIndex = 0;
