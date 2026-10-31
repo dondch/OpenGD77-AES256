@@ -33,6 +33,7 @@
 #include "hardware/AT1846S.h"
 #include "functions/settings.h"
 #include "functions/trx.h"
+#include "functions/dmr_data.h"   // dmrDataTxActive(): a data call on the air (ENABLE_DMR_DATA)
 #include "functions/rxPowerSaving.h"
 #include "functions/spectrum.h"   /* SCANPROF_*: dev-only scan-step profiler, no-ops otherwise */
 #include "functions/aprs.h"
@@ -330,6 +331,20 @@ void trxSetModeAndBandwidth(int mode, bool bandwidthIs25kHz)
 				break;
 
 			case RADIO_MODE_DIGITAL:
+#if defined(ENABLE_DMR_DATA)
+				// A data call (SMS, provisioning) transmits without the TX screen, so the UI is free
+				// to come back to the channel or VFO screen while it is on the air: the Messages
+				// result screen expiring, any key. The reset below then throws the transmitting slot
+				// machine to RX_END, the timeslot handler re-initialises the chip and the tick keys
+				// the call up again from TX_START_1 on a fresh slot clock. The remaining bursts go
+				// out 10-30 ms off the grid the receiver locked to, and it never sees them (bench
+				// 2026-10-31: every simple-mode SMS lost its blocks after the tenth burst, HackRF
+				// capture and sender event log). Leave the call alone until it has ended.
+				if (dmrDataTxActive())
+				{
+					break;
+				}
+#endif
 				HRC6000ResetTimeSlotDetection();
 				// We need to reset the slot state because some part of the UI
 				// are getting stuck, like the green LED and QSO info, while navigating the UI.
