@@ -243,6 +243,9 @@ static void trxUpdateAT1846SCalibration(void)
 
 void radioSetFrequency(uint32_t f_in, bool Tx)
 {
+#if defined(ENABLE_KEY_INJECTION)
+	HRC6000DiagEvent(0xF1, (uint8_t)(Tx ? 1 : 0));
+#endif
 	SCANPROF_START(tSetFreq);
 	// G4EML.  Hack to fix the -3KHz offset on transmit on the MDUV380
 	// Believed to be caused by something in the AT1846S configuration.

@@ -50,10 +50,19 @@ void SPI1Setup(void)
 	//SPI1 is a hardware Interface on the MD9600
 }
 
+#if defined(ENABLE_KEY_INJECTION)
+void HRC6000DiagEvent(uint8_t code, uint8_t val);
+#endif
 int SPI0WritePageRegByte(uint8_t page, uint8_t reg, uint8_t val)
 {
 	uint8_t txBuf[3];
 	UBaseType_t SavedInterruptStatus;
+#if defined(ENABLE_KEY_INJECTION)
+	if ((page == 0x04) && (reg != 0x50) && !((reg == 0x41) && (val == 0x80)))
+	{
+		HRC6000DiagEvent(reg, val);
+	}
+#endif
 
 	if (SPI0inUse)
 	{

@@ -1894,6 +1894,9 @@ static void cpsHandleCommand(void)
 				n += dmrSmsRxTrace((uint8_t *)&usbComSendBuf[3 + n], COM_BUFFER_SIZE - (3 + n));
 				n += dmrDataTxDiag((uint8_t *)&usbComSendBuf[3 + n]);   // then the last data call: loaded, sent, endedBy, amp open during TX
 				usbComSendBuf[3 + n++] = (uint8_t)(dmrSmsRxDiagAmpSeen() ? 1 : 0);   // then: the audio amp opened on a data burst
+#if defined(ENABLE_KEY_INJECTION)
+				n += HRC6000DiagDump((uint8_t *)&usbComSendBuf[3 + n]);   // then the receive diagnostics (HR-C6000.c)
+#endif
 				usbComSendBuf[0] = com_requestbuffer[0];
 				usbComSendBuf[1] = (uint8_t)((n >> 8) & 0xFF);
 				usbComSendBuf[2] = (uint8_t)(n & 0xFF);
@@ -1903,6 +1906,9 @@ static void cpsHandleCommand(void)
 			}
 		case 0x94: // DIAGNOSTIC: zero the SMS RX diag counters (clean test runs)
 			dmrSmsRxDiagReset();
+#if defined(ENABLE_KEY_INJECTION)
+			HRC6000DiagReset();
+#endif
 			usbComSendBuf[0] = com_requestbuffer[0];
 			hasToReply = true;
 			replyLength = 1;

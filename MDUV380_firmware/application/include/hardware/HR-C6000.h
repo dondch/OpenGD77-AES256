@@ -92,6 +92,11 @@ void PORTC_IRQHandler(void);
 void HRC6000Init(void);
 void HRC6000InitInterrupts(void);
 void HRC6000InitDigitalDmrRx(void);
+#if defined(ENABLE_KEY_INJECTION)
+void HRC6000DiagReset(void);          /* bench receive diagnostics, CPS 0x94 */
+int  HRC6000DiagDump(uint8_t *out);
+void HRC6000DiagEvent(uint8_t code, uint8_t val);   /* event log: chip mode/timing writes (code = reg), 0xF0.. = firmware events */   /* 32 counter bytes, ring index, 16 x 5 ring bytes, 8 quiet-spell bytes, 3 counters: 127 bytes */
+#endif
 void HRC6000ResetTimeSlotDetection(void);
 void HRC6000InitDigital(void);
 void HRC6000TerminateDigital(void);
