@@ -119,7 +119,11 @@ menuStatus_t menuTxScreen(uiEvent_t *ev, bool isFirstRun)
 			updateScreen();
 		}
 
-		if ((codeplugChannelGetFlag(currentChannelData, CHANNEL_FLAG_RX_ONLY) == 0) && ((nonVolatileSettings.txFreqLimited == BAND_LIMITS_NONE) || trxCheckFrequencyInAmateurBand(currentChannelData->txFreq)
+		// A channel set to encrypt with a key that is not loaded refuses to key: the timeslot ISR
+		// would otherwise send the call in clear with nothing on the screen to say so.
+		bool aesKeyMissing = (radioMode == RADIO_MODE_DIGITAL) && HRC6000AesTxKeyMissing();
+
+		if ((aesKeyMissing == false) && (codeplugChannelGetFlag(currentChannelData, CHANNEL_FLAG_RX_ONLY) == 0) && ((nonVolatileSettings.txFreqLimited == BAND_LIMITS_NONE) || trxCheckFrequencyInAmateurBand(currentChannelData->txFreq)
 #if defined(PLATFORM_MD9600)
 				|| (codeplugChannelGetFlag(currentChannelData, CHANNEL_FLAG_OUT_OF_BAND) != 0)
 #endif
@@ -190,7 +194,7 @@ menuStatus_t menuTxScreen(uiEvent_t *ev, bool isFirstRun)
 		}
 		else
 		{
-			menuTxScreenHandleTxTermination(ev, ((codeplugChannelGetFlag(currentChannelData, CHANNEL_FLAG_RX_ONLY) != 0) ? TXSTOP_RX_ONLY : TXSTOP_OUT_OF_BAND));
+			menuTxScreenHandleTxTermination(ev, (aesKeyMissing ? TXSTOP_NO_AES_KEY : ((codeplugChannelGetFlag(currentChannelData, CHANNEL_FLAG_RX_ONLY) != 0) ? TXSTOP_RX_ONLY : TXSTOP_OUT_OF_BAND)));
 			transmitError = true;
 		}
 
@@ -706,6 +710,16 @@ void menuTxScreenHandleTxTermination(uiEvent_t *ev, txTerminationReason_t reason
 #endif
 				voicePromptsAppendLanguageString(currentLanguage->out_of_band);
 			}
+			xmitErrorTimer = (100 * 10U);
+			break;
+
+		case TXSTOP_NO_AES_KEY:
+#if !defined(PLATFORM_GD77S)
+			displayThemeApply(THEME_ITEM_FG_ERROR_NOTIFICATION, THEME_ITEM_BG_NOTIFICATION);
+			displayPrintCentered(4 + (DISPLAY_V_EXTRA_PIXELS / 4), currentLanguage->error, FONT_SIZE_4);
+			displayPrintCentered((DISPLAY_SIZE_Y - 24) - (DISPLAY_V_EXTRA_PIXELS / 4), "No AES key", FONT_SIZE_3);
+#endif
+			voicePromptsAppendLanguageString(currentLanguage->error);
 			xmitErrorTimer = (100 * 10U);
 			break;
 

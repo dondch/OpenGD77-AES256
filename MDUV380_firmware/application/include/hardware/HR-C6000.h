@@ -113,6 +113,7 @@ void HRC6000SetDmrRxGain(int8_t gain);
 void HRC6000SetDmrAGCGain(int8_t gain);
 void HRC6000ClearIsWakingState(void);
 int HRC6000GetIsWakingState(void);
+bool HRC6000AesTxKeyMissing(void); // the channel selects an AES key that is not loaded: refuse the PTT
 #if defined(ENABLE_DMR_DATA)
 void HRC6000ForceDMRIdleForTx(void); // force slot -> IDLE so a host-queued data TX keys (functions/dmr_data.c)
 #endif

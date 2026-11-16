@@ -2507,7 +2507,7 @@ static void hrc6000DataAckStart(const uint8_t *hdr12)
 //   0xFF   = force CLEAR (unencrypted) TX on this channel, overriding the global selector
 // Honoured only when the channel is NOT using the optional-DMRID feature, which repurposes
 // the encrypt byte (+ rxSignaling/artsInterval) to hold the per-channel DMR ID. If the
-// selected key slot has no key loaded, dmrAesTxStart() falls back to clear TX (no garble).
+// selected key slot has no key loaded the TX screen refuses the PTT (HRC6000AesTxKeyMissing).
 // Backward compatible: a channel with encrypt == 0 behaves exactly as the global selector.
 static uint8_t hrc6000ResolveAesTxKeyId(void)
 {
@@ -2530,6 +2530,15 @@ static uint8_t hrc6000ResolveAesTxKeyId(void)
 	}
 
 	return keyId;
+}
+
+// True when the channel being keyed selects an AES key that is not loaded. The TX screen refuses
+// the PTT on it; dmrAesTxStart()'s clear fallback remains only for paths that cannot refuse.
+bool HRC6000AesTxKeyMissing(void)
+{
+	uint8_t keyId = hrc6000ResolveAesTxKeyId();
+
+	return ((keyId != 0) && (dmr_aes_key_ptr(keyId) == NULL));
 }
 
 // AES RX: the key to try first when a call is joined by late entry (no PI header seen, and the

@@ -357,7 +357,8 @@ typedef enum
 {
 	TXSTOP_TIMEOUT,
 	TXSTOP_RX_ONLY,
-	TXSTOP_OUT_OF_BAND
+	TXSTOP_OUT_OF_BAND,
+	TXSTOP_NO_AES_KEY
 } txTerminationReason_t;
 
 typedef enum
