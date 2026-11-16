@@ -67,6 +67,7 @@ static int     s_qn = 0;
 static int     s_txLoads = 0;
 void dmrDataTxLoad(const uint8_t *bursts, uint8_t count) { memcpy(s_q, bursts, (size_t)count * 13); s_qn = count; s_txLoads++; }
 int  dmrDataTxActive(void) { return 0; }
+int  dmrDataTxAllowed(void) { return 1; }
 int  dmrDataTxNextBurst(uint8_t *t, uint8_t *p) { (void)t; (void)p; return 0; }
 void dmrDataTxEnd(void) { }
 
@@ -610,14 +611,14 @@ static void testMaster(void)
     check(dmrProvJobLoad(job, len) == -1, "a second job is refused while one runs");
     s_txLoads = 0;
     dmrProvTick();
-    check(s_txLoads == 1 && s_blockWrites == 1 && diag().ownRes == 64 && diag().ownNext == 1, "first PDU sent; the counter reservation (64) persisted first");
+    check(s_txLoads == 1 && s_blockWrites == 1 && diag().ownRes == 65 && diag().ownNext == 2, "first PDU sent; the counter reservation (64 from seq 1) persisted first");
     int pl = pduFromBursts(s_q, s_qn, pdu, hdr);
     uint32_t dst = ((uint32_t)hdr[2] << 16) | ((uint32_t)hdr[3] << 8) | hdr[4];
     uint32_t src = ((uint32_t)hdr[5] << 16) | ((uint32_t)hdr[6] << 8) | hdr[7];
     check(dst == SLAVE_ID && src == MASTER_ID && (hdr[0] & 0x4F) == 0x43 && (hdr[1] >> 4) == 9, "on the air: confirmed individual data header, SAP 9, A set");
     check(s_q[0] == 0x30 && s_q[6 * 13] == 0x60 && s_q[7 * 13] == 0x70, "CSBK preamble, one data header, then blocks");
     int bl = openFrame(pdu, pl, MASTER_ID, SLAVE_ID, &seq, &txn, &reply);
-    check(bl == 59 && seq == 0 && txn == 3 && !reply && pdu[10] == DMR_PROV_OP_WRITE_CHANNEL && pdu[12] == 7 && pdu[13] == 0x70, "PDU 1 = WRITE_CHANNEL 7 under seq 0, txn 3, verified with the test keys");
+    check(bl == 59 && seq == 1 && txn == 3 && !reply && pdu[10] == DMR_PROV_OP_WRITE_CHANNEL && pdu[12] == 7 && pdu[13] == 0x70, "PDU 1 = WRITE_CHANNEL 7 under seq 1 (a fresh slave refuses seq 0), txn 3, verified with the test keys");
     uint8_t first[DMR_DATA_MAX_BURSTS * 13]; int firstN = s_qn; memcpy(first, s_q, (size_t)s_qn * 13);
 
     /* no ACK: resent byte-identical, three tries, then failed */
@@ -634,12 +635,12 @@ static void testMaster(void)
     check(dmrProvJobLoad(job, len) == 0, "the job is queued again");
     dmrProvTick();                               /* PDU 1 (seq 3) */
     pl = pduFromBursts(s_q, s_qn, pdu, hdr); openFrame(pdu, pl, MASTER_ID, SLAVE_ID, &seq, &txn, &reply);
-    check(seq == 1, "retries of seq 0 did not consume numbers: the next PDU is seq 1");
+    check(seq == 2, "retries of seq 1 did not consume numbers: the next PDU is seq 2");
     clockAdvance(500); dmrProvTick();
     dmrProvRxResponse(SLAVE_ID, MASTER_ID, (uint8_t)(0x08 | (seq & 7)));   /* the slave's link ACK */
     dmrProvTick();                               /* -> PDU 2 */
     pl = pduFromBursts(s_q, s_qn, pdu, hdr); openFrame(pdu, pl, MASTER_ID, SLAVE_ID, &seq, &txn, &reply);
-    check(s_txLoads == 2 && seq == 2 && pdu[12] == 8, "ACK received: PDU 2 (channel 8) goes out under seq 2");
+    check(s_txLoads == 2 && seq == 3 && pdu[12] == 8, "ACK received: PDU 2 (channel 8) goes out under seq 3");
     clockAdvance(500); dmrProvTick();
     dmrProvRxResponse(SLAVE_ID, MASTER_ID, (uint8_t)(0x08 | 1));            /* wrong N(S): not ours */
     dmrProvTick();
@@ -650,7 +651,7 @@ static void testMaster(void)
     dmrProvRxResponse(SLAVE_ID, MASTER_ID, (uint8_t)(0x08 | (seq & 7)));
     dmrProvTick();                               /* -> COMMIT */
     pl = pduFromBursts(s_q, s_qn, pdu, hdr); int cl = openFrame(pdu, pl, MASTER_ID, SLAVE_ID, &seq, &txn, &reply);
-    check(s_txLoads == 3 && cl == 6 && pdu[10] == DMR_PROV_OP_COMMIT && pdu[11] == 2 && rd32be(pdu + 12) == crc && seq == 3, "then the implicit COMMIT: count 2 and the CRC32 of the items");
+    check(s_txLoads == 3 && cl == 6 && pdu[10] == DMR_PROV_OP_COMMIT && pdu[11] == 2 && rd32be(pdu + 12) == crc && seq == 4, "then the implicit COMMIT: count 2 and the CRC32 of the items");
     clockAdvance(500); dmrProvTick();
     dmrProvRxResponse(SLAVE_ID, MASTER_ID, (uint8_t)(0x08 | (seq & 7)));
     dmrProvTick();
@@ -660,11 +661,11 @@ static void testMaster(void)
     uint8_t body[DMR_PROV_STATUS_BODY_LEN] = { DMR_PROV_OP_STATUS_REPLY, DMR_PROV_RES_OK, 3 };
     wr32be(body + 3, 3); wr32be(body + 7, crc); memcpy(body + 11, "abc1234", 7); body[19] = 3; body[20] = 0x0D; body[21] = 2;
     uint8_t rp[DMR_PROV_PDU_MAX], rq[DMR_DATA_MAX_BURSTS * 13];
-    int rl = dmrProvBuildPdu(MASTER_ID, SLAVE_ID, 3, 3, 1, body, sizeof body, rp, sizeof rp);
+    int rl = dmrProvBuildPdu(MASTER_ID, SLAVE_ID, 4, 3, 1, body, sizeof body, rp, sizeof rp);
     /* a reply under the wrong seq first: ignored */
-    int rn = dmrProvBuildBursts(rp, rl, MASTER_ID, SLAVE_ID, 3, rq, DMR_DATA_MAX_BURSTS);
-    uint8_t wrong[DMR_PROV_PDU_MAX]; int wl = dmrProvBuildPdu(MASTER_ID, SLAVE_ID, 2, 3, 1, body, sizeof body, wrong, sizeof wrong);
-    uint8_t wq[DMR_DATA_MAX_BURSTS * 13]; int wn = dmrProvBuildBursts(wrong, wl, MASTER_ID, SLAVE_ID, 2, wq, DMR_DATA_MAX_BURSTS);
+    int rn = dmrProvBuildBursts(rp, rl, MASTER_ID, SLAVE_ID, 4, rq, DMR_DATA_MAX_BURSTS);
+    uint8_t wrong[DMR_PROV_PDU_MAX]; int wl = dmrProvBuildPdu(MASTER_ID, SLAVE_ID, 3, 3, 1, body, sizeof body, wrong, sizeof wrong);
+    uint8_t wq[DMR_DATA_MAX_BURSTS * 13]; int wn = dmrProvBuildBursts(wrong, wl, MASTER_ID, SLAVE_ID, 3, wq, DMR_DATA_MAX_BURSTS);
     play(wq, wn);
     dmrProvJobStatus(st, sizeof st);
     check(st[0] == 4 && st[6] == 0, "a STATUS reply for another seq is ignored");
@@ -677,7 +678,7 @@ static void testMaster(void)
     check(dmrProvJobLoad(sjob, 9) == 0, "a STATUS job is queued");
     s_txLoads = 0; dmrProvTick();
     pl = pduFromBursts(s_q, s_qn, pdu, hdr); openFrame(pdu, pl, MASTER_ID, SLAVE_ID, &seq, &txn, &reply);
-    check(s_txLoads == 1 && pdu[10] == DMR_PROV_OP_STATUS && seq == 4, "STATUS request sent under seq 4");
+    check(s_txLoads == 1 && pdu[10] == DMR_PROV_OP_STATUS && seq == 5, "STATUS request sent under seq 5");
     dmrProvJobCancel();
     check(!s_arenaHeld, "cancel releases the arena");
 }

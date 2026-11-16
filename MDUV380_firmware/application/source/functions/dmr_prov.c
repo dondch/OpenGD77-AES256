@@ -564,6 +564,7 @@ void dmrProvRxResponse(uint32_t src, uint32_t dst, uint8_t status)
 static int nextSeq(uint32_t *out)
 {
     if (s_ownSeqNext >= DMR_PROV_SEQ_LIMIT) { return 0; }
+    if (s_ownSeqNext == 0) { s_ownSeqNext = 1; }   /* a slave starts at lastSeq 0 and accepts only seq > lastSeq */
     if (s_ownSeqNext >= s_ownSeqReserved)
     {
         s_ownSeqReserved = s_ownSeqNext + DMR_PROV_SEQ_RESERVE;
