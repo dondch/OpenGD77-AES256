@@ -289,10 +289,16 @@ before running `flash.sh` / the loader.
 With the radio connected over USB (it enumerates as an OpenGD77 CPS serial port, VID:PID `1fc9:0094`):
 ```sh
 pip install -r MDUV380_firmware/tools/requirements.txt
-python3 MDUV380_firmware/tools/aes_key_store.py --key <64-hex-chars> --keyid 1 [--tx-key 1] [--port COM4]
+python3 MDUV380_firmware/tools/aes_key_tool.py --key <64-hex-chars> --keyid 1 [--tx-key 1] [--port COM4]
 ```
-`aes_key_store.py` writes the key into the OpenGD77 custom-data region (`CODEPLUG_CUSTOM_DATA_TYPE_AES_KEYS`)
-using the same CPS flash protocol the CPS uses, so it persists across reboots and firmware flashes. The
-firmware reads it lazily on the first encrypted call. `--tx-key N` selects which key id to transmit with
-(`0` = encrypted TX off); `--show` dumps the stored block. The on-radio key-entry menu is a planned
-alternative.
+`aes_key_tool.py` asks the firmware to store the key (CPS command `0x80`), which writes it into the stock key
+table in SPI flash, so it persists across reboots and firmware flashes and a stock radio reads the same slot.
+`--tx-key N` selects which key id to transmit with (`0` = encrypted TX off). The tool exits with an error when
+the radio reports that nothing was stored. Keys can also be entered on the radio under Menu > AES Keys.
+
+A channel or TX selector that points at a key slot with no key loaded does not transmit: the PTT shows
+"No AES key" and an SMS send fails with "no key". It never falls back to clear.
+
+The key table sits at SPI-flash `0xDA000`, inside OpenGD77's second DMR-ID storage area (`0xD8000` up). A
+DMR-ID database large enough to reach it overwrites the keys, so the firmware ends the database at the table;
+keep uploads below that size or re-enter the keys afterwards.

@@ -1723,20 +1723,26 @@ static void cpsHandleCommand(void)
 		case 0x80: // SUB set AES key: [2]=keyId, [3..34]=32-byte key (persistent flash store)
 			// dmrAesStoreKey writes flash (SPI_Flash_write -> osDelay), which must NOT run inside
 			// the CPS TASK_LOCK_WRITE critical section. Bracket with unlock/lock like the 'X' write.
-			TASK_UNLOCK_WRITE();
-			dmrAesStoreKey(com_requestbuffer[2], (uint8_t *)&com_requestbuffer[3]);
-			TASK_LOCK_WRITE();
-			usbComSendBuf[0] = com_requestbuffer[0];
-			hasToReply = true;
-			replyLength = 1;
+			// The reply is the command byte on success and '-' when nothing was stored.
+			{
+				TASK_UNLOCK_WRITE();
+				int stored = dmrAesStoreKey(com_requestbuffer[2], (uint8_t *)&com_requestbuffer[3]);
+				TASK_LOCK_WRITE();
+				usbComSendBuf[0] = stored ? com_requestbuffer[0] : '-';
+				hasToReply = true;
+				replyLength = 1;
+			}
 			break;
 		case 0x81: // SUB select TX key: [2]=keyId (0 = encrypted TX off) (persistent flash store)
-			TASK_UNLOCK_WRITE();
-			dmrAesSetTxKeyId(com_requestbuffer[2]);
-			TASK_LOCK_WRITE();
-			usbComSendBuf[0] = com_requestbuffer[0];
-			hasToReply = true;
-			replyLength = 1;
+			{
+				TASK_UNLOCK_WRITE();
+				// The selector lives in the custom-data chain, which a never-initialised region lacks.
+				int stored = (com_requestbuffer[2] < DMR_AES_MAX_KEYS) && dmrAesEnsureCustomDataRegion() && dmrAesSetTxKeyId(com_requestbuffer[2]);
+				TASK_LOCK_WRITE();
+				usbComSendBuf[0] = stored ? com_requestbuffer[0] : '-';
+				hasToReply = true;
+				replyLength = 1;
+			}
 			break;
 		case 0x86: // SUB load AES key into RAM only (bench): [2]=keyId, [3..34]=32-byte key
 			dmrAesSetKeyRam(com_requestbuffer[2], (uint8_t *)&com_requestbuffer[3]);
@@ -1789,6 +1795,7 @@ static void cpsHandleCommand(void)
 		case 0x82: // SUB set per-channel AES key: [2..3]=channel index (LE, 1-based), [4]=encrypt
 			{          // encrypt: 0=inherit global TX key, 1..15=AES key slot, 0xFF=force clear
 				int chIdx = com_requestbuffer[2] | (com_requestbuffer[3] << 8);
+				bool stored = false;
 				if ((chIdx >= 1) && (chIdx <= CODEPLUG_CHANNELS_MAX))
 				{
 					CodeplugChannel_t ch;
@@ -1799,11 +1806,15 @@ static void cpsHandleCommand(void)
 					// channels 1..8 because EEPROM_Write ran with interrupts disabled).
 					TASK_UNLOCK_WRITE();
 					codeplugChannelGetDataForIndex(chIdx, &ch);
-					ch.encrypt = com_requestbuffer[4];
-					codeplugChannelSaveDataForIndex(chIdx, &ch);
+					// With the optional DMR ID in use that byte is part of the ID, not a key selector.
+					if (codeplugChannelGetFlag(&ch, CHANNEL_FLAG_OPTIONAL_DMRID) == 0)
+					{
+						ch.encrypt = com_requestbuffer[4];
+						stored = codeplugChannelSaveDataForIndex(chIdx, &ch);
+					}
 					TASK_LOCK_WRITE();
 				}
-				usbComSendBuf[0] = com_requestbuffer[0];
+				usbComSendBuf[0] = stored ? com_requestbuffer[0] : '-';
 				hasToReply = true;
 				replyLength = 1;
 			}

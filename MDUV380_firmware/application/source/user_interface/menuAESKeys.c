@@ -4,7 +4,7 @@
  * Lets the user enter/replace/clear the AES key slots and pick the global TX key,
  * all without a PC. (Per-channel privacy is set in the Channel Details menu.)
  * Keys are stored in the same OpenGD77 custom-data "AESK" block
- * (SPI-flash 0x20000) the host aes_key_store.py / the CHIRP module use, so the
+ * (SPI-flash 0x20000) the host aes_key_tool.py / the CHIRP module use, so the
  * format is shared (see crypto/dmr_aes_hook.c). Key material is never displayed.
  *
  * Persistent menu state lives in CCM (.aes_ccmram) — not

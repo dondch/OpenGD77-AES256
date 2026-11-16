@@ -3,7 +3,7 @@
 
 Each codeplug channel has an `encrypt` byte that selects the TX encryption for that
 channel (the firmware resolves it at key-up, falling back to the global TX key):
-    0      = inherit the global TX key selector (set via aes_key_store.py --tx-key)
+    0      = inherit the global TX key selector (set via aes_key_tool.py --tx-key)
     1..15  = encrypt TX on this channel with that AES key slot
     0xFF   = force CLEAR (unencrypted) TX on this channel, overriding the global selector
 

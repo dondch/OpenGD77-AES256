@@ -55,8 +55,8 @@ def main():
         key = bytes.fromhex(a.key.strip())
         if len(key) != 32:
             sys.exit("key must be 64 hex chars (32 bytes), got %d bytes" % len(key))
-        if not (0 <= a.keyid <= 15):
-            sys.exit("keyid must be 0..15")
+        if not (1 <= a.keyid <= 15):
+            sys.exit("keyid must be 1..15 (0 means 'no key')")
     if (a.txkey is not None) and not (0 <= a.txkey <= 15):
         sys.exit("--tx-key must be 0..15")
 
@@ -65,17 +65,23 @@ def main():
         sys.exit("radio not found (USB 1fc9:0094). Specify --port. Is it connected and in OpenGD77 mode?")
     print("port:", port)
 
+    # The firmware answers the command byte when it stored the value and '-' when it did not.
+    failed = []
     with serial.Serial(port, 115200, timeout=0.5) as ser:
         send(ser, bytes([CMD, SUB_SHOW_CPS]))                       # show CPS screen
         if key is not None:
-            ack = send(ser, bytes([CMD, SUB_SET_AES_KEY, a.keyid]) + key)  # set key
-            print("set-key reply:", ack.hex() if ack else "(none)")
+            ack = send(ser, bytes([CMD, SUB_SET_AES_KEY, a.keyid]) + key, wait=0.5)  # set key
+            if ack[:1] != bytes([CMD]):
+                failed.append("key %d NOT written (reply %s)" % (a.keyid, ack.hex() if ack else "none"))
         if a.txkey is not None:
-            ack = send(ser, bytes([CMD, SUB_SET_TX_KEY, a.txkey]))   # select TX key
-            print("tx-key reply:", ack.hex() if ack else "(none)")
+            ack = send(ser, bytes([CMD, SUB_SET_TX_KEY, a.txkey]), wait=0.5)   # select TX key
+            if ack[:1] != bytes([CMD]):
+                failed.append("TX key NOT set (reply %s)" % (ack.hex() if ack else "none"))
         send(ser, bytes([CMD, SUB_CLOSE]))                          # close CPS
+    if failed:
+        sys.exit("FAILED: " + "; ".join(failed))
     if key is not None:
-        print("done. Key %d written; verify on the radio / by an encrypted RX test." % a.keyid)
+        print("done. Key %d written; check Menu > AES Keys on the radio." % a.keyid)
     if a.txkey is not None:
         print("done. TX key set to %d (%s)." % (a.txkey, "encrypted TX off" if a.txkey == 0 else "encrypted TX on"))
 
