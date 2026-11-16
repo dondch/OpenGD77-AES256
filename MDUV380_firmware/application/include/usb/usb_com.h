@@ -76,6 +76,8 @@ void USB_DEBUG_printf(const char *format, ...) __attribute__((format(__printf__,
  * fills *outEvent (keyboardCode_t.event bits) + *outKey, sets *outButtons to the
  * modifier buttons to report as held with it (BUTTON_SK2 or 0), and returns true. */
 bool usbKeyInjectTick(uint8_t *outEvent, char *outKey, uint32_t *outButtons);
+void usbPttInjectStart(uint8_t units100ms);   /* hold PTT for this long (capped at 5 s) */
+bool usbPttInjectActive(void);
 /* Called by keyboardReset(): forget the injected key whose press has been delivered, so
  * its release is never emitted -- as the real driver does for a physical key. */
 void usbKeyInjectReset(void);

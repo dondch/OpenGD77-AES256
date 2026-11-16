@@ -398,6 +398,25 @@ static void usbInjectJumpToBootloader(void)
 	while (1) { }   /* unreachable */
 }
 
+/* A host-timed PTT press (CPS 0x96 flags bit3), so a voice key-up can be bench-tested with no
+ * hand on the radio. Capped at 5 s: a host that dies mid-test cannot leave the radio keyed. */
+#define INJ_PTT_MAX_UNITS 50
+static uint32_t s_injPttUntil;
+static bool s_injPttDown;
+
+void usbPttInjectStart(uint8_t units100ms)
+{
+	if (units100ms > INJ_PTT_MAX_UNITS) { units100ms = INJ_PTT_MAX_UNITS; }
+	s_injPttUntil = ticksGetMillis() + (100U * units100ms);
+	s_injPttDown = (units100ms != 0);
+}
+
+bool usbPttInjectActive(void)
+{
+	if (s_injPttDown && ((int32_t)(ticksGetMillis() - s_injPttUntil) >= 0)) { s_injPttDown = false; }
+	return s_injPttDown;
+}
+
 bool usbKeyInjectTick(uint8_t *outEvent, char *outKey, uint32_t *outButtons)
 {
 	if (s_injTail == s_injHead) { return false; }   /* nothing queued */
@@ -1610,7 +1629,15 @@ static void cpsHandleCommand(void)
 			//        bit1 = hold (no release), bit2 = SK2 held for this key).
 			//        Queued here; usbKeyInjectTick() feeds it to the normal UI (DOWN then UP)
 			//        from the main loop. Pairs with the USB display mirror (fbmirror.py).
-			usbKeyInjectPush(com_requestbuffer[2], com_requestbuffer[3]);
+			//        bit3 = PTT instead of a key: [2] = how long to hold it, in 100 ms units.
+			if (com_requestbuffer[3] & 0x08)
+			{
+				usbPttInjectStart(com_requestbuffer[2]);
+			}
+			else
+			{
+				usbKeyInjectPush(com_requestbuffer[2], com_requestbuffer[3]);
+			}
 			usbComSendBuf[0] = com_requestbuffer[0];
 			hasToReply = true;
 			replyLength = 1;

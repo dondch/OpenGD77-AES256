@@ -625,6 +625,22 @@ void applicationMainTask(void)
 				buttons |= injButtons;   // SK2 reported as held with this key only (flags bit2)
 			}
 		}
+
+		// DEV: a host-timed PTT press (CPS 0x96 flags bit3), reported the way VOX reports its own.
+		{
+			static bool injPttWasDown = false;
+			bool injPttDown = usbPttInjectActive();
+
+			if (injPttDown)
+			{
+				buttons |= BUTTON_PTT;
+			}
+			if (injPttDown != injPttWasDown)
+			{
+				button_event = EVENT_BUTTON_CHANGE;
+				injPttWasDown = injPttDown;
+			}
+		}
 #endif
 
 #if defined(ENABLE_SPECTRUM)
