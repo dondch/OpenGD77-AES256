@@ -66,10 +66,12 @@ int main(void) {
            (pi.valid && pi.alg_id==DMR_ALG_AES256 && pi.key_id==3 && pi.mi==0x12345678u)
              ? "PASS" : (fails++,"FAIL"), pi.alg_id, pi.key_id, pi.mi);
 
-    /* 5) Bit-domain VOICE decrypt vs DSD-FME ground truth (real on-air capture,
-     *    KEY1 in radio/CPS order, IV 174E6042..., superframe frames vc=0,1,17). DSD-FME
-     *    (which decodes this scheme correctly) produced these enc->dec pairs;
-     *    dmr_aes_voice_frame must reproduce dec exactly. */
+    /* 5) Bit-domain VOICE decrypt vs DSD-FME ground truth (IV 174E6042..., superframe frames
+     *    vc=0,1,17). The dec column is what DSD-FME (which decodes this scheme correctly)
+     *    produced from an on-air capture. The enc column is those frames under the test key
+     *    below, produced by an independent AES-OFB (Python `cryptography`) that reproduces
+     *    DSD-FME's result on the capture itself. dmr_aes_voice_frame must reproduce dec
+     *    exactly. */
     {
         uint8_t k1[32];
         hx("8AFB6A024607F07D1E6EDEC791ABCE09806DA31CBE26DD293F297CE88AA3F2E3", k1);
