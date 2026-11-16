@@ -511,7 +511,7 @@ void dmrAesRxPI(const uint8_t *pi, int len)
             if (s_rxActive)
             {
                 s_rxInitMi = p.mi;
-                s_rxKeyId = p.key_id;  /* remember for late-entry bootstrap of a later rapid call */
+                s_rxKeyId = s_rx.key_id;  /* the slot that engaged (not the ID as signalled): for the late-entry bootstrap of a later rapid call */
                 s_rxPiSeeded = 1;      /* chip PI-LC seed: a normal call -> pure self-advance, stable */
                 s_rxIvReady = 0;     /* generate IV from the seeded MI on the next burst */
                 s_rxLastSeq = -1;

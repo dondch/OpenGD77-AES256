@@ -153,7 +153,13 @@ static int ctx_load_key(dmr_aes_ctx_t *c, uint8_t key_id) {
 int dmr_aes_rx_init(dmr_aes_ctx_t *c, const dmr_pi_t *pi) {
     memset(c,0,sizeof *c);
     c->alg_id=pi->alg_id; c->mi=pi->mi;
-    return ctx_load_key(c, pi->key_id);
+    if (ctx_load_key(c, pi->key_id) == 0) { return 0; }
+    /* A stock TYT signals ((channel[30] >> 4) << 4) + (channel[2] & 0x0F) + 1 (S219.43 0x080631a0,
+     * D219.43 the same): the key number sits in the low nibble, and the high nibble is a channel
+     * field that is 0 in some codeplugs and 0xF in others, so key 1 is heard as 0x01 or as 0xF1
+     * (issue #12). When the ID as sent is no slot of ours, the low nibble is. */
+    if ((pi->key_id >= DMR_AES_MAX_KEYS) && ((pi->key_id & 0x0F) != 0)) { return ctx_load_key(c, pi->key_id & 0x0F); }
+    return -1;
 }
 int dmr_aes_tx_init(dmr_aes_ctx_t *c, uint8_t alg_id, uint8_t key_id, uint32_t mi_seed) {
     memset(c,0,sizeof *c);

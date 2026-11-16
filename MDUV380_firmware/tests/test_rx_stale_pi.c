@@ -112,6 +112,28 @@ static void testEncryptedCallDecrypts(void)
     dmrAesRxEnd();
 }
 
+/* Issue #12: a stock TYT whose channel records carry 0xF in the high nibble of byte 30 signals
+ * key 1 as 0xF1. The key number is the low nibble. */
+static void testKeyIdWithAHighNibbleSelectsTheLowNibbleSlot(void)
+{
+    uint8_t pi[12];
+    dmrAesInit();
+    dmrAesSetKeyRam(1, KEY1);
+    piLc(0x5A11C0DEu, 0xF1, pi);
+    dmrAesRxEnd();
+    burst(1, pi);
+    check(burstDecryptsWith(2, 0x5A11C0DEu), "key ID 0xF1 decrypts with the key in slot 1");
+    dmrAesRxEnd();
+    piLc(0x0BADF00Du, 0xF2, pi);
+    burst(1, pi);
+    check(burst(2, NULL) == 0, "key ID 0xF2 with no key in slot 2 does not engage any key");
+    dmrAesRxEnd();
+    piLc(0x13572468u, 0xF0, pi);
+    burst(1, pi);
+    check(burst(2, NULL) == 0, "key ID 0xF0 names no slot");
+    dmrAesRxEnd();
+}
+
 static void testStalePiOnTheNextClearCall(void)
 {
     const int calls = 200;
@@ -204,6 +226,7 @@ static void testSameMiTwiceWithACallBetweenIsAccepted(void)
 int main(void)
 {
     testEncryptedCallDecrypts();
+    testKeyIdWithAHighNibbleSelectsTheLowNibbleSlot();
     testStalePiOnTheNextClearCall();
     testFreshPiOnTheNextCallSeeds();
     testStaleThenFreshPiOnARapidEncryptedCall();
