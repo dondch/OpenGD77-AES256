@@ -39,6 +39,10 @@ void dmrDataTriggerReboot(void);
  * and key a data call (deferred to the main loop). Called from the CPS handler. */
 void dmrDataTxLoad(const uint8_t *bursts, uint8_t count);
 
+/* 1 when a data call may key now: DMR channel, not Rx-only, TX not inhibited, inside the band
+ * limits. dmrDataTxLoad refuses silently otherwise; callers that report a result check first. */
+int  dmrDataTxAllowed(void);
+
 /* HR-C6000 TX state-machine hooks (called from the ISR): is a data call queued, and
  * fetch the next burst (1 + fills dataType/payload; 0 when the queue is drained). */
 int  dmrDataTxActive(void);

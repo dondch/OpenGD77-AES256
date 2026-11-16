@@ -126,7 +126,7 @@ void dmrSmsInit(void)
 	runtimeReset();     /* clear CCM runtime state (counters, flags) before first use */
 	s_loaded = 1;
 	dmrAesLoadKeys();   /* ensure the key store is populated for RX decrypt */
-	if (codeplugGetOpenGD77CustomData(CODEPLUG_CUSTOM_DATA_TYPE_MESSAGES, blk) &&
+	if (codeplugGetOpenGD77CustomDataBounded(CODEPLUG_CUSTOM_DATA_TYPE_MESSAGES, blk, (int)sizeof s_store) &&
 			(memcmp(s_store.magic, "MSGV", 4) == 0) && (s_store.version == 2) &&
 			(s_store.used <= DMR_SMS_STORE_DATA) && store_chain_valid())
 	{
@@ -617,15 +617,19 @@ int dmrSmsSend(const char *text, uint32_t dst, int group, uint8_t keyId)
 	if (tlen == 0) { return -1; }
 	if (tlen > DMR_SMS_TEXT_MAX) { tlen = DMR_SMS_TEXT_MAX; }
 	if (dmrDataTxActive()) { return -2; }   /* a data call is already keyed */
+	if (!dmrDataTxAllowed()) { return -6; } /* FM channel, Rx-only, TX inhibited or out of band */
 
 	/* Decide encrypt-or-clear, following the VOICE key-selection logic gated by the CHIRP
 	 * "Encrypt SMS" master switch: gate OFF -> always cleartext (even on an encrypted channel);
-	 * ON -> the per-channel encrypt byte exactly like voice (0xFF or no loaded key -> clear,
-	 * 1..15 -> that key slot, 0 -> the global TX selector). An explicit caller keyId (CPS/bench)
-	 * overrides the gate. When encrypting, the ENC ext header signals the key id to the receiver. */
+	 * ON -> the per-channel encrypt byte exactly like voice (0xFF -> clear, 1..15 -> that key
+	 * slot, 0 -> the global TX selector). An explicit caller keyId (CPS/bench) overrides the
+	 * gate. When encrypting, the ENC ext header signals the key id to the receiver.
+	 * A selected key that is not loaded refuses the send: text the user asked to encrypt never
+	 * goes out in clear. */
 	if (keyId == 0 && dmrSmsEncryptEnabled()) { keyId = smsResolveTxKeyId(); }
 	const uint8_t *key = (keyId != 0) ? dmr_aes_key_ptr(keyId) : NULL;
-	int encrypt = (key != NULL);             /* resolved to a loaded key -> encrypt; else cleartext */
+	if ((keyId != 0) && (key == NULL)) { return -3; }
+	int encrypt = (key != NULL);
 
 	uint32_t src = trxDMRID;
 

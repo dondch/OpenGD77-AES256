@@ -6,6 +6,7 @@
 #define DMR_DATA_BURST_LEN   12
 void dmrDataTxLoad(const uint8_t *bursts, uint8_t count);
 int  dmrDataTxActive(void);
+int  dmrDataTxAllowed(void);
 int  dmrDataTxNextBurst(uint8_t *dataTypeOut, uint8_t *payload12Out);
 void dmrDataTxEnd(void);
 #endif

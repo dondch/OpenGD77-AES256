@@ -57,6 +57,8 @@ static uint8_t s_q[DMR_DATA_MAX_BURSTS * 13];
 static int     s_qn = 0;
 void dmrDataTxLoad(const uint8_t *bursts, uint8_t count) { memcpy(s_q, bursts, (size_t)count * 13); s_qn = count; }
 int  dmrDataTxActive(void) { return 0; }
+static int s_txAllowed = 1;
+int  dmrDataTxAllowed(void) { return s_txAllowed; }
 int  dmrDataTxNextBurst(uint8_t *t, uint8_t *p) { (void)t; (void)p; return 0; }
 void dmrDataTxEnd(void) { }
 
@@ -238,6 +240,20 @@ static void testConfirmedPrivateEncryptedSms(void)
     check(dmrSmsCount(0) == 1 && inboxHas("Hi"), "confirmed (DPF 3) private encrypted SMS decodes");
     const dmrSmsMessage_t *m = dmrSmsGet(0, 0);
     check(m && !(m->flags & DMR_SMS_FLAG_GROUP), "stored as a private message");
+}
+
+static void testSendRefusedWithoutKeyOrTxPermission(void)
+{
+    fresh();
+    s_qn = 0;
+    check(dmrSmsSend("secret", 9, 1, 2) == -3, "a selected key that is not loaded refuses the send");
+    check(s_qn == 0, "nothing is queued for the unloaded key");
+    s_txAllowed = 0;
+    check(dmrSmsSend("secret", 9, 1, 1) == -6, "a channel that may not transmit refuses the send");
+    check(s_qn == 0, "nothing is queued when TX is not allowed");
+    s_txAllowed = 1;
+    check(dmrSmsSend("secret", 9, 1, 1) == 0 && s_qn > 0, "the same send goes out once TX is allowed");
+    dmrSmsRxTick();
 }
 
 static void testConfirmedPrivateClearSms(void)
@@ -752,6 +768,7 @@ int main(void)
     testUnconfirmedClearRoundTrip();
     testConfirmedPrivateEncryptedSms();
     testConfirmedPrivateClearSms();
+    testSendRefusedWithoutKeyOrTxPermission();
     testConfirmedPrivateRate34EncryptedSms();
     testConfirmedPrivateRate34ClearSms();
     testStockReconPrivateHello();

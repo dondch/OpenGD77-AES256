@@ -9,6 +9,8 @@
 #include "main.h"                       // HAL + CMSIS device (SysTick, __set_MSP, SYSCFG)
 #include "functions/ticks.h"           // addTimerCallback
 #include "functions/trx.h"             // trxEnableTransmission, trxTransmissionEnabled
+#include "functions/codeplug.h"        // CHANNEL_FLAG_RX_ONLY
+#include "functions/settings.h"        // currentChannelData, BIT_TX_INHIBIT, txFreqLimited
 #include "hardware/HR-C6000.h"         // HRC6000ClearIsWakingState
 #include "user_interface/menuSystem.h" // MENU_ANY
 #include <string.h>
@@ -116,11 +118,26 @@ static void dmrDataKeyTx(void)
 	addTimerCallback(dmrDataTxFinishPoll, DMR_DATA_TX_FINISH_POLL_MS, MENU_ANY, true);
 }
 
+/* A data call is a transmission like a PTT press and obeys the same gates. On an FM channel
+ * trxSetTX() would key the analog PA with no DMR state machine to end the call. */
+int dmrDataTxAllowed(void)
+{
+	if ((currentChannelData == NULL) || (trxGetMode() != RADIO_MODE_DIGITAL)) { return 0; }
+	if (codeplugChannelGetFlag(currentChannelData, CHANNEL_FLAG_RX_ONLY) != 0) { return 0; }
+	if (settingsIsOptionBitSet(BIT_TX_INHIBIT)) { return 0; }
+	if ((nonVolatileSettings.txFreqLimited != BAND_LIMITS_NONE) && !trxCheckFrequencyInAmateurBand(currentChannelData->txFreq)) { return 0; }
+	return 1;
+}
+
 void dmrDataTxLoad(const uint8_t *bursts, uint8_t count)
 {
-	if (s_dataTxActive)
+	if (s_dataTxActive || s_txPending)
 	{
-		return; // a data call is already keyed; ignore overlapping triggers
+		return; // a data call is keyed or about to key; a second load would overwrite its queue
+	}
+	if (!dmrDataTxAllowed())
+	{
+		return;
 	}
 	if (count > DMR_DATA_MAX_BURSTS)
 	{

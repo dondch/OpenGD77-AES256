@@ -549,6 +549,7 @@ static void resultUpdate(void)
 			case -3: why = "no key";    break;
 			case -1: why = "bad text";  break;
 			case -4: case -5: why = "too long"; break;
+			case -6: why = "TX blocked"; break;
 		}
 		displayPrintCentered(44, "Send failed", FONT_SIZE_3);
 		snprintf(buf, sizeof buf, "%s (ret %d)", why, s_msg.result);
