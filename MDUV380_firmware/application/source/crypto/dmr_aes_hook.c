@@ -44,6 +44,7 @@
 #define STOCK_KEY_MIN_ID       1
 #define STOCK_KEY_MAX_ID       15          /* fork menu exposes keyId 1..15 */
 #define stockKeyEntryAddr(id)  (STOCK_KEY_TABLE_BASE + STOCK_KEY_ENTRY_LEN * (uint32_t)(id))
+_Static_assert(stockKeyEntryAddr(STOCK_KEY_MIN_ID) == DMR_AES_KEY_TABLE_FLASH_START, "the DMR-ID database clamp must match the key table");
 
 /* Fixed GLOBAL wrap constants (identical on every radio; NOT device/UID-derived).
  * These are const -> .rodata (flash); do NOT place them in .aes_ccmram, which the

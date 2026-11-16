@@ -43,6 +43,7 @@
 #include "functions/trx.h"
 #include "functions/rxPowerSaving.h"
 #include "functions/dmr_sms.h"
+#include "crypto/dmr_aes_hook.h"
 #if defined(PLATFORM_MD9600) || defined(PLATFORM_MD380) || defined(PLATFORM_MDUV380) || defined(PLATFORM_RT84_DM1701) || defined(PLATFORM_MD2017)
 #include "interfaces/batteryAndPowerManagement.h"
 #include "hardware/radioHardwareInterface.h"
@@ -1179,6 +1180,18 @@ void dmrIDCacheInit(void)
 
 	// Size of number of complete DMR ID records for the first storage location
 	dmrIdDataArea_1_Size = (dmrIDsCache.contactLength * ((0x40000 - DMRID_HEADER_LENGTH) / dmrIDsCache.contactLength));
+
+	// The AES key table sits inside the second storage location. Records from there on are either
+	// key material or were overwritten by it, so the database ends at the table.
+	if ((dmrIDDatabaseMemoryLocation2 == DMRID_MEMORY_LOCATION_2) && (DMR_AES_KEY_TABLE_FLASH_START > DMRID_MEMORY_LOCATION_2))
+	{
+		uint32_t maxEntries = (dmrIdDataArea_1_Size + (DMR_AES_KEY_TABLE_FLASH_START - DMRID_MEMORY_LOCATION_2)) / dmrIDsCache.contactLength;
+
+		if (dmrIDsCache.entries > maxEntries)
+		{
+			dmrIDsCache.entries = maxEntries;
+		}
+	}
 
 	if (dmrIDsCache.entries > 0)
 	{

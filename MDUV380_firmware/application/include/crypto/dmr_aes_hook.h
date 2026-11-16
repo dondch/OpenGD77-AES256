@@ -3,6 +3,9 @@
 #ifndef DMR_AES_HOOK_H
 #define DMR_AES_HOOK_H
 #include <stdint.h>
+/* First SPI-flash byte of the key table's used entries (keyId 1). It lies inside OpenGD77's
+ * second DMR-ID storage area (0xD8000 up), so the ID database must end here. */
+#define DMR_AES_KEY_TABLE_FLASH_START 0xDA000u
 void dmrAesInit(void);   /* zero AES state at boot (.ccmram is not startup-initialized) */
 void dmrAesSetKeyRam(uint8_t keyId, const uint8_t *key32); /* RAM-only key load (bench) */
 void dmrAesLoadKeys(void);
