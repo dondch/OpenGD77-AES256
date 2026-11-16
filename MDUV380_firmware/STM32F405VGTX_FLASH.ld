@@ -192,6 +192,10 @@ SECTIONS
      * ambebuffer_* addresses; it does not, it uses the pointers passed in r1.)
      * KEEP() so --gc-sections doesn't discard them (they're only referenced by name). */
     KEEP(*(.aes_ccmram))
+    /* Named here so it lands in CCM and is counted by the size report; as an orphan section
+     * the linker placed it wherever it liked. */
+    *(.ccm_noinit)
+    *(.ccm_noinit*)
 
     . = ALIGN(4);
     _eccmram = .;       /* create a global symbol at ccmram end */
