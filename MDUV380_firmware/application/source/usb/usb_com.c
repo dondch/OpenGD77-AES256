@@ -1732,7 +1732,7 @@ static void cpsHandleCommand(void)
 				hasToReply = true;
 				replyLength = 1;
 			}
-			break;
+			return; // bypass the trailing generic '-' reply
 		case 0x81: // SUB select TX key: [2]=keyId (0 = encrypted TX off) (persistent flash store)
 			{
 				TASK_UNLOCK_WRITE();
@@ -1743,7 +1743,7 @@ static void cpsHandleCommand(void)
 				hasToReply = true;
 				replyLength = 1;
 			}
-			break;
+			return; // bypass the trailing generic '-' reply
 		case 0x86: // SUB load AES key into RAM only (bench): [2]=keyId, [3..34]=32-byte key
 			dmrAesSetKeyRam(com_requestbuffer[2], (uint8_t *)&com_requestbuffer[3]);
 			usbComSendBuf[0] = com_requestbuffer[0];
@@ -1817,8 +1817,8 @@ static void cpsHandleCommand(void)
 				usbComSendBuf[0] = stored ? com_requestbuffer[0] : '-';
 				hasToReply = true;
 				replyLength = 1;
+				return; // bypass the trailing generic '-' reply
 			}
-			break;
 		case 0x83: // SUB get per-channel AES key: [2..3]=channel index (LE) -> [cmd, encrypt, flags]
 			{          // flags bit0 = optional-DMRID flag set (encrypt byte holds the DMR ID, not a key)
 				int chIdx = com_requestbuffer[2] | (com_requestbuffer[3] << 8);
